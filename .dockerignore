@@ -1,0 +1,24 @@
+# Secrets and local runtime data
+.env
+.env.*
+data/
+*.db
+*.sqlite3
+
+# Local Python environment and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Git and editor files
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local review artifact
+review-diff.txt
