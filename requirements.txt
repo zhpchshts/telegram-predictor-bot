@@ -1,5 +1,6 @@
 aiogram==3.28.2
 fastapi==0.136.3
+httpx2>=2.0.0
 pytest==9.0.3
 python-dotenv==1.2.2
 ruff==0.15.16

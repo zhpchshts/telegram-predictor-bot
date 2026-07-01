@@ -3,14 +3,20 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 import uvicorn
 from aiogram import Bot
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.bot import create_dispatcher
 from app.config import load_settings
 from app.database import initialize_database
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TMA_DIRECTORY = PROJECT_ROOT / "tma"
 
 
 def create_app() -> FastAPI:
@@ -48,6 +54,12 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    app.mount(
+        "/tma",
+        StaticFiles(directory=TMA_DIRECTORY, html=True),
+        name="tma",
+    )
 
     return app
 
