@@ -8,7 +8,6 @@
     />
     <meta name="theme-color" content="#0f172a" />
     <title>Прогнозист</title>
-
     <link rel="stylesheet" href="./styles.css" />
     <script src="./app.js" defer></script>
   </head>
@@ -17,26 +16,19 @@
       <header class="app-header">
         <p class="eyebrow">ФУТБОЛЬНЫЙ КОНКУРС</p>
         <h1>Прогнозист</h1>
-        <p class="subtitle">Прогнозы, результаты и таблица вашего чата.</p>
+        <p id="chat-summary" class="subtitle">
+          Загружаем конкурсы этого чата…
+        </p>
       </header>
 
-      <section class="status-card" aria-live="polite">
-        <div class="status-indicator" aria-hidden="true"></div>
-        <div>
-          <h2>Готовим первый конкурс</h2>
-          <p id="app-status">
-            Здесь появятся матчи чемпионата мира, ваши прогнозы и общий рейтинг.
-          </p>
-        </div>
-      </section>
-
-      <section class="info-card">
-        <h2>Как это будет работать</h2>
-        <ol>
-          <li>Выберите счёт матча до стартового свистка.</li>
-          <li>Для плей-офф укажите, кто пройдёт дальше.</li>
-          <li>После матчей смотрите результаты и общую таблицу.</li>
-        </ol>
+      <section id="app-content" aria-live="polite">
+        <section class="status-card">
+          <div class="status-indicator" aria-hidden="true"></div>
+          <div>
+            <h2>Открываем конкурсы</h2>
+            <p id="app-status">Проверяем доступ к конкурсу…</p>
+          </div>
+        </section>
       </section>
     </main>
   </body>
