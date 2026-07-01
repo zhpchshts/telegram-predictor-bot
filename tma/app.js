@@ -2,14 +2,14 @@
 
 let telegram = window.Telegram?.WebApp || null;
 
-const TELEGRAM_INIT_DATA_QUERY_PARAM = "tgWebAppData";
-
-const statusElement = document.querySelector("#app-status");
-
 function refreshTelegramWebApp() {
   telegram = window.Telegram?.WebApp || telegram || null;
   return telegram;
 }
+
+const TELEGRAM_INIT_DATA_QUERY_PARAM = "tgWebAppData";
+
+const statusElement = document.querySelector("#app-status");
 
 function getTelegramLocationParams() {
   const hash = window.location.hash.startsWith("#")
@@ -61,27 +61,6 @@ function buildExpiredLaunchTokenMessage() {
 
 function setStatus(message) {
   statusElement.textContent = message;
-}
-
-function initializeTelegramWebApp() {
-  const currentTelegram = refreshTelegramWebApp();
-
-  if (!currentTelegram) {
-    return;
-  }
-
-  currentTelegram.ready();
-  currentTelegram.expand();
-
-  const updateViewportHeight = () => {
-    document.documentElement.style.setProperty(
-      "--tg-viewport-height",
-      `${currentTelegram.viewportHeight}px`,
-    );
-  };
-
-  updateViewportHeight();
-  currentTelegram.onEvent?.("viewportChanged", updateViewportHeight);
 }
 
 async function apiRequest(path, options = {}) {
@@ -146,7 +125,6 @@ function handleError(error) {
 }
 
 async function initialize() {
-  initializeTelegramWebApp();
   setStatus("Проверяем доступ к конкурсу...");
 
   try {
