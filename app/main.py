@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import uvicorn
 from aiogram import Bot
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.bot import create_dispatcher
 from app.config import load_settings
 from app.database import initialize_database
-
+from app.tma_api import router as tma_api_router
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TMA_DIRECTORY = PROJECT_ROOT / "tma"
@@ -26,7 +26,7 @@ def create_app() -> FastAPI:
         initialize_database(settings.database_path)
 
         bot = Bot(token=settings.bot_token)
-        dispatcher = create_dispatcher()
+        dispatcher = create_dispatcher(settings)
 
         polling_task = asyncio.create_task(
             dispatcher.start_polling(
@@ -50,6 +50,19 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    app.include_router(tma_api_router)
+
+    @app.middleware("http")
+    async def disable_tma_cache(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        response = await call_next(request)
+
+        if request.url.path == "/tma" or request.url.path.startswith("/tma/"):
+            response.headers["Cache-Control"] = "no-store"
+
+        return response
 
     @app.get("/health")
     async def health() -> dict[str, str]:

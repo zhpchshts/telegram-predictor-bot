@@ -30,6 +30,7 @@ def _parse_admin_user_ids(raw_value: str | None) -> frozenset[int]:
 @dataclass(frozen=True, slots=True)
 class Settings:
     bot_token: str
+    bot_username: str
     database_path: Path
     public_base_url: str | None
     admin_user_ids: frozenset[int]
@@ -39,7 +40,9 @@ def load_settings() -> Settings:
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     if not bot_token:
         raise RuntimeError("BOT_TOKEN is required.")
-
+    bot_username = os.getenv("BOT_USERNAME", "").strip().removeprefix("@")
+    if not bot_username:
+        raise RuntimeError("BOT_USERNAME is required.")
     database_path_value = os.getenv("DATABASE_PATH", "").strip()
     database_path = (
         Path(database_path_value).expanduser()
@@ -51,6 +54,7 @@ def load_settings() -> Settings:
 
     return Settings(
         bot_token=bot_token,
+        bot_username=bot_username,
         database_path=database_path,
         public_base_url=public_base_url,
         admin_user_ids=_parse_admin_user_ids(os.getenv("ADMIN_USER_IDS")),
