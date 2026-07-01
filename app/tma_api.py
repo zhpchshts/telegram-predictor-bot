@@ -5,8 +5,8 @@ from typing import Annotated
 from fastapi import APIRouter, Header, HTTPException
 
 from app.config import load_settings
+from app.contest_service import get_active_contests
 from app.tma_context import TmaContextError, build_tma_context
-
 
 TMA_INIT_DATA_HEADER = "X-Telegram-Init-Data"
 
@@ -42,6 +42,11 @@ async def get_tma_bootstrap(
             detail=str(error),
         ) from error
 
+    active_contests = get_active_contests(
+        database_path=settings.database_path,
+        telegram_chat_id=context.chat.telegram_chat_id,
+    )
+
     return {
         "context": {
             "user": {
@@ -55,5 +60,14 @@ async def get_tma_bootstrap(
                 "type": context.chat.chat_type,
                 "title": context.chat.title,
             },
-        }
+        },
+        "active_contests": [
+            {
+                "id": contest.id,
+                "name": contest.name,
+                "slug": contest.slug,
+                "created_at": contest.created_at,
+            }
+            for contest in active_contests
+        ],
     }
