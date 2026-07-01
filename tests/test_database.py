@@ -14,7 +14,6 @@ def test_initialize_database_creates_core_tables(tmp_path: Path) -> None:
         "chats",
         "users",
         "contests",
-        "contest_admins",
         "competitions",
         "scoring_rule_sets",
         "stages",
