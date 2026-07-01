@@ -184,9 +184,7 @@ CREATE TABLE IF NOT EXISTS event_log (
 CREATE INDEX IF NOT EXISTS idx_contests_chat_id
     ON contests(chat_id);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_contests_active_chat_id
-    ON contests(chat_id)
-    WHERE is_active = 1;
+DROP INDEX IF EXISTS idx_contests_active_chat_id;
 
 CREATE INDEX IF NOT EXISTS idx_competitions_contest_id
     ON competitions(contest_id);
