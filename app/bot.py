@@ -18,18 +18,17 @@ def create_dispatcher(settings: Settings) -> Dispatcher:
     @router.message(CommandStart())
     async def handle_start(message: Message) -> None:
         await message.answer(
-            "Прогнозист готов к работе.\n\n"
+            "Клевер — футбольные конкурсы прогнозов для Telegram-чатов.\n\n"
             "Добавьте меня в групповой чат и отправьте /app, "
-            "чтобы открыть конкурс."
+            "чтобы открыть приложение."
         )
 
     @router.message(Command("help"))
     async def handle_help(message: Message) -> None:
         await message.answer(
-            "Команды:\n"
-            "/app — открыть прогнозы этого чата.\n\n"
-            "Позже здесь появятся создание конкурса, матчи, "
-            "прогнозы и таблица."
+            "Клевер открывается из нужного группового чата через /app.\n\n"
+            "Добавьте меня в чат и отправьте /app — бот пришлёт "
+            "кнопку для открытия приложения."
         )
 
     @router.message(Command("app"))
@@ -39,7 +38,7 @@ def create_dispatcher(settings: Settings) -> Dispatcher:
             ChatType.SUPERGROUP,
         }:
             await message.answer(
-                "Открой Прогнозист из нужного группового чата: "
+                "Открой Клевер из нужного группового чата: "
                 "добавь туда бота и отправь /app."
             )
             return
@@ -59,7 +58,7 @@ def create_dispatcher(settings: Settings) -> Dispatcher:
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="Открыть прогнозы",
+                        text="Открыть Клевер",
                         url=launch_url,
                     )
                 ]
@@ -67,7 +66,7 @@ def create_dispatcher(settings: Settings) -> Dispatcher:
         )
 
         await message.answer(
-            "Открой прогнозы этого чата по кнопке ниже.",
+            "Открой Клевер для этого чата по кнопке ниже.",
             reply_markup=keyboard,
         )
 

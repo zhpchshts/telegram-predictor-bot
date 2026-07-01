@@ -46,7 +46,7 @@ def create_app() -> FastAPI:
             await bot.session.close()
 
     app = FastAPI(
-        title="Telegram Predictor Bot",
+        title="Клевер",
         version="0.1.0",
         lifespan=lifespan,
     )

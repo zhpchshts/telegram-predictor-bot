@@ -39,7 +39,7 @@ function getTelegramInitData() {
 
 function buildMissingInitDataMessage() {
   return (
-    "Открой Прогнозист через кнопку /app в нужном Telegram-чате. " +
+    "Открой Клевер через кнопку /app в нужном Telegram-чате. " +
     "Прямая ссылка в браузере не содержит контекст конкурса."
   );
 }
@@ -192,7 +192,7 @@ function renderError(message) {
   chatSummaryElement.textContent = "Не удалось открыть конкурсы.";
 
   appContentElement.replaceChildren(
-    createInfoCard("Не удалось открыть Прогнозист", [message]),
+    createInfoCard("Не удалось открыть Клевер", [message]),
   );
 }
 
@@ -231,7 +231,7 @@ function handleError(error) {
   const message =
     error instanceof Error
       ? error.message
-      : "Не удалось открыть Прогнозист.";
+      : "Не удалось открыть Клевер.";
 
   if (message === "Telegram init data start_param is required.") {
     renderError(buildMissingChatContextMessage());

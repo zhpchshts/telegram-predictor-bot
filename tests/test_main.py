@@ -10,4 +10,4 @@ def test_tma_index_is_available() -> None:
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-    assert "Прогнозист" in response.text
+    assert "Клевер" in response.text
