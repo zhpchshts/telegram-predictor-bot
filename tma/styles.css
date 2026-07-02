@@ -149,6 +149,137 @@ h2 {
   font-weight: 800;
 }
 
+.contest-form-card {
+  margin-top: 14px;
+}
+
+.contest-form-card h2 {
+  margin-bottom: 6px;
+}
+
+.form-fields {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.form-field {
+  display: grid;
+  gap: 8px;
+}
+
+.form-field-label {
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.text-input {
+  width: 100%;
+  min-height: 46px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--background) 72%, var(--surface));
+  color: var(--text);
+  outline: none;
+}
+
+.text-input::placeholder {
+  color: var(--muted);
+}
+
+.text-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.form-hint,
+.form-message {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.form-message[hidden] {
+  display: none;
+}
+
+.form-message.is-error {
+  color: #f87171;
+}
+
+.form-message.is-success {
+  color: var(--success);
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.action-button {
+  min-height: 44px;
+  padding: 10px 15px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  cursor: pointer;
+  font-weight: 750;
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease,
+    background-color 0.16s ease;
+}
+
+.action-button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  outline-offset: 2px;
+}
+
+.action-button:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+.action-button:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
+.primary-action-button {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.secondary-action-button {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text);
+}
+
+.confirmation-panel {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.confirmation-panel p {
+  margin: 0;
+}
+
+.confirmation-title {
+  font-weight: 750;
+}
+
+.contest-list-card {
+  margin-bottom: 14px;
+}
+
 @media (max-width: 380px) {
   .page-shell {
     padding-right: 12px;

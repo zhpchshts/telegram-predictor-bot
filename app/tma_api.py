@@ -2,18 +2,30 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.config import load_settings
-from app.contest_service import get_active_contests
-from app.tma_context import TmaContextError, build_tma_context
+from app.contest_service import (
+    ContestCreationConflictError,
+    create_world_cup_2026_contest,
+    get_active_contests,
+)
+from app.tma_context import TmaContext, TmaContextError, build_tma_context
+
 
 TMA_INIT_DATA_HEADER = "X-Telegram-Init-Data"
+IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 
 router = APIRouter(
     prefix="/api/tma",
     tags=["tma"],
 )
+
+
+class CreateContestRequest(BaseModel):
+    name: str
 
 
 @router.get("/bootstrap")
@@ -23,24 +35,10 @@ async def get_tma_bootstrap(
         Header(alias=TMA_INIT_DATA_HEADER),
     ] = None,
 ) -> dict[str, object]:
-    if not x_telegram_init_data:
-        raise HTTPException(
-            status_code=401,
-            detail="Telegram init data is required.",
-        )
-
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
     settings = load_settings()
-
-    try:
-        context = build_tma_context(
-            init_data=x_telegram_init_data,
-            bot_token=settings.bot_token,
-        )
-    except TmaContextError as error:
-        raise HTTPException(
-            status_code=401,
-            detail=str(error),
-        ) from error
 
     active_contests = get_active_contests(
         database_path=settings.database_path,
@@ -48,26 +46,117 @@ async def get_tma_bootstrap(
     )
 
     return {
-        "context": {
-            "user": {
-                "id": context.user.telegram_user_id,
-                "first_name": context.user.first_name,
-                "last_name": context.user.last_name,
-                "username": context.user.username,
-            },
-            "chat": {
-                "id": context.chat.telegram_chat_id,
-                "type": context.chat.chat_type,
-                "title": context.chat.title,
-            },
-        },
+        "context": _serialize_context(context),
         "active_contests": [
-            {
-                "id": contest.id,
-                "name": contest.name,
-                "slug": contest.slug,
-                "created_at": contest.created_at,
-            }
-            for contest in active_contests
+            _serialize_active_contest(contest) for contest in active_contests
         ],
+    }
+
+
+@router.post("/contests")
+async def create_tma_contest(
+    payload: CreateContestRequest,
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias=IDEMPOTENCY_KEY_HEADER),
+    ] = None,
+) -> JSONResponse:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Не передан ключ идемпотентности создания конкурса.",
+        )
+
+    settings = load_settings()
+
+    try:
+        result = create_world_cup_2026_contest(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            chat_title=context.chat.title,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            contest_name=payload.name,
+            idempotency_key=idempotency_key,
+        )
+    except ContestCreationConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    response_status = (
+        status.HTTP_201_CREATED if result.was_created else status.HTTP_200_OK
+    )
+
+    return JSONResponse(
+        status_code=response_status,
+        content={
+            "contest": _serialize_active_contest(result.contest),
+            "was_created": result.was_created,
+        },
+    )
+
+
+def _get_verified_tma_context(
+    *,
+    x_telegram_init_data: str | None,
+) -> TmaContext:
+    if not x_telegram_init_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Telegram init data is required.",
+        )
+
+    settings = load_settings()
+
+    try:
+        return build_tma_context(
+            init_data=x_telegram_init_data,
+            bot_token=settings.bot_token,
+        )
+    except TmaContextError as error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(error),
+        ) from error
+
+
+def _serialize_context(context: TmaContext) -> dict[str, object]:
+    return {
+        "user": {
+            "id": context.user.telegram_user_id,
+            "first_name": context.user.first_name,
+            "last_name": context.user.last_name,
+            "username": context.user.username,
+        },
+        "chat": {
+            "id": context.chat.telegram_chat_id,
+            "type": context.chat.chat_type,
+            "title": context.chat.title,
+        },
+    }
+
+
+def _serialize_active_contest(contest) -> dict[str, object]:
+    return {
+        "id": contest.id,
+        "name": contest.name,
+        "slug": contest.slug,
+        "created_at": contest.created_at,
     }
