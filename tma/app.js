@@ -211,7 +211,7 @@ function createContestsCard(contests, onOpenContest) {
   });
   const description = createElement("p", {
     className: "subtitle",
-    text: "Выбери конкурс, чтобы добавить матчи и настроить его дальше.",
+    text: "Открой конкурс, чтобы делать прогнозы, смотреть рейтинг и управлять матчами.",
   });
   const list = createElement("ol", {
     className: "contest-list",
@@ -442,9 +442,12 @@ function createContestConfirmationCard(bootstrap, state) {
 
 function createContestDetailsCard(contest, onBack) {
   const card = createElement("section", {
-    className: "info-card contest-details-card",
+    className: "contest-overview",
   });
-  const status = createElement("p", {
+  const content = createElement("div", {
+    className: "contest-overview-content",
+  });
+  const status = createElement("span", {
     className: "contest-status",
     text: "Активный конкурс",
   });
@@ -452,21 +455,18 @@ function createContestDetailsCard(contest, onBack) {
     text: contest.name,
   });
   const description = createElement("p", {
-    className: "subtitle",
-    text: "Делайте прогнозы, следите за рейтингом и управляйте матчами.",
-  });
-  const actions = createElement("div", {
-    className: "form-actions",
+    className: "contest-overview-description",
+    text: "Прогнозы, рейтинг и управление матчами.",
   });
   const backButton = createActionButton(
-    "К списку конкурсов",
-    "secondary-action-button",
+    "← Конкурсы",
+    "secondary-action-button contest-back-button",
   );
 
   backButton.addEventListener("click", onBack);
 
-  actions.append(backButton);
-  card.append(status, heading, description, actions);
+  content.append(status, heading, description);
+  card.append(content, backButton);
   return card;
 }
 
@@ -534,16 +534,44 @@ function createLeaderboardCard(leaderboard) {
 }
 
 function createContestRulesCard() {
-  return createInfoCard(
-    "Правила",
-    [
-      "Точный счёт — 3 балла; точная разница голов — 2; верный исход — 1.",
-      "За верно выбранного победителя противостояния — ещё 1 балл.",
-      "Счёт учитывается после 90 или 120 минут. Голы серии пенальти в него не входят.",
-      "Прогноз можно изменить до начала матча.",
-    ],
-    "contest-rules-card",
+  const card = document.createElement("details");
+  const summary = document.createElement("summary");
+  const summaryContent = createElement("div", {
+    className: "contest-rules-summary-content",
+  });
+  const title = createElement("span", {
+    className: "contest-rules-title",
+    text: "Правила начисления",
+  });
+  const overview = createElement("span", {
+    className: "contest-rules-overview",
+    text: "3 — счёт · 2 — разница · 1 — исход · +1 — победитель",
+  });
+  const body = createElement("div", {
+    className: "contest-rules-body",
+  });
+
+  card.className = "contest-rules-card";
+
+  summaryContent.append(title, overview);
+  summary.append(summaryContent);
+  body.append(
+    createElement("p", {
+      text: "Точный счёт — 3 балла; точная разница голов — 2; верный исход — 1.",
+    }),
+    createElement("p", {
+      text: "За верно выбранного победителя противостояния — ещё 1 балл.",
+    }),
+    createElement("p", {
+      text: "Счёт учитывается после 90 или 120 минут. Голы серии пенальти в него не входят.",
+    }),
+    createElement("p", {
+      text: "Прогноз можно изменить до начала матча.",
+    }),
   );
+
+  card.append(summary, body);
+  return card;
 }
 
 function getActiveContestTab(tab) {
@@ -555,6 +583,9 @@ function getActiveContestTab(tab) {
 function createContestTabs(activeTab, onSelectTab) {
   const tabs = createElement("nav", {
     className: "contest-tabs",
+  });
+  const track = createElement("div", {
+    className: "contest-tabs-track",
   });
 
   tabs.setAttribute("aria-label", "Разделы конкурса");
@@ -571,9 +602,10 @@ function createContestTabs(activeTab, onSelectTab) {
       onSelectTab(tab.id);
     });
 
-    tabs.append(button);
+    track.append(button);
   }
 
+  tabs.append(track);
   return tabs;
 }
 
@@ -848,7 +880,7 @@ function createPredictionScoreSummary(predictionScore) {
 function createMatchResultSection(contest, match, state, onResultSaved) {
   const result = match.result;
   const section = createElement("div", {
-    className: "match-prediction-section",
+    className: "match-result-section",
   });
   const heading = createElement("h3", {
     className: "match-prediction-heading",
@@ -875,6 +907,18 @@ function createMatchResultSection(contest, match, state, onResultSaved) {
     return section;
   }
 
+  const disclosure = document.createElement("details");
+  const summary = document.createElement("summary");
+  const summaryTitle = createElement("span", {
+    className: "match-result-summary-title",
+    text: result
+      ? `Результат: ${result.home_score} : ${result.away_score}`
+      : "Внести результат",
+  });
+  const summaryAction = createElement("span", {
+    className: "match-result-summary-action",
+    text: result ? "Изменить" : "Открыть",
+  });
   const hint = createElement("p", {
     className: "match-prediction-hint",
     text: (
@@ -925,6 +969,9 @@ function createMatchResultSection(contest, match, state, onResultSaved) {
     "submit",
   );
 
+  disclosure.className = "match-result-disclosure";
+  disclosure.open = state.resultMatchId === match.id;
+
   homeScoreInput.id = `match-${match.id}-result-home-score`;
   homeScoreInput.name = `match-${match.id}-result-home-score`;
   homeScoreInput.type = "number";
@@ -969,7 +1016,9 @@ function createMatchResultSection(contest, match, state, onResultSaved) {
     message,
     actions,
   );
-  section.append(heading, hint, form);
+  summary.append(summaryTitle, summaryAction);
+  disclosure.append(summary, hint, form);
+  section.append(heading, disclosure);
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1333,21 +1382,30 @@ function createMatchesCard(
 
   for (const match of matches) {
     const item = createElement("li", {
-      className: "match-list-item",
+      className: `match-list-item match-list-item--${match.status}`,
+    });
+    const header = createElement("div", {
+      className: "match-card-header",
     });
     const teams = createElement("strong", {
       className: "match-teams",
       text: `${match.home_team_name} — ${match.away_team_name}`,
     });
+    const status = createElement("span", {
+      className: `match-status match-status--${match.status}`,
+      text: getMatchStatusLabel(match.status),
+    });
+    const meta = createElement("div", {
+      className: "match-card-meta",
+    });
     const startsAt = createElement("p", {
       className: "match-meta",
       text: `Начало: ${formatMatchStartsAt(match.starts_at_utc)}`,
     });
-    const status = createElement("p", {
-      className: "match-status",
-      text: getMatchStatusLabel(match.status),
-    });
-    const sections = [teams, startsAt, status];
+    const sections = [header, meta];
+
+    header.append(teams, status);
+    meta.append(startsAt);
 
     if (showPredictions) {
       sections.push(createMatchPredictionSection(contest, match));
@@ -1370,10 +1428,20 @@ function createMatchesCard(
 function createMatchFormCard(bootstrap, contest, state) {
   const draft = state.matchDraft || {};
   const card = createElement("section", {
-    className: "info-card contest-form-card",
+    className: "info-card contest-form-card match-form-card",
   });
-  const heading = createElement("h2", {
+  const disclosure = document.createElement("details");
+  const summary = document.createElement("summary");
+  const summaryContent = createElement("div", {
+    className: "match-form-summary-content",
+  });
+  const title = createElement("span", {
+    className: "match-form-title",
     text: "Добавить матч",
+  });
+  const overview = createElement("span", {
+    className: "match-form-overview",
+    text: "Укажите команды и время начала",
   });
   const description = createElement("p", {
     className: "subtitle",
@@ -1428,6 +1496,11 @@ function createMatchFormCard(bootstrap, contest, state) {
     "submit",
   );
 
+  disclosure.className = "match-form-disclosure";
+  disclosure.open = Boolean(state.matchFormMessage || state.matchDraft);
+  summaryContent.append(title, overview);
+  summary.append(summaryContent);
+
   homeTeamInput.id = "match-home-team-name";
   homeTeamInput.name = "match-home-team-name";
   homeTeamInput.type = "text";
@@ -1471,7 +1544,8 @@ function createMatchFormCard(bootstrap, contest, state) {
     message,
     actions,
   );
-  card.append(heading, description, form);
+  disclosure.append(summary, description, form);
+  card.append(disclosure);
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
