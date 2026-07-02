@@ -10,12 +10,14 @@ from app.contest_service import (
     ContestCreationConflictError,
     ContestNotFoundError,
     MatchCreationConflictError,
+    MatchResultUnavailableError,
     PredictionUnavailableError,
     create_match,
     create_world_cup_2026_contest,
     get_active_contests,
     get_contest_details,
     save_match_prediction,
+    save_match_result,
 )
 from app.database import create_connection, initialize_database
 
@@ -87,6 +89,37 @@ def save_test_prediction(
         username="evsab",
         predicted_home_score=predicted_home_score,
         predicted_away_score=predicted_away_score,
+        now_utc=now_utc,
+    )
+
+
+def save_test_result(
+    *,
+    database_path: Path,
+    contest_id: int,
+    match_id: int,
+    home_score: int = 2,
+    away_score: int = 1,
+    now_utc: datetime = datetime(
+        2026,
+        6,
+        11,
+        18,
+        0,
+        tzinfo=timezone.utc,
+    ),
+):
+    return save_match_result(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest_id,
+        match_id=match_id,
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        home_score=home_score,
+        away_score=away_score,
         now_utc=now_utc,
     )
 
@@ -853,3 +886,336 @@ def test_save_match_prediction_rejects_match_at_or_after_start(
         ).fetchone()[0]
 
     assert predictions_count == 0
+
+
+def test_save_match_result_creates_corrects_clears_scores_and_writes_events(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+
+    save_test_prediction(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        predicted_home_score=2,
+        predicted_away_score=1,
+    )
+
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO match_prediction_scores (
+                match_prediction_id,
+                scoring_rule_set_id,
+                score_type,
+                points
+            )
+            SELECT
+                match_predictions.id,
+                matches.scoring_rule_set_id,
+                'exact_score',
+                3
+            FROM match_predictions
+            JOIN matches ON matches.id = match_predictions.match_id
+            WHERE match_predictions.match_id = ?
+            """,
+            (match.id,),
+        )
+
+    first_result = save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        home_score=1,
+        away_score=0,
+    )
+    second_result = save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        home_score=2,
+        away_score=0,
+    )
+
+    assert first_result.was_created is True
+    assert first_result.result.home_score == 1
+    assert first_result.result.away_score == 0
+    assert second_result.was_created is False
+    assert second_result.result.home_score == 2
+    assert second_result.result.away_score == 0
+
+    contest_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+    )
+    match_details = contest_details.matches[0]
+
+    assert match_details.status == "finished"
+    assert match_details.result is not None
+    assert match_details.result.home_score == 2
+    assert match_details.result.away_score == 0
+    assert match_details.prediction is not None
+    assert match_details.prediction.home_score == 2
+    assert match_details.prediction.away_score == 1
+
+    with pytest.raises(
+        PredictionUnavailableError,
+        match="Прогнозы на этот матч уже закрыты",
+    ):
+        save_test_prediction(
+            database_path=database_path,
+            contest_id=contest.id,
+            match_id=match.id,
+            predicted_home_score=3,
+            predicted_away_score=1,
+        )
+
+    with create_connection(database_path) as connection:
+        saved_match = connection.execute(
+            """
+            SELECT status, home_score_regular, away_score_regular
+            FROM matches
+            WHERE id = ?
+            """,
+            (match.id,),
+        ).fetchone()
+        scores_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM match_prediction_scores
+            """
+        ).fetchone()[0]
+        events = connection.execute(
+            """
+            SELECT
+                actor_user_id,
+                event_type,
+                entity_type,
+                entity_id,
+                payload_json
+            FROM event_log
+            WHERE event_type IN (
+                'match.result_recorded',
+                'match.result_corrected'
+            )
+            ORDER BY id ASC
+            """
+        ).fetchall()
+
+    assert dict(saved_match) == {
+        "status": "finished",
+        "home_score_regular": 2,
+        "away_score_regular": 0,
+    }
+    assert scores_count == 0
+    assert [dict(event) for event in events] == [
+        {
+            "actor_user_id": 1,
+            "event_type": "match.result_recorded",
+            "entity_type": "match",
+            "entity_id": match.id,
+            "payload_json": events[0]["payload_json"],
+        },
+        {
+            "actor_user_id": 1,
+            "event_type": "match.result_corrected",
+            "entity_type": "match",
+            "entity_id": match.id,
+            "payload_json": events[1]["payload_json"],
+        },
+    ]
+    assert [json.loads(event["payload_json"]) for event in events] == [
+        {
+            "previous_result": None,
+            "result": {
+                "away_score": 0,
+                "home_score": 1,
+            },
+        },
+        {
+            "previous_result": {
+                "away_score": 0,
+                "home_score": 1,
+            },
+            "result": {
+                "away_score": 0,
+                "home_score": 2,
+            },
+        },
+    ]
+
+
+def test_save_match_result_rejects_match_before_start_without_writes(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+
+    with create_connection(database_path) as connection:
+        events_count_before = connection.execute(
+            "SELECT COUNT(*) FROM event_log"
+        ).fetchone()[0]
+
+    with pytest.raises(
+        MatchResultUnavailableError,
+        match="Результат можно внести только после начала матча",
+    ):
+        save_test_result(
+            database_path=database_path,
+            contest_id=contest.id,
+            match_id=match.id,
+            now_utc=datetime(
+                2026,
+                6,
+                11,
+                17,
+                59,
+                59,
+                tzinfo=timezone.utc,
+            ),
+        )
+
+    with create_connection(database_path) as connection:
+        saved_match = connection.execute(
+            """
+            SELECT status, home_score_regular, away_score_regular
+            FROM matches
+            WHERE id = ?
+            """,
+            (match.id,),
+        ).fetchone()
+        events_count_after = connection.execute(
+            "SELECT COUNT(*) FROM event_log"
+        ).fetchone()[0]
+
+    assert dict(saved_match) == {
+        "status": "scheduled",
+        "home_score_regular": None,
+        "away_score_regular": None,
+    }
+    assert events_count_after == events_count_before
+
+
+def test_save_match_result_rejects_cancelled_match_without_writes(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE matches
+            SET status = 'cancelled'
+            WHERE id = ?
+            """,
+            (match.id,),
+        )
+        events_count_before = connection.execute(
+            "SELECT COUNT(*) FROM event_log"
+        ).fetchone()[0]
+
+    with pytest.raises(
+        MatchResultUnavailableError,
+        match="Для отменённого матча нельзя сохранить результат",
+    ):
+        save_test_result(
+            database_path=database_path,
+            contest_id=contest.id,
+            match_id=match.id,
+        )
+
+    with create_connection(database_path) as connection:
+        saved_match = connection.execute(
+            """
+            SELECT status, home_score_regular, away_score_regular
+            FROM matches
+            WHERE id = ?
+            """,
+            (match.id,),
+        ).fetchone()
+        events_count_after = connection.execute(
+            "SELECT COUNT(*) FROM event_log"
+        ).fetchone()[0]
+
+    assert dict(saved_match) == {
+        "status": "cancelled",
+        "home_score_regular": None,
+        "away_score_regular": None,
+    }
+    assert events_count_after == events_count_before
+
+
+@pytest.mark.parametrize(
+    ("home_score", "away_score", "error_message"),
+    [
+        (-1, 0, "Результат первой команды не может быть отрицательным"),
+        (0, -1, "Результат второй команды не может быть отрицательным"),
+        (True, 0, "Результат первой команды должен быть целым числом"),
+    ],
+)
+def test_save_match_result_validates_scores_before_writes(
+    tmp_path: Path,
+    home_score: int,
+    away_score: int,
+    error_message: str,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+
+    with create_connection(database_path) as connection:
+        events_count_before = connection.execute(
+            "SELECT COUNT(*) FROM event_log"
+        ).fetchone()[0]
+
+    with pytest.raises(ValueError, match=error_message):
+        save_test_result(
+            database_path=database_path,
+            contest_id=contest.id,
+            match_id=match.id,
+            home_score=home_score,
+            away_score=away_score,
+        )
+
+    with create_connection(database_path) as connection:
+        saved_match = connection.execute(
+            """
+            SELECT status, home_score_regular, away_score_regular
+            FROM matches
+            WHERE id = ?
+            """,
+            (match.id,),
+        ).fetchone()
+        events_count_after = connection.execute(
+            "SELECT COUNT(*) FROM event_log"
+        ).fetchone()[0]
+
+    assert dict(saved_match) == {
+        "status": "scheduled",
+        "home_score_regular": None,
+        "away_score_regular": None,
+    }
+    assert events_count_after == events_count_before

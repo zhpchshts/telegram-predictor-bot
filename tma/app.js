@@ -478,6 +478,226 @@ function isMatchPredictionOpen(match) {
   );
 }
 
+function getMatchStatusLabel(status) {
+  const labels = {
+    scheduled: "Запланирован",
+    started: "Идёт",
+    finished: "Завершён",
+    cancelled: "Отменён",
+  };
+
+  return labels[status] || status;
+}
+
+function isMatchResultAvailable(match) {
+  if (match.status === "finished") {
+    return true;
+  }
+
+  if (match.status !== "scheduled" && match.status !== "started") {
+    return false;
+  }
+
+  const startsAt = new Date(match.starts_at_utc);
+  return (
+    !Number.isNaN(startsAt.getTime()) && startsAt.getTime() <= Date.now()
+  );
+}
+
+function createMatchResultSection(contest, match, state, onResultSaved) {
+  const result = match.result;
+  const section = createElement("div", {
+    className: "match-prediction-section",
+  });
+  const heading = createElement("h3", {
+    className: "match-prediction-heading",
+    text: "Результат матча",
+  });
+
+  if (match.status === "cancelled") {
+    const unavailableMessage = createElement("p", {
+      className: "match-prediction-closed",
+      text: "Матч отменён. Результат недоступен.",
+    });
+
+    section.append(heading, unavailableMessage);
+    return section;
+  }
+
+  if (!isMatchResultAvailable(match)) {
+    const unavailableMessage = createElement("p", {
+      className: "match-prediction-closed",
+      text: "Результат можно внести после начала матча.",
+    });
+
+    section.append(heading, unavailableMessage);
+    return section;
+  }
+
+  const hint = createElement("p", {
+    className: "match-prediction-hint",
+    text: "Укажите итоговый счёт по основному времени. Результат можно исправить.",
+  });
+  const form = createElement("form", {
+    className: "match-prediction-form",
+  });
+  const scoreGrid = createElement("div", {
+    className: "match-score-grid",
+  });
+  const homeScoreField = createElement("label", {
+    className: "match-score-field",
+  });
+  const homeScoreLabel = createElement("span", {
+    className: "match-score-label",
+    text: match.home_team_name,
+  });
+  const homeScoreInput = createElement("input", {
+    className: "text-input match-score-input",
+  });
+  const awayScoreField = createElement("label", {
+    className: "match-score-field",
+  });
+  const awayScoreLabel = createElement("span", {
+    className: "match-score-label",
+    text: match.away_team_name,
+  });
+  const awayScoreInput = createElement("input", {
+    className: "text-input match-score-input",
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  let submitLabel = result ? "Сохранить изменения" : "Сохранить результат";
+  const submitButton = createActionButton(
+    submitLabel,
+    "primary-action-button",
+    "submit",
+  );
+
+  homeScoreInput.id = `match-${match.id}-result-home-score`;
+  homeScoreInput.name = `match-${match.id}-result-home-score`;
+  homeScoreInput.type = "number";
+  homeScoreInput.min = "0";
+  homeScoreInput.step = "1";
+  homeScoreInput.inputMode = "numeric";
+  homeScoreInput.value = result ? String(result.home_score) : "";
+  homeScoreInput.required = true;
+
+  awayScoreInput.id = `match-${match.id}-result-away-score`;
+  awayScoreInput.name = `match-${match.id}-result-away-score`;
+  awayScoreInput.type = "number";
+  awayScoreInput.min = "0";
+  awayScoreInput.step = "1";
+  awayScoreInput.inputMode = "numeric";
+  awayScoreInput.value = result ? String(result.away_score) : "";
+  awayScoreInput.required = true;
+
+  setFormMessage(
+    message,
+    state.resultMatchId === match.id ? state.resultMessage || "" : "",
+    state.resultMatchId === match.id ? state.resultMessageType || "" : "",
+  );
+
+  homeScoreField.append(homeScoreLabel, homeScoreInput);
+  awayScoreField.append(awayScoreLabel, awayScoreInput);
+  scoreGrid.append(homeScoreField, awayScoreField);
+  actions.append(submitButton);
+  form.append(scoreGrid, message, actions);
+  section.append(heading, hint, form);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const homeScoreValue = homeScoreInput.value.trim();
+    const awayScoreValue = awayScoreInput.value.trim();
+    const homeScore = Number(homeScoreValue);
+    const awayScore = Number(awayScoreValue);
+
+    if (
+      !homeScoreValue ||
+      !Number.isSafeInteger(homeScore) ||
+      homeScore < 0
+    ) {
+      homeScoreInput.setAttribute("aria-invalid", "true");
+      setFormMessage(
+        message,
+        "Укажите неотрицательный целый счёт первой команды.",
+        "error",
+      );
+      homeScoreInput.focus();
+      return;
+    }
+
+    homeScoreInput.removeAttribute("aria-invalid");
+
+    if (
+      !awayScoreValue ||
+      !Number.isSafeInteger(awayScore) ||
+      awayScore < 0
+    ) {
+      awayScoreInput.setAttribute("aria-invalid", "true");
+      setFormMessage(
+        message,
+        "Укажите неотрицательный целый счёт второй команды.",
+        "error",
+      );
+      awayScoreInput.focus();
+      return;
+    }
+
+    awayScoreInput.removeAttribute("aria-invalid");
+    submitButton.disabled = true;
+    submitButton.textContent = "Сохраняем…";
+
+    try {
+      const resultPayload = await apiRequest(
+        `/api/tma/contests/${contest.id}/matches/${match.id}/result`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            home_score: homeScore,
+            away_score: awayScore,
+          }),
+        },
+      );
+
+      if (!resultPayload || !resultPayload.result) {
+        throw new Error(
+          "Сервер вернул некорректный ответ при сохранении результата.",
+        );
+      }
+
+      match.result = resultPayload.result;
+      match.status = "finished";
+
+      onResultSaved({
+        matchId: match.id,
+        message: resultPayload.was_created
+          ? "Результат сохранён."
+          : "Результат обновлён.",
+        type: "success",
+      });
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : "Не удалось сохранить результат.";
+
+      setFormMessage(message, errorMessage, "error");
+      submitButton.textContent = submitLabel;
+      submitButton.disabled = false;
+    }
+  });
+
+  return section;
+}
+
 function createMatchPredictionSection(contest, match) {
   const prediction = match.prediction;
   const section = createElement("div", {
@@ -661,7 +881,7 @@ function createMatchPredictionSection(contest, match) {
   return section;
 }
 
-function createMatchesCard(contest, matches) {
+function createMatchesCard(contest, matches, state, onResultSaved) {
   if (matches.length === 0) {
     return createInfoCard(
       "Матчи",
@@ -697,7 +917,7 @@ function createMatchesCard(contest, matches) {
     });
     const status = createElement("p", {
       className: "match-status",
-      text: match.status === "scheduled" ? "Запланирован" : match.status,
+      text: getMatchStatusLabel(match.status),
     });
 
     item.append(
@@ -705,6 +925,7 @@ function createMatchesCard(contest, matches) {
       startsAt,
       status,
       createMatchPredictionSection(contest, match),
+      createMatchResultSection(contest, match, state, onResultSaved),
     );
     list.append(item);
   }
@@ -997,7 +1218,14 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
     createContestDetailsCard(contest, () => {
       renderContestScreen(bootstrap);
     }),
-    createMatchesCard(contest, matches),
+    createMatchesCard(contest, matches, state, (resultState) => {
+      renderContestDetailsScreen(bootstrap, contest, {
+        ...state,
+        resultMatchId: resultState.matchId,
+        resultMessage: resultState.message,
+        resultMessageType: resultState.type,
+      });
+    }),
     createMatchFormCard(bootstrap, contest, state),
   );
 }

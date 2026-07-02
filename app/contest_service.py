@@ -40,6 +40,10 @@ class PredictionUnavailableError(ValueError):
     """Raised when a prediction can no longer be changed."""
 
 
+class MatchResultUnavailableError(ValueError):
+    """Raised when a result cannot be saved for the match."""
+
+
 @dataclass(frozen=True, slots=True)
 class ActiveContestSummary:
     id: int
@@ -61,12 +65,19 @@ class MatchPrediction:
 
 
 @dataclass(frozen=True, slots=True)
+class MatchResult:
+    home_score: int
+    away_score: int
+
+
+@dataclass(frozen=True, slots=True)
 class MatchSummary:
     id: int
     home_team_name: str
     away_team_name: str
     starts_at_utc: str
     status: str
+    result: MatchResult | None
     prediction: MatchPrediction | None
 
 
@@ -88,6 +99,12 @@ class MatchCreationResult:
 @dataclass(frozen=True, slots=True)
 class MatchPredictionSaveResult:
     prediction: MatchPrediction
+    was_created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MatchResultSaveResult:
+    result: MatchResult
     was_created: bool
 
 
@@ -137,6 +154,8 @@ def get_contest_details(
                 away_team.name AS away_team_name,
                 matches.starts_at_utc,
                 matches.status,
+                matches.home_score_regular,
+                matches.away_score_regular,
                 match_predictions.predicted_home_score,
                 match_predictions.predicted_away_score
             FROM matches
@@ -461,6 +480,147 @@ def save_match_prediction(
     )
 
 
+def save_match_result(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    match_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    home_score: int,
+    away_score: int,
+    now_utc: datetime | None = None,
+) -> MatchResultSaveResult:
+    normalized_home_score = _normalize_match_result_score(
+        home_score,
+        field_name="Результат первой команды",
+    )
+    normalized_away_score = _normalize_match_result_score(
+        away_score,
+        field_name="Результат второй команды",
+    )
+    resolved_now_utc = _resolve_now_utc(now_utc)
+
+    with database_connection(database_path) as connection:
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        match_row = _get_match_row(
+            connection,
+            contest_id=contest_id,
+            match_id=match_id,
+        )
+        if match_row is None:
+            raise MatchNotFoundError("Матч не найден.")
+
+        if str(match_row["status"]) == "cancelled":
+            raise MatchResultUnavailableError(
+                "Для отменённого матча нельзя сохранить результат."
+            )
+
+        if not _is_match_result_available(
+            match_row,
+            now_utc=resolved_now_utc,
+        ):
+            raise MatchResultUnavailableError(
+                "Результат можно внести только после начала матча."
+            )
+
+        actor_user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+        previous_result = _match_result_from_row(match_row)
+
+        connection.execute(
+            """
+            DELETE FROM match_prediction_scores
+            WHERE match_prediction_id IN (
+                SELECT id
+                FROM match_predictions
+                WHERE match_id = ?
+            )
+            """,
+            (match_id,),
+        )
+        connection.execute(
+            """
+            UPDATE matches
+            SET
+                status = 'finished',
+                home_score_regular = ?,
+                away_score_regular = ?
+            WHERE id = ?
+            """,
+            (
+                normalized_home_score,
+                normalized_away_score,
+                match_id,
+            ),
+        )
+
+        event_payload = json.dumps(
+            {
+                "previous_result": (
+                    {
+                        "away_score": previous_result.away_score,
+                        "home_score": previous_result.home_score,
+                    }
+                    if previous_result is not None
+                    else None
+                ),
+                "result": {
+                    "away_score": normalized_away_score,
+                    "home_score": normalized_home_score,
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        connection.execute(
+            """
+            INSERT INTO event_log (
+                contest_id,
+                actor_user_id,
+                event_type,
+                entity_type,
+                entity_id,
+                payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                contest_id,
+                actor_user_id,
+                (
+                    "match.result_recorded"
+                    if previous_result is None
+                    else "match.result_corrected"
+                ),
+                "match",
+                match_id,
+                event_payload,
+            ),
+        )
+
+    return MatchResultSaveResult(
+        result=MatchResult(
+            home_score=normalized_home_score,
+            away_score=normalized_away_score,
+        ),
+        was_created=previous_result is None,
+    )
+
+
 def create_world_cup_2026_contest(
     *,
     database_path: Path,
@@ -776,7 +936,9 @@ def _get_match_row(
             home_team.name AS home_team_name,
             away_team.name AS away_team_name,
             matches.starts_at_utc,
-            matches.status
+            matches.status,
+            matches.home_score_regular,
+            matches.away_score_regular
         FROM matches
         JOIN stages ON stages.id = matches.stage_id
         JOIN competitions ON competitions.id = stages.competition_id
@@ -920,7 +1082,23 @@ def _build_match_request_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _match_result_from_row(row) -> MatchResult | None:
+    if (
+        "home_score_regular" not in row.keys()
+        or "away_score_regular" not in row.keys()
+        or row["home_score_regular"] is None
+        or row["away_score_regular"] is None
+    ):
+        return None
+
+    return MatchResult(
+        home_score=int(row["home_score_regular"]),
+        away_score=int(row["away_score_regular"]),
+    )
+
+
 def _match_summary_from_row(row) -> MatchSummary:
+    result = _match_result_from_row(row)
     prediction = None
     if (
         "predicted_home_score" in row.keys()
@@ -938,11 +1116,24 @@ def _match_summary_from_row(row) -> MatchSummary:
         away_team_name=str(row["away_team_name"]),
         starts_at_utc=str(row["starts_at_utc"]),
         status=str(row["status"]),
+        result=result,
         prediction=prediction,
     )
 
 
 def _normalize_prediction_score(
+    value: int,
+    *,
+    field_name: str,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} должен быть целым числом.")
+    if value < 0:
+        raise ValueError(f"{field_name} не может быть отрицательным.")
+    return value
+
+
+def _normalize_match_result_score(
     value: int,
     *,
     field_name: str,
@@ -983,6 +1174,32 @@ def _is_prediction_open(
         raise RuntimeError("У матча сохранена дата начала без часового пояса.")
 
     return starts_at_utc.astimezone(timezone.utc) > now_utc
+
+
+def _is_match_result_available(
+    match_row,
+    *,
+    now_utc: datetime,
+) -> bool:
+    status = str(match_row["status"])
+
+    if status == "finished":
+        return True
+
+    if status not in {"scheduled", "started"}:
+        return False
+
+    try:
+        starts_at_utc = datetime.fromisoformat(
+            str(match_row["starts_at_utc"]).replace("Z", "+00:00")
+        )
+    except ValueError as error:
+        raise RuntimeError("У матча сохранена некорректная дата начала.") from error
+
+    if starts_at_utc.tzinfo is None or starts_at_utc.utcoffset() is None:
+        raise RuntimeError("У матча сохранена дата начала без часового пояса.")
+
+    return starts_at_utc.astimezone(timezone.utc) <= now_utc
 
 
 def _normalize_contest_name(value: str) -> str:
