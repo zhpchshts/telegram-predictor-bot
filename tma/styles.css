@@ -65,52 +65,13 @@ summary {
 }
 
 .app-header {
-  display: grid;
-  gap: 12px;
-  padding: 4px 4px 20px;
+  padding: 2px 2px 16px;
 }
 
-.app-brand {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-
-.app-mark {
-  display: grid;
-  flex: 0 0 auto;
-  width: 42px;
-  height: 42px;
-  place-items: center;
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
-  border-radius: 14px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 1.15rem;
-  font-weight: 900;
-  letter-spacing: -0.06em;
-}
-
-.eyebrow {
-  margin: 0 0 3px;
-  color: var(--accent);
-  font-size: 0.68rem;
-  font-weight: 800;
-  letter-spacing: 0.12em;
-}
-
-h1,
 h2,
 h3,
 p {
   margin-top: 0;
-}
-
-h1 {
-  margin-bottom: 0;
-  font-size: clamp(1.85rem, 7vw, 2.5rem);
-  letter-spacing: -0.045em;
-  line-height: 1.05;
 }
 
 h2 {
@@ -138,7 +99,7 @@ h3 {
 }
 
 .app-context {
-  padding-left: 54px;
+  color: var(--muted);
 }
 
 #app-content {
@@ -335,53 +296,36 @@ summary:focus-visible {
 }
 
 .contest-overview {
-  display: flex;
-  gap: 14px;
-  align-items: flex-start;
-  justify-content: space-between;
-  padding: 2px 2px 0;
-}
-
-.contest-overview-content {
   display: grid;
-  min-width: 0;
-  gap: 4px;
+  gap: 7px;
+  padding: 1px 2px 0;
 }
 
 .contest-overview h2 {
+  margin: 0;
   overflow-wrap: anywhere;
   font-size: 1.26rem;
   letter-spacing: -0.025em;
 }
 
-.contest-overview-description {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.88rem;
-  line-height: 1.4;
-}
-
-.contest-status {
-  display: inline-flex;
+.contest-back-link {
   width: fit-content;
-  align-items: center;
-  min-height: 22px;
-  padding: 3px 8px;
-  border: 1px solid color-mix(in srgb, var(--success) 35%, var(--border));
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--success) 10%, transparent);
-  color: var(--success);
-  font-size: 0.72rem;
-  font-weight: 800;
-  letter-spacing: 0.02em;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 700;
 }
 
-.contest-back-button {
-  flex: 0 0 auto;
-  min-height: 34px;
-  padding: 7px 10px;
-  border-radius: 10px;
-  font-size: 0.8rem;
+.contest-back-link:not(:disabled):active {
+  transform: none;
+}
+
+.contest-back-link:hover {
+  color: var(--text);
 }
 
 .contest-tabs {
@@ -504,33 +448,12 @@ summary:focus-visible {
 }
 
 .match-list-item {
-  position: relative;
   display: grid;
   gap: 9px;
-  padding: 13px 13px 13px 16px;
-  overflow: hidden;
+  padding: 13px;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--surface-subtle);
-}
-
-.match-list-item::before {
-  position: absolute;
-  top: 13px;
-  bottom: 13px;
-  left: 0;
-  width: 3px;
-  border-radius: 0 4px 4px 0;
-  background: var(--accent);
-  content: "";
-}
-
-.match-list-item--finished::before {
-  background: var(--success);
-}
-
-.match-list-item--cancelled::before {
-  background: var(--danger);
 }
 
 .match-card-header {
@@ -780,7 +703,6 @@ summary:focus-visible {
 
 .leaderboard-card {
   display: grid;
-  gap: 4px;
 }
 
 .leaderboard-list {
@@ -837,17 +759,8 @@ summary:focus-visible {
     border-radius: 16px;
   }
 
-  .contest-overview {
-    gap: 10px;
-  }
-
   .contest-overview h2 {
     font-size: 1.14rem;
-  }
-
-  .contest-back-button {
-    padding-right: 8px;
-    padding-left: 8px;
   }
 
   .contest-rules-overview {
@@ -868,18 +781,6 @@ summary:focus-visible {
 }
 
 @media (max-width: 360px) {
-  .app-context {
-    padding-left: 0;
-  }
-
-  .contest-overview {
-    display: grid;
-  }
-
-  .contest-back-button {
-    width: fit-content;
-  }
-
   .contest-rules-overview {
     max-width: 12.5rem;
   }

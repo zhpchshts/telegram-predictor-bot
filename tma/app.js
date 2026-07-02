@@ -444,29 +444,17 @@ function createContestDetailsCard(contest, onBack) {
   const card = createElement("section", {
     className: "contest-overview",
   });
-  const content = createElement("div", {
-    className: "contest-overview-content",
-  });
-  const status = createElement("span", {
-    className: "contest-status",
-    text: "Активный конкурс",
-  });
+  const backButton = createActionButton(
+    "← Все конкурсы",
+    "contest-back-link",
+  );
   const heading = createElement("h2", {
     text: contest.name,
   });
-  const description = createElement("p", {
-    className: "contest-overview-description",
-    text: "Прогнозы, рейтинг и управление матчами.",
-  });
-  const backButton = createActionButton(
-    "← Конкурсы",
-    "secondary-action-button contest-back-button",
-  );
 
   backButton.addEventListener("click", onBack);
 
-  content.append(status, heading, description);
-  card.append(content, backButton);
+  card.append(backButton, heading);
   return card;
 }
 
@@ -488,10 +476,6 @@ function createLeaderboardCard(leaderboard) {
   });
   const heading = createElement("h2", {
     text: "Рейтинг",
-  });
-  const description = createElement("p", {
-    className: "subtitle",
-    text: "При равенстве баллов участники делят место: 1, 2, 2, 4.",
   });
   const list = createElement("ul", {
     className: "leaderboard-list",
@@ -528,7 +512,7 @@ function createLeaderboardCard(leaderboard) {
     list.append(item);
   }
 
-  card.append(heading, description, list);
+  card.append(heading, list);
 
   return card;
 }
@@ -1382,7 +1366,7 @@ function createMatchesCard(
 
   for (const match of matches) {
     const item = createElement("li", {
-      className: `match-list-item match-list-item--${match.status}`,
+      className: "match-list-item",
     });
     const header = createElement("div", {
       className: "match-card-header",
