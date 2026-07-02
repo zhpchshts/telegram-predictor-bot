@@ -533,6 +533,19 @@ function createLeaderboardCard(leaderboard) {
   return card;
 }
 
+function createContestRulesCard() {
+  return createInfoCard(
+    "Правила",
+    [
+      "Точный счёт — 3 балла; точная разница голов — 2; верный исход — 1.",
+      "За верно выбранного победителя противостояния — ещё 1 балл.",
+      "Счёт учитывается после 90 или 120 минут. Голы серии пенальти в него не входят.",
+      "Прогноз можно изменить до начала матча.",
+    ],
+    "contest-rules-card",
+  );
+}
+
 function getActiveContestTab(tab) {
   return CONTEST_TABS.some((candidate) => candidate.id === tab)
     ? tab
@@ -1681,6 +1694,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
     );
   } else {
     cards.push(
+      createContestRulesCard(),
       createMatchesCard(contest, matches, state, null, {
         title: "Прогнозы",
         emptyMessages: [
