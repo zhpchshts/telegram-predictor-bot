@@ -77,6 +77,22 @@ def build_tma_headers(
     return headers
 
 
+def create_tma_contest(
+    client: TestClient,
+    *,
+    idempotency_key: str = "create-contest-1",
+    name: str = "ЧМ-2026: прогнозы",
+) -> dict[str, object]:
+    response = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key=idempotency_key),
+        json={"name": name},
+    )
+
+    assert response.status_code == 201
+    return response.json()["contest"]
+
+
 def test_bootstrap_rejects_missing_init_data(
     monkeypatch,
     tmp_path: Path,
@@ -517,3 +533,221 @@ def test_create_contest_allows_parallel_contests_in_one_chat(
         "Конкурс для друзей",
         "Основной конкурс",
     ]
+
+
+def test_get_contest_returns_details_with_empty_matches(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    response = client.get(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "contest": {
+            "id": contest["id"],
+            "name": "ЧМ-2026: прогнозы",
+            "slug": contest["slug"],
+            "created_at": contest["created_at"],
+            "matches": [],
+        }
+    }
+
+
+def test_get_contest_returns_not_found_for_contest_from_other_chat(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+
+    with create_connection(database_path) as connection:
+        other_chat_id = int(
+            connection.execute(
+                """
+                INSERT INTO chats (telegram_chat_id, title)
+                VALUES (?, ?)
+                """,
+                (-1009876543210, "Другой чат"),
+            ).lastrowid
+        )
+        contest_id = int(
+            connection.execute(
+                """
+                INSERT INTO contests (chat_id, name, slug, is_active)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    other_chat_id,
+                    "Чужой конкурс",
+                    "other-contest",
+                    1,
+                ),
+            ).lastrowid
+        )
+
+    client = TestClient(create_app())
+    response = client.get(
+        f"/api/tma/contests/{contest_id}",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Конкурс не найден."}
+
+
+def test_create_match_creates_match_and_returns_contest_details(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="create-match-1"),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2026-06-11T18:00:00Z",
+        },
+    )
+
+    assert response.status_code == 201
+    response_data = response.json()
+    assert response_data["was_created"] is True
+    assert response_data["match"] == {
+        "id": 1,
+        "home_team_name": "Аргентина",
+        "away_team_name": "Бразилия",
+        "starts_at_utc": "2026-06-11T18:00:00Z",
+        "status": "scheduled",
+    }
+
+    contest_response = client.get(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert contest_response.status_code == 200
+    assert contest_response.json()["contest"]["matches"] == [response_data["match"]]
+
+
+def test_create_match_reuses_result_for_same_idempotency_key(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+    request_data = {
+        "home_team_name": "Аргентина",
+        "away_team_name": "Бразилия",
+        "starts_at_utc": "2026-06-11T18:00:00Z",
+    }
+
+    first_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="same-match-request"),
+        json=request_data,
+    )
+    second_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="same-match-request"),
+        json=request_data,
+    )
+
+    assert first_response.status_code == 201
+    assert second_response.status_code == 200
+    assert first_response.json()["was_created"] is True
+    assert second_response.json()["was_created"] is False
+    assert second_response.json()["match"] == first_response.json()["match"]
+
+    with create_connection(database_path) as connection:
+        matches_count = connection.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+        events_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM event_log
+            WHERE event_type = 'match.created'
+            """
+        ).fetchone()[0]
+
+    assert matches_count == 1
+    assert events_count == 1
+
+
+def test_create_match_requires_idempotency_key(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2026-06-11T18:00:00Z",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "Не передан ключ идемпотентности создания матча.",
+    }
+
+
+def test_get_contest_returns_not_found_for_unknown_contest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/api/tma/contests/999",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Конкурс не найден."}

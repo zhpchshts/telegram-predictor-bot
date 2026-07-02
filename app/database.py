@@ -137,6 +137,17 @@ CREATE TABLE IF NOT EXISTS matches (
     )
 );
 
+CREATE TABLE IF NOT EXISTS match_creation_requests (
+    id INTEGER PRIMARY KEY,
+    contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+    actor_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    idempotency_key TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (contest_id, actor_user_id, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS match_predictions (
     id INTEGER PRIMARY KEY,
     match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,

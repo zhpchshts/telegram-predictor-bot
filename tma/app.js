@@ -143,12 +143,29 @@ function normalizeContestName(value) {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function createIdempotencyKey() {
-  if (window.crypto?.randomUUID) {
-    return `contest-${window.crypto.randomUUID()}`;
+function normalizeTeamName(value) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function formatMatchStartsAt(startsAtUtc) {
+  const startsAt = new Date(startsAtUtc);
+
+  if (Number.isNaN(startsAt.getTime())) {
+    return startsAtUtc;
   }
 
-  return `contest-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return new Intl.DateTimeFormat("ru-RU", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(startsAt);
+}
+
+function createIdempotencyKey(scope = "contest") {
+  if (window.crypto?.randomUUID) {
+    return `${scope}-${window.crypto.randomUUID()}`;
+  }
+
+  return `${scope}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function getUserDisplayName(user) {
@@ -169,7 +186,7 @@ function renderLoading() {
   );
 }
 
-function createContestsCard(contests) {
+function createContestsCard(contests, onOpenContest) {
   if (contests.length === 0) {
     return createInfoCard(
       "В этом чате пока нет конкурсов",
@@ -189,25 +206,30 @@ function createContestsCard(contests) {
   });
   const description = createElement("p", {
     className: "subtitle",
-    text: (
-      "Здесь отображаются все активные футбольные конкурсы этого чата. " +
-      "Открытие конкурса появится следующим шагом."
-    ),
+    text: "Выбери конкурс, чтобы добавить матчи и настроить его дальше.",
   });
-  const list = createElement("ol");
+  const list = createElement("ol", {
+    className: "contest-list",
+  });
 
   for (const contest of contests) {
-    const item = createElement("li");
-    const name = createElement("strong", {
-      text: contest.name,
+    const item = createElement("li", {
+      className: "contest-list-item",
+    });
+    const button = createActionButton(
+      contest.name,
+      "secondary-action-button contest-list-button",
+    );
+
+    button.addEventListener("click", () => {
+      void onOpenContest(contest.id);
     });
 
-    item.append(name);
+    item.append(button);
     list.append(item);
   }
 
   card.append(heading, description, list);
-
   return card;
 }
 
@@ -413,6 +435,391 @@ function createContestConfirmationCard(bootstrap, state) {
   return card;
 }
 
+function createContestDetailsCard(contest, onBack) {
+  const card = createElement("section", {
+    className: "info-card contest-details-card",
+  });
+  const status = createElement("p", {
+    className: "contest-status",
+    text: "Активный конкурс",
+  });
+  const heading = createElement("h2", {
+    text: contest.name,
+  });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: "Добавляйте матчи, чтобы участники могли делать прогнозы.",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const backButton = createActionButton(
+    "К списку конкурсов",
+    "secondary-action-button",
+  );
+
+  backButton.addEventListener("click", onBack);
+
+  actions.append(backButton);
+  card.append(status, heading, description, actions);
+  return card;
+}
+
+function createMatchesCard(matches) {
+  if (matches.length === 0) {
+    return createInfoCard(
+      "Матчи",
+      [
+        "Матчей пока нет.",
+        "Добавьте первый матч ниже. После этого участники смогут перейти к прогнозам.",
+      ],
+      "matches-card",
+    );
+  }
+
+  const card = createElement("section", {
+    className: "info-card matches-card",
+  });
+  const heading = createElement("h2", {
+    text: "Матчи",
+  });
+  const list = createElement("ol", {
+    className: "match-list",
+  });
+
+  for (const match of matches) {
+    const item = createElement("li", {
+      className: "match-list-item",
+    });
+    const teams = createElement("strong", {
+      className: "match-teams",
+      text: `${match.home_team_name} — ${match.away_team_name}`,
+    });
+    const startsAt = createElement("p", {
+      className: "match-meta",
+      text: `Начало: ${formatMatchStartsAt(match.starts_at_utc)}`,
+    });
+    const status = createElement("p", {
+      className: "match-status",
+      text: match.status === "scheduled" ? "Запланирован" : match.status,
+    });
+
+    item.append(teams, startsAt, status);
+    list.append(item);
+  }
+
+  card.append(heading, list);
+  return card;
+}
+
+function createMatchFormCard(bootstrap, contest, state) {
+  const draft = state.matchDraft || {};
+  const card = createElement("section", {
+    className: "info-card contest-form-card",
+  });
+  const heading = createElement("h2", {
+    text: "Добавить матч",
+  });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: "Любой участник этого чата может добавить матч в конкурс.",
+  });
+  const form = createElement("form", {
+    className: "form-fields",
+  });
+  const homeTeamField = createElement("label", {
+    className: "form-field",
+  });
+  const homeTeamLabel = createElement("span", {
+    className: "form-field-label",
+    text: "Первая команда",
+  });
+  const homeTeamInput = createElement("input", {
+    className: "text-input",
+  });
+  const awayTeamField = createElement("label", {
+    className: "form-field",
+  });
+  const awayTeamLabel = createElement("span", {
+    className: "form-field-label",
+    text: "Вторая команда",
+  });
+  const awayTeamInput = createElement("input", {
+    className: "text-input",
+  });
+  const startsAtField = createElement("label", {
+    className: "form-field",
+  });
+  const startsAtLabel = createElement("span", {
+    className: "form-field-label",
+    text: "Дата и время начала",
+  });
+  const startsAtInput = createElement("input", {
+    className: "text-input",
+  });
+  const hint = createElement("p", {
+    className: "form-hint",
+    text: "Время указывается в вашем часовом поясе.",
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const submitButton = createActionButton(
+    "Добавить матч",
+    "primary-action-button",
+    "submit",
+  );
+
+  homeTeamInput.id = "match-home-team-name";
+  homeTeamInput.name = "match-home-team-name";
+  homeTeamInput.type = "text";
+  homeTeamInput.maxLength = CONTEST_NAME_MAX_LENGTH;
+  homeTeamInput.autocomplete = "off";
+  homeTeamInput.placeholder = "Например: Аргентина";
+  homeTeamInput.value = draft.homeTeamName || "";
+  homeTeamInput.required = true;
+
+  awayTeamInput.id = "match-away-team-name";
+  awayTeamInput.name = "match-away-team-name";
+  awayTeamInput.type = "text";
+  awayTeamInput.maxLength = CONTEST_NAME_MAX_LENGTH;
+  awayTeamInput.autocomplete = "off";
+  awayTeamInput.placeholder = "Например: Бразилия";
+  awayTeamInput.value = draft.awayTeamName || "";
+  awayTeamInput.required = true;
+
+  startsAtInput.id = "match-starts-at";
+  startsAtInput.name = "match-starts-at";
+  startsAtInput.type = "datetime-local";
+  startsAtInput.step = "60";
+  startsAtInput.value = draft.startsAtLocal || "";
+  startsAtInput.required = true;
+
+  setFormMessage(
+    message,
+    state.matchFormMessage || "",
+    state.matchFormMessageType || "",
+  );
+
+  homeTeamField.append(homeTeamLabel, homeTeamInput);
+  awayTeamField.append(awayTeamLabel, awayTeamInput);
+  startsAtField.append(startsAtLabel, startsAtInput);
+  actions.append(submitButton);
+  form.append(
+    homeTeamField,
+    awayTeamField,
+    startsAtField,
+    hint,
+    message,
+    actions,
+  );
+  card.append(heading, description, form);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const homeTeamName = normalizeTeamName(homeTeamInput.value);
+    const awayTeamName = normalizeTeamName(awayTeamInput.value);
+    const startsAtLocal = startsAtInput.value;
+    const startsAt = new Date(startsAtLocal);
+
+    if (!homeTeamName) {
+      homeTeamInput.setAttribute("aria-invalid", "true");
+      setFormMessage(message, "Введите название первой команды.", "error");
+      homeTeamInput.focus();
+      return;
+    }
+
+    homeTeamInput.removeAttribute("aria-invalid");
+
+    if (!awayTeamName) {
+      awayTeamInput.setAttribute("aria-invalid", "true");
+      setFormMessage(message, "Введите название второй команды.", "error");
+      awayTeamInput.focus();
+      return;
+    }
+
+    awayTeamInput.removeAttribute("aria-invalid");
+
+    if (homeTeamName.toLocaleLowerCase() === awayTeamName.toLocaleLowerCase()) {
+      homeTeamInput.setAttribute("aria-invalid", "true");
+      awayTeamInput.setAttribute("aria-invalid", "true");
+      setFormMessage(
+        message,
+        "В матче должны участвовать разные команды.",
+        "error",
+      );
+      awayTeamInput.focus();
+      return;
+    }
+
+    homeTeamInput.removeAttribute("aria-invalid");
+    awayTeamInput.removeAttribute("aria-invalid");
+
+    if (!startsAtLocal || Number.isNaN(startsAt.getTime())) {
+      startsAtInput.setAttribute("aria-invalid", "true");
+      setFormMessage(
+        message,
+        "Укажите корректную дату и время начала матча.",
+        "error",
+      );
+      startsAtInput.focus();
+      return;
+    }
+
+    startsAtInput.removeAttribute("aria-invalid");
+
+    const matchDraft = {
+      homeTeamName,
+      awayTeamName,
+      startsAtLocal,
+    };
+    const idempotencyKey =
+      state.matchIdempotencyKey || createIdempotencyKey("match");
+
+    submitButton.disabled = true;
+    submitButton.textContent = "Добавляем…";
+
+    try {
+      const result = await apiRequest(
+        `/api/tma/contests/${contest.id}/matches`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            [IDEMPOTENCY_KEY_HEADER]: idempotencyKey,
+          },
+          body: JSON.stringify({
+            home_team_name: homeTeamName,
+            away_team_name: awayTeamName,
+            starts_at_utc: startsAt.toISOString(),
+          }),
+        },
+      );
+
+      if (!result || !result.match) {
+        throw new Error("Сервер вернул некорректный ответ при создании матча.");
+      }
+
+      const matchName =
+        `${result.match.home_team_name} — ${result.match.away_team_name}`;
+      const successMessage = result.was_created
+        ? `Матч «${matchName}» добавлен.`
+        : `Матч «${matchName}» уже был добавлен ранее.`;
+      const currentMatches = Array.isArray(contest.matches)
+        ? contest.matches
+        : [];
+      const updatedContest = {
+        ...contest,
+        matches: [
+          ...currentMatches.filter((match) => match.id !== result.match.id),
+          result.match,
+        ].sort((left, right) => {
+          const startsAtDifference =
+            new Date(left.starts_at_utc).getTime() -
+            new Date(right.starts_at_utc).getTime();
+
+          return startsAtDifference || left.id - right.id;
+        }),
+      };
+
+      renderContestDetailsScreen(bootstrap, updatedContest, {
+        matchFormMessage: successMessage,
+        matchFormMessageType: "success",
+      });
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Не удалось добавить матч.";
+
+      renderContestDetailsScreen(bootstrap, contest, {
+        ...state,
+        matchDraft,
+        matchIdempotencyKey: idempotencyKey,
+        matchFormMessage: errorMessage,
+        matchFormMessageType: "error",
+      });
+    }
+  });
+
+  return card;
+}
+
+function renderContestDetailsLoading(bootstrap) {
+  const { user, chat } = bootstrap.context;
+  const chatTitle = chat.title || "этого чата";
+  const userName = getUserDisplayName(user);
+
+  chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
+  appContentElement.replaceChildren(
+    createStatusCard(
+      "Открываем конкурс",
+      "Загружаем матчи и настройки конкурса…",
+    ),
+  );
+}
+
+function renderContestDetailsError(bootstrap, message) {
+  const { user, chat } = bootstrap.context;
+  const chatTitle = chat.title || "этого чата";
+  const userName = getUserDisplayName(user);
+  const card = createInfoCard("Не удалось открыть конкурс", [message]);
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const backButton = createActionButton(
+    "К списку конкурсов",
+    "secondary-action-button",
+  );
+
+  backButton.addEventListener("click", () => {
+    renderContestScreen(bootstrap);
+  });
+
+  actions.append(backButton);
+  card.append(actions);
+
+  chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
+  appContentElement.replaceChildren(card);
+}
+
+function renderContestDetailsScreen(bootstrap, contest, state = {}) {
+  const { user, chat } = bootstrap.context;
+  const chatTitle = chat.title || "этого чата";
+  const userName = getUserDisplayName(user);
+  const matches = Array.isArray(contest.matches) ? contest.matches : [];
+
+  chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
+  appContentElement.replaceChildren(
+    createContestDetailsCard(contest, () => {
+      renderContestScreen(bootstrap);
+    }),
+    createMatchesCard(matches),
+    createMatchFormCard(bootstrap, contest, state),
+  );
+}
+
+async function openContest(bootstrap, contestId, state = {}) {
+  renderContestDetailsLoading(bootstrap);
+
+  try {
+    const result = await apiRequest(`/api/tma/contests/${contestId}`);
+
+    if (!result || !result.contest) {
+      throw new Error("Сервер вернул некорректный ответ при открытии конкурса.");
+    }
+
+    renderContestDetailsScreen(bootstrap, result.contest, state);
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : "Не удалось открыть конкурс.";
+
+    renderContestDetailsError(bootstrap, errorMessage);
+  }
+}
+
 function renderContestScreen(bootstrap, state = {}) {
   const { user, chat } = bootstrap.context;
   const chatTitle = chat.title || "этого чата";
@@ -423,7 +830,9 @@ function renderContestScreen(bootstrap, state = {}) {
 
   chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
 
-  const contestCard = createContestsCard(activeContests);
+  const contestCard = createContestsCard(activeContests, (contestId) => {
+    void openContest(bootstrap, contestId);
+  });
   const creationCard = state.mode === "confirm"
     ? createContestConfirmationCard(bootstrap, state)
     : createContestFormCard(bootstrap, state);

@@ -291,3 +291,68 @@ h2 {
     border-radius: 16px;
   }
 }
+
+.contest-list {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.contest-list-item {
+  margin: 0;
+}
+
+.contest-list-button {
+  width: 100%;
+  text-align: left;
+}
+
+.contest-status {
+  margin: 0 0 8px;
+  color: var(--tg-theme-button-color, #248a3d);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.matches-card {
+  display: grid;
+  gap: 14px;
+}
+
+.match-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.match-list-item {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--tg-theme-hint-color, #d5d5d5);
+  border-radius: 12px;
+}
+
+.match-teams {
+  color: var(--tg-theme-text-color, #111111);
+  line-height: 1.35;
+}
+
+.match-meta,
+.match-status {
+  margin: 0;
+  color: var(--tg-theme-hint-color, #707579);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.form-hint {
+  margin: -4px 0 0;
+  color: var(--tg-theme-hint-color, #707579);
+  font-size: 13px;
+  line-height: 1.4;
+}

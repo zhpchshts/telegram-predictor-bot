@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -23,6 +24,14 @@ class ContestCreationConflictError(ValueError):
     """Raised when an idempotency key is reused with different request data."""
 
 
+class ContestNotFoundError(ValueError):
+    """Raised when a contest is unavailable in the current Telegram chat."""
+
+
+class MatchCreationConflictError(ValueError):
+    """Raised when an idempotency key is reused with different request data."""
+
+
 @dataclass(frozen=True, slots=True)
 class ActiveContestSummary:
     id: int
@@ -34,6 +43,30 @@ class ActiveContestSummary:
 @dataclass(frozen=True, slots=True)
 class ContestCreationResult:
     contest: ActiveContestSummary
+    was_created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MatchSummary:
+    id: int
+    home_team_name: str
+    away_team_name: str
+    starts_at_utc: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class ContestDetails:
+    id: int
+    name: str
+    slug: str
+    created_at: str
+    matches: tuple[MatchSummary, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MatchCreationResult:
+    match: MatchSummary
     was_created: bool
 
 
@@ -60,6 +93,253 @@ def get_active_contests(
         ).fetchall()
 
     return tuple(_active_contest_summary_from_row(row) for row in rows)
+
+
+def get_contest_details(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+) -> ContestDetails:
+    with database_connection(database_path) as connection:
+        contest_row = _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        match_rows = connection.execute(
+            """
+            SELECT
+                matches.id,
+                home_team.name AS home_team_name,
+                away_team.name AS away_team_name,
+                matches.starts_at_utc,
+                matches.status
+            FROM matches
+            JOIN stages ON stages.id = matches.stage_id
+            JOIN competitions ON competitions.id = stages.competition_id
+            JOIN teams AS home_team ON home_team.id = matches.home_team_id
+            JOIN teams AS away_team ON away_team.id = matches.away_team_id
+            WHERE competitions.contest_id = ?
+            ORDER BY matches.starts_at_utc ASC, matches.id ASC
+            """,
+            (contest_id,),
+        ).fetchall()
+
+    return ContestDetails(
+        id=int(contest_row["id"]),
+        name=str(contest_row["name"]),
+        slug=str(contest_row["slug"]),
+        created_at=str(contest_row["created_at"]),
+        matches=tuple(_match_summary_from_row(row) for row in match_rows),
+    )
+
+
+def create_match(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    home_team_name: str,
+    away_team_name: str,
+    starts_at_utc: str,
+    idempotency_key: str,
+) -> MatchCreationResult:
+    normalized_home_team_name = _normalize_team_name(
+        home_team_name,
+        field_name="Название первой команды",
+    )
+    normalized_away_team_name = _normalize_team_name(
+        away_team_name,
+        field_name="Название второй команды",
+    )
+    if normalized_home_team_name.casefold() == normalized_away_team_name.casefold():
+        raise ValueError("В матче должны участвовать разные команды.")
+
+    normalized_starts_at_utc = _normalize_starts_at_utc(starts_at_utc)
+    normalized_idempotency_key = _normalize_match_idempotency_key(idempotency_key)
+    request_fingerprint = _build_match_request_fingerprint(
+        home_team_name=normalized_home_team_name,
+        away_team_name=normalized_away_team_name,
+        starts_at_utc=normalized_starts_at_utc,
+    )
+
+    with database_connection(database_path) as connection:
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        actor_user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+        existing_request = connection.execute(
+            """
+            SELECT request_fingerprint, match_id
+            FROM match_creation_requests
+            WHERE contest_id = ?
+              AND actor_user_id = ?
+              AND idempotency_key = ?
+            """,
+            (contest_id, actor_user_id, normalized_idempotency_key),
+        ).fetchone()
+        if existing_request is not None:
+            if existing_request["request_fingerprint"] != request_fingerprint:
+                raise MatchCreationConflictError(
+                    "Этот запрос на создание матча уже использован с другими данными."
+                )
+
+            match_row = _get_match_row(
+                connection,
+                contest_id=contest_id,
+                match_id=int(existing_request["match_id"]),
+            )
+            if match_row is None:
+                raise RuntimeError(
+                    "Не удалось найти матч, созданный по предыдущему запросу."
+                )
+            return MatchCreationResult(
+                match=_match_summary_from_row(match_row),
+                was_created=False,
+            )
+
+        competition_row = connection.execute(
+            """
+            SELECT
+                competitions.id AS competition_id,
+                scoring_rule_sets.id AS scoring_rule_set_id
+            FROM competitions
+            JOIN scoring_rule_sets
+                ON scoring_rule_sets.competition_id = competitions.id
+            WHERE competitions.contest_id = ?
+              AND competitions.is_active = 1
+              AND scoring_rule_sets.is_active = 1
+            ORDER BY competitions.id ASC, scoring_rule_sets.version DESC
+            LIMIT 1
+            """,
+            (contest_id,),
+        ).fetchone()
+        if competition_row is None:
+            raise RuntimeError("Не удалось найти активные правила конкурса.")
+
+        stage_id, stage_name, stage_type = _get_or_create_first_stage(
+            connection,
+            competition_id=int(competition_row["competition_id"]),
+        )
+        home_team_id, home_team_was_created = _find_or_create_team(
+            connection,
+            team_name=normalized_home_team_name,
+        )
+        away_team_id, away_team_was_created = _find_or_create_team(
+            connection,
+            team_name=normalized_away_team_name,
+        )
+        match_id = int(
+            connection.execute(
+                """
+                INSERT INTO matches (
+                    stage_id,
+                    scoring_rule_set_id,
+                    home_team_id,
+                    away_team_id,
+                    starts_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    stage_id,
+                    int(competition_row["scoring_rule_set_id"]),
+                    home_team_id,
+                    away_team_id,
+                    normalized_starts_at_utc,
+                ),
+            ).lastrowid
+        )
+        event_payload = json.dumps(
+            {
+                "away_team": {
+                    "id": away_team_id,
+                    "name": normalized_away_team_name,
+                    "was_created": away_team_was_created,
+                },
+                "home_team": {
+                    "id": home_team_id,
+                    "name": normalized_home_team_name,
+                    "was_created": home_team_was_created,
+                },
+                "scoring_rule_set_id": int(competition_row["scoring_rule_set_id"]),
+                "stage": {
+                    "id": stage_id,
+                    "name": stage_name,
+                    "type": stage_type,
+                },
+                "starts_at_utc": normalized_starts_at_utc,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        connection.execute(
+            """
+            INSERT INTO event_log (
+                contest_id,
+                actor_user_id,
+                event_type,
+                entity_type,
+                entity_id,
+                payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                contest_id,
+                actor_user_id,
+                "match.created",
+                "match",
+                match_id,
+                event_payload,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO match_creation_requests (
+                contest_id,
+                actor_user_id,
+                idempotency_key,
+                request_fingerprint,
+                match_id
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                contest_id,
+                actor_user_id,
+                normalized_idempotency_key,
+                request_fingerprint,
+                match_id,
+            ),
+        )
+        match_row = _get_match_row(
+            connection,
+            contest_id=contest_id,
+            match_id=match_id,
+        )
+
+    if match_row is None:
+        raise RuntimeError("Не удалось создать матч.")
+
+    return MatchCreationResult(
+        match=_match_summary_from_row(match_row),
+        was_created=True,
+    )
 
 
 def create_world_cup_2026_contest(
@@ -340,6 +620,195 @@ def _upsert_user(
         raise RuntimeError("Не удалось определить участника конкурса.")
 
     return int(row["id"])
+
+
+def _get_active_contest_row(
+    connection,
+    *,
+    telegram_chat_id: int,
+    contest_id: int,
+):
+    row = connection.execute(
+        """
+        SELECT contests.id, contests.name, contests.slug, contests.created_at
+        FROM contests
+        JOIN chats ON chats.id = contests.chat_id
+        WHERE contests.id = ?
+          AND chats.telegram_chat_id = ?
+          AND contests.is_active = 1
+        """,
+        (contest_id, telegram_chat_id),
+    ).fetchone()
+    if row is None:
+        raise ContestNotFoundError("Конкурс не найден.")
+    return row
+
+
+def _get_match_row(
+    connection,
+    *,
+    contest_id: int,
+    match_id: int,
+):
+    return connection.execute(
+        """
+        SELECT
+            matches.id,
+            home_team.name AS home_team_name,
+            away_team.name AS away_team_name,
+            matches.starts_at_utc,
+            matches.status
+        FROM matches
+        JOIN stages ON stages.id = matches.stage_id
+        JOIN competitions ON competitions.id = stages.competition_id
+        JOIN teams AS home_team ON home_team.id = matches.home_team_id
+        JOIN teams AS away_team ON away_team.id = matches.away_team_id
+        WHERE competitions.contest_id = ?
+          AND matches.id = ?
+        """,
+        (contest_id, match_id),
+    ).fetchone()
+
+
+def _get_or_create_first_stage(
+    connection,
+    *,
+    competition_id: int,
+) -> tuple[int, str, str]:
+    row = connection.execute(
+        """
+        SELECT id, name, stage_type
+        FROM stages
+        WHERE competition_id = ?
+        ORDER BY position ASC, id ASC
+        LIMIT 1
+        """,
+        (competition_id,),
+    ).fetchone()
+    if row is not None:
+        return (
+            int(row["id"]),
+            str(row["name"]),
+            str(row["stage_type"]),
+        )
+
+    stage_id = int(
+        connection.execute(
+            """
+            INSERT INTO stages (
+                competition_id,
+                name,
+                position,
+                stage_type
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (competition_id, "Основной этап", 1, "other"),
+        ).lastrowid
+    )
+    return stage_id, "Основной этап", "other"
+
+
+def _find_or_create_team(
+    connection,
+    *,
+    team_name: str,
+) -> tuple[int, bool]:
+    normalized_team_name = team_name.casefold()
+    rows = connection.execute(
+        """
+        SELECT id, name
+        FROM teams
+        ORDER BY id ASC
+        """
+    ).fetchall()
+
+    for row in rows:
+        if str(row["name"]).casefold() == normalized_team_name:
+            return int(row["id"]), False
+
+    team_id = int(
+        connection.execute(
+            """
+            INSERT INTO teams (name)
+            VALUES (?)
+            """,
+            (team_name,),
+        ).lastrowid
+    )
+    return team_id, True
+
+
+def _normalize_team_name(
+    value: str,
+    *,
+    field_name: str,
+) -> str:
+    normalized_value = " ".join(value.split())
+    if not normalized_value:
+        raise ValueError(f"{field_name} обязательно.")
+    if len(normalized_value) > 80:
+        raise ValueError(f"{field_name} не должно быть длиннее 80 символов.")
+    return normalized_value
+
+
+def _normalize_starts_at_utc(value: str) -> str:
+    normalized_value = value.strip()
+    if not normalized_value:
+        raise ValueError("Укажите дату и время начала матча.")
+
+    try:
+        parsed_value = datetime.fromisoformat(normalized_value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("Некорректная дата и время начала матча.") from error
+
+    if parsed_value.tzinfo is None or parsed_value.utcoffset() is None:
+        raise ValueError("Дата и время начала матча должны содержать часовой пояс.")
+
+    return (
+        parsed_value.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _normalize_match_idempotency_key(value: str) -> str:
+    normalized_value = value.strip()
+    if not normalized_value:
+        raise ValueError("Не передан ключ создания матча.")
+    if len(normalized_value) > 128:
+        raise ValueError("Некорректный ключ создания матча.")
+    return normalized_value
+
+
+def _build_match_request_fingerprint(
+    *,
+    home_team_name: str,
+    away_team_name: str,
+    starts_at_utc: str,
+) -> str:
+    payload = json.dumps(
+        {
+            "away_team_name": away_team_name,
+            "home_team_name": home_team_name,
+            "starts_at_utc": starts_at_utc,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _match_summary_from_row(row) -> MatchSummary:
+    return MatchSummary(
+        id=int(row["id"]),
+        home_team_name=str(row["home_team_name"]),
+        away_team_name=str(row["away_team_name"]),
+        starts_at_utc=str(row["starts_at_utc"]),
+        status=str(row["status"]),
+    )
 
 
 def _normalize_contest_name(value: str) -> str:

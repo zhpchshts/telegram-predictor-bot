@@ -7,8 +7,12 @@ import pytest
 
 from app.contest_service import (
     ContestCreationConflictError,
+    ContestNotFoundError,
+    MatchCreationConflictError,
+    create_match,
     create_world_cup_2026_contest,
     get_active_contests,
+    get_contest_details,
 )
 from app.database import create_connection, initialize_database
 
@@ -32,6 +36,30 @@ def create_contest(
         last_name="Sabir",
         username="evsab",
         contest_name=contest_name,
+        idempotency_key=idempotency_key,
+    )
+
+
+def create_test_match(
+    *,
+    database_path: Path,
+    contest_id: int,
+    home_team_name: str = "Аргентина",
+    away_team_name: str = "Бразилия",
+    starts_at_utc: str = "2026-06-11T18:00:00Z",
+    idempotency_key: str = "create-match-1",
+):
+    return create_match(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        home_team_name=home_team_name,
+        away_team_name=away_team_name,
+        starts_at_utc=starts_at_utc,
         idempotency_key=idempotency_key,
     )
 
@@ -386,3 +414,259 @@ def test_create_world_cup_2026_contest_validates_name_before_writes(
     assert chats_count == 0
     assert users_count == 0
     assert contests_count == 0
+
+
+def test_create_match_creates_teams_stage_event_and_request(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+
+    result = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    )
+
+    assert result.was_created is True
+    assert result.match.id == 1
+    assert result.match.home_team_name == "Аргентина"
+    assert result.match.away_team_name == "Бразилия"
+    assert result.match.starts_at_utc == "2026-06-11T18:00:00Z"
+    assert result.match.status == "scheduled"
+
+    contest_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+    )
+    assert contest_details.id == contest.id
+    assert contest_details.name == "ЧМ-2026: прогнозы"
+    assert contest_details.matches == (result.match,)
+
+    with create_connection(database_path) as connection:
+        stage = connection.execute(
+            """
+            SELECT name, position, stage_type
+            FROM stages
+            """
+        ).fetchone()
+        teams = connection.execute(
+            """
+            SELECT name
+            FROM teams
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        event = connection.execute(
+            """
+            SELECT
+                contest_id,
+                actor_user_id,
+                event_type,
+                entity_type,
+                entity_id,
+                payload_json
+            FROM event_log
+            WHERE event_type = 'match.created'
+            """
+        ).fetchone()
+        request = connection.execute(
+            """
+            SELECT
+                contest_id,
+                actor_user_id,
+                idempotency_key,
+                request_fingerprint,
+                match_id
+            FROM match_creation_requests
+            """
+        ).fetchone()
+
+    assert dict(stage) == {
+        "name": "Основной этап",
+        "position": 1,
+        "stage_type": "other",
+    }
+    assert [team["name"] for team in teams] == ["Аргентина", "Бразилия"]
+    assert dict(event) == {
+        "contest_id": contest.id,
+        "actor_user_id": 1,
+        "event_type": "match.created",
+        "entity_type": "match",
+        "entity_id": result.match.id,
+        "payload_json": event["payload_json"],
+    }
+    assert json.loads(event["payload_json"]) == {
+        "away_team": {
+            "id": 2,
+            "name": "Бразилия",
+            "was_created": True,
+        },
+        "home_team": {
+            "id": 1,
+            "name": "Аргентина",
+            "was_created": True,
+        },
+        "scoring_rule_set_id": 1,
+        "stage": {
+            "id": 1,
+            "name": "Основной этап",
+            "type": "other",
+        },
+        "starts_at_utc": "2026-06-11T18:00:00Z",
+    }
+    assert dict(request) == {
+        "contest_id": contest.id,
+        "actor_user_id": 1,
+        "idempotency_key": "create-match-1",
+        "request_fingerprint": request["request_fingerprint"],
+        "match_id": result.match.id,
+    }
+    assert request["request_fingerprint"]
+
+
+def test_create_match_reuses_result_for_same_idempotency_key(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+
+    first_result = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        idempotency_key="same-request",
+    )
+    second_result = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        idempotency_key="same-request",
+    )
+
+    assert first_result.was_created is True
+    assert second_result.was_created is False
+    assert second_result.match == first_result.match
+
+    with create_connection(database_path) as connection:
+        matches_count = connection.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+        events_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM event_log
+            WHERE event_type = 'match.created'
+            """
+        ).fetchone()[0]
+        requests_count = connection.execute(
+            "SELECT COUNT(*) FROM match_creation_requests"
+        ).fetchone()[0]
+
+    assert matches_count == 1
+    assert events_count == 1
+    assert requests_count == 1
+
+
+def test_create_match_rejects_reused_key_with_other_data(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+
+    create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        idempotency_key="same-request",
+    )
+
+    with pytest.raises(
+        MatchCreationConflictError,
+        match="уже использован с другими данными",
+    ):
+        create_test_match(
+            database_path=database_path,
+            contest_id=contest.id,
+            starts_at_utc="2026-06-12T18:00:00Z",
+            idempotency_key="same-request",
+        )
+
+    with create_connection(database_path) as connection:
+        matches_count = connection.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+
+    assert matches_count == 1
+
+
+def test_get_contest_details_rejects_contest_from_other_chat(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+
+    with pytest.raises(ContestNotFoundError, match="Конкурс не найден"):
+        get_contest_details(
+            database_path=database_path,
+            telegram_chat_id=-1009876543210,
+            contest_id=contest.id,
+        )
+
+
+def test_create_match_reuses_team_regardless_of_letter_case(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+
+    first_result = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        home_team_name="Аргентина",
+        away_team_name="Бразилия",
+        idempotency_key="first-match",
+    )
+    second_result = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        home_team_name="аргентина",
+        away_team_name="Франция",
+        starts_at_utc="2026-06-12T18:00:00Z",
+        idempotency_key="second-match",
+    )
+
+    assert first_result.was_created is True
+    assert second_result.was_created is True
+
+    with create_connection(database_path) as connection:
+        teams = connection.execute(
+            """
+            SELECT id, name
+            FROM teams
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        match_rows = connection.execute(
+            """
+            SELECT id, home_team_id, away_team_id
+            FROM matches
+            ORDER BY id ASC
+            """
+        ).fetchall()
+
+    assert [dict(team) for team in teams] == [
+        {"id": 1, "name": "Аргентина"},
+        {"id": 2, "name": "Бразилия"},
+        {"id": 3, "name": "Франция"},
+    ]
+    assert [dict(match) for match in match_rows] == [
+        {
+            "id": first_result.match.id,
+            "home_team_id": 1,
+            "away_team_id": 2,
+        },
+        {
+            "id": second_result.match.id,
+            "home_team_id": 1,
+            "away_team_id": 3,
+        },
+    ]
