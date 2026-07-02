@@ -504,6 +504,235 @@ function isMatchResultAvailable(match) {
   );
 }
 
+function getTeamNameById(match, teamId) {
+  if (teamId === match.home_team_id) {
+    return match.home_team_name;
+  }
+
+  if (teamId === match.away_team_id) {
+    return match.away_team_name;
+  }
+
+  return "Не определена";
+}
+
+function getNonNegativeIntegerInputValue(input) {
+  const value = input.value.trim();
+
+  if (!value) {
+    return null;
+  }
+
+  const numberValue = Number(value);
+
+  if (!Number.isSafeInteger(numberValue) || numberValue < 0) {
+    return null;
+  }
+
+  return numberValue;
+}
+
+function getMatchScoreState(homeScoreInput, awayScoreInput) {
+  const homeScore = getNonNegativeIntegerInputValue(homeScoreInput);
+  const awayScore = getNonNegativeIntegerInputValue(awayScoreInput);
+
+  if (homeScore === null || awayScore === null) {
+    return {
+      isComplete: false,
+      isDraw: false,
+      homeScore: null,
+      awayScore: null,
+    };
+  }
+
+  return {
+    isComplete: true,
+    isDraw: homeScore === awayScore,
+    homeScore,
+    awayScore,
+  };
+}
+
+function createAdvancingTeamField(
+  match,
+  {
+    idPrefix,
+    homeScoreInput,
+    awayScoreInput,
+    selectedAdvancingTeamId = null,
+  },
+) {
+  const field = createElement("fieldset", {
+    className: "advancing-team-field",
+  });
+  const legend = createElement("legend", {
+    className: "form-field-label",
+    text: "Победитель противостояния",
+  });
+  const hint = createElement("p", {
+    className: "form-hint",
+  });
+  const options = createElement("div", {
+    className: "advancing-team-options",
+  });
+  const homeOption = createElement("label", {
+    className: "advancing-team-option",
+  });
+  const homeRadio = createElement("input");
+  const homeText = createElement("span", {
+    text: match.home_team_name,
+  });
+  const awayOption = createElement("label", {
+    className: "advancing-team-option",
+  });
+  const awayRadio = createElement("input");
+  const awayText = createElement("span", {
+    text: match.away_team_name,
+  });
+  const normalizedSelectedAdvancingTeamId =
+    Number.isSafeInteger(selectedAdvancingTeamId)
+      ? selectedAdvancingTeamId
+      : null;
+
+  homeRadio.id = `${idPrefix}-advancing-home`;
+  homeRadio.name = `${idPrefix}-advancing-team`;
+  homeRadio.type = "radio";
+  homeRadio.value = String(match.home_team_id);
+  homeRadio.checked =
+    normalizedSelectedAdvancingTeamId === match.home_team_id;
+
+  awayRadio.id = `${idPrefix}-advancing-away`;
+  awayRadio.name = `${idPrefix}-advancing-team`;
+  awayRadio.type = "radio";
+  awayRadio.value = String(match.away_team_id);
+  awayRadio.checked =
+    normalizedSelectedAdvancingTeamId === match.away_team_id;
+
+  homeOption.append(homeRadio, homeText);
+  awayOption.append(awayRadio, awayText);
+  options.append(homeOption, awayOption);
+  field.append(legend, hint, options);
+
+  let previousScoreState = getMatchScoreState(
+    homeScoreInput,
+    awayScoreInput,
+  );
+
+  function syncAdvancingTeamField(resetDrawSelection) {
+    const scoreState = getMatchScoreState(
+      homeScoreInput,
+      awayScoreInput,
+    );
+
+    if (!scoreState.isComplete) {
+      field.disabled = true;
+      hint.textContent = "Сначала укажите итоговый счёт матча.";
+    } else if (scoreState.isDraw) {
+      field.disabled = false;
+
+      if (resetDrawSelection && !previousScoreState.isDraw) {
+        homeRadio.checked = false;
+        awayRadio.checked = false;
+      }
+
+      hint.textContent =
+        "При ничьей выберите команду, победившую в серии пенальти.";
+    } else {
+      const advancingTeamId =
+        scoreState.homeScore > scoreState.awayScore
+          ? match.home_team_id
+          : match.away_team_id;
+
+      homeRadio.checked = advancingTeamId === match.home_team_id;
+      awayRadio.checked = advancingTeamId === match.away_team_id;
+      field.disabled = true;
+      hint.textContent =
+        "Победитель противостояния определён итоговым счётом.";
+    }
+
+    previousScoreState = scoreState;
+  }
+
+  syncAdvancingTeamField(false);
+
+  homeScoreInput.addEventListener("input", () => {
+    syncAdvancingTeamField(true);
+  });
+
+  awayScoreInput.addEventListener("input", () => {
+    syncAdvancingTeamField(true);
+  });
+
+  return {
+    element: field,
+    focus() {
+      homeRadio.focus();
+    },
+    getAdvancingTeamId() {
+      const selectedRadio = field.querySelector(
+        'input[name="' + homeRadio.name + '"]:checked',
+      );
+
+      return selectedRadio ? Number(selectedRadio.value) : null;
+    },
+  };
+}
+
+function getPredictionScoreTypeLabel(scoreType) {
+  const labels = {
+    exact_score: "Точный счёт",
+    goal_difference: "Разница голов",
+    outcome: "Исход матча",
+    advancing_team: "Победитель противостояния",
+  };
+
+  return labels[scoreType] || scoreType;
+}
+
+function getPointsLabel(points) {
+  const absolutePoints = Math.abs(points);
+  const lastTwoDigits = absolutePoints % 100;
+  const lastDigit = absolutePoints % 10;
+
+  if (lastTwoDigits >= 11 && lastTwoDigits <= 14) {
+    return "баллов";
+  }
+
+  if (lastDigit === 1) {
+    return "балл";
+  }
+
+  if (lastDigit >= 2 && lastDigit <= 4) {
+    return "балла";
+  }
+
+  return "баллов";
+}
+
+function createPredictionScoreSummary(predictionScore) {
+  const totalPoints = Number.isSafeInteger(predictionScore?.total_points)
+    ? predictionScore.total_points
+    : 0;
+  const awards = Array.isArray(predictionScore?.awards)
+    ? predictionScore.awards
+    : [];
+  const awardText = awards
+    .map(
+      (award) =>
+        `${getPredictionScoreTypeLabel(award.type)} — +${award.points}`,
+    )
+    .join("; ");
+  const summary = createElement("p", {
+    className: "match-prediction-score",
+    text: (
+      `Начислено: ${totalPoints} ${getPointsLabel(totalPoints)}.` +
+      (awardText ? ` ${awardText}.` : "")
+    ),
+  });
+
+  return summary;
+}
+
 function createMatchResultSection(contest, match, state, onResultSaved) {
   const result = match.result;
   const section = createElement("div", {
@@ -536,10 +765,17 @@ function createMatchResultSection(contest, match, state, onResultSaved) {
 
   const hint = createElement("p", {
     className: "match-prediction-hint",
-    text: "Укажите итоговый счёт по основному времени. Результат можно исправить.",
+    text: (
+      "Укажите итоговый счёт после 90 или 120 минут. " +
+      "Голы серии пенальти в него не входят. Результат можно исправить."
+    ),
   });
   const form = createElement("form", {
     className: "match-prediction-form",
+  });
+  const scoreHeading = createElement("p", {
+    className: "form-field-label",
+    text: "Итоговый счёт матча",
   });
   const scoreGrid = createElement("div", {
     className: "match-score-grid",
@@ -595,6 +831,15 @@ function createMatchResultSection(contest, match, state, onResultSaved) {
   awayScoreInput.value = result ? String(result.away_score) : "";
   awayScoreInput.required = true;
 
+  const advancingTeamField = createAdvancingTeamField(match, {
+    idPrefix: `match-${match.id}-result`,
+    homeScoreInput,
+    awayScoreInput,
+    selectedAdvancingTeamId: result
+      ? result.advancing_team_id
+      : null,
+  });
+
   setFormMessage(
     message,
     state.resultMatchId === match.id ? state.resultMessage || "" : "",
@@ -605,7 +850,13 @@ function createMatchResultSection(contest, match, state, onResultSaved) {
   awayScoreField.append(awayScoreLabel, awayScoreInput);
   scoreGrid.append(homeScoreField, awayScoreField);
   actions.append(submitButton);
-  form.append(scoreGrid, message, actions);
+  form.append(
+    scoreHeading,
+    scoreGrid,
+    advancingTeamField.element,
+    message,
+    actions,
+  );
   section.append(heading, hint, form);
 
   form.addEventListener("submit", async (event) => {
@@ -649,6 +900,19 @@ function createMatchResultSection(contest, match, state, onResultSaved) {
     }
 
     awayScoreInput.removeAttribute("aria-invalid");
+
+    const advancingTeamId = advancingTeamField.getAdvancingTeamId();
+
+    if (advancingTeamId === null) {
+      setFormMessage(
+        message,
+        "При ничейном счёте выберите победителя противостояния.",
+        "error",
+      );
+      advancingTeamField.focus();
+      return;
+    }
+
     submitButton.disabled = true;
     submitButton.textContent = "Сохраняем…";
 
@@ -663,6 +927,7 @@ function createMatchResultSection(contest, match, state, onResultSaved) {
           body: JSON.stringify({
             home_score: homeScore,
             away_score: awayScore,
+            advancing_team_id: advancingTeamId,
           }),
         },
       );
@@ -712,20 +977,41 @@ function createMatchPredictionSection(contest, match) {
     const closedMessage = createElement("p", {
       className: "match-prediction-closed",
       text: prediction
-        ? `Ваш прогноз: ${prediction.home_score} : ${prediction.away_score}`
+        ? (
+          `Ваш прогноз: ${prediction.home_score} : ` +
+          `${prediction.away_score}. Победитель противостояния: ` +
+          `${getTeamNameById(match, prediction.advancing_team_id)}.`
+        )
         : "Прогнозы на этот матч закрыты.",
     });
 
-    section.append(heading, closedMessage);
+    if (prediction && match.prediction_score) {
+      section.append(
+        heading,
+        closedMessage,
+        createPredictionScoreSummary(match.prediction_score),
+      );
+    } else {
+      section.append(heading, closedMessage);
+    }
+
     return section;
   }
 
   const hint = createElement("p", {
     className: "match-prediction-hint",
-    text: "Прогноз можно изменить до начала матча.",
+    text: (
+      "Укажите итоговый счёт после 90 или 120 минут. " +
+      "При ничьей выберите победителя серии пенальти. " +
+      "Прогноз можно изменить до начала матча."
+    ),
   });
   const form = createElement("form", {
     className: "match-prediction-form",
+  });
+  const scoreHeading = createElement("p", {
+    className: "form-field-label",
+    text: "Итоговый счёт матча",
   });
   const scoreGrid = createElement("div", {
     className: "match-score-grid",
@@ -783,11 +1069,26 @@ function createMatchPredictionSection(contest, match) {
   awayScoreInput.value = prediction ? String(prediction.away_score) : "";
   awayScoreInput.required = true;
 
+  const advancingTeamField = createAdvancingTeamField(match, {
+    idPrefix: `match-${match.id}-prediction`,
+    homeScoreInput,
+    awayScoreInput,
+    selectedAdvancingTeamId: prediction
+      ? prediction.advancing_team_id
+      : null,
+  });
+
   homeScoreField.append(homeScoreLabel, homeScoreInput);
   awayScoreField.append(awayScoreLabel, awayScoreInput);
   scoreGrid.append(homeScoreField, awayScoreField);
   actions.append(submitButton);
-  form.append(scoreGrid, message, actions);
+  form.append(
+    scoreHeading,
+    scoreGrid,
+    advancingTeamField.element,
+    message,
+    actions,
+  );
   section.append(heading, hint, form);
 
   form.addEventListener("submit", async (event) => {
@@ -831,6 +1132,19 @@ function createMatchPredictionSection(contest, match) {
     }
 
     awayScoreInput.removeAttribute("aria-invalid");
+
+    const advancingTeamId = advancingTeamField.getAdvancingTeamId();
+
+    if (advancingTeamId === null) {
+      setFormMessage(
+        message,
+        "При ничейном счёте выберите победителя противостояния.",
+        "error",
+      );
+      advancingTeamField.focus();
+      return;
+    }
+
     submitButton.disabled = true;
     submitButton.textContent = "Сохраняем…";
 
@@ -845,12 +1159,15 @@ function createMatchPredictionSection(contest, match) {
           body: JSON.stringify({
             predicted_home_score: homeScore,
             predicted_away_score: awayScore,
+            predicted_advancing_team_id: advancingTeamId,
           }),
         },
       );
 
       if (!result || !result.prediction) {
-        throw new Error("Сервер вернул некорректный ответ при сохранении прогноза.");
+        throw new Error(
+          "Сервер вернул некорректный ответ при сохранении прогноза.",
+        );
       }
 
       match.prediction = result.prediction;
@@ -1219,7 +1536,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
       renderContestScreen(bootstrap);
     }),
     createMatchesCard(contest, matches, state, (resultState) => {
-      renderContestDetailsScreen(bootstrap, contest, {
+      void openContest(bootstrap, contest.id, {
         ...state,
         resultMatchId: resultState.matchId,
         resultMessage: resultState.message,

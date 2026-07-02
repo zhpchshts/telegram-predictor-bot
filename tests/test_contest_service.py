@@ -76,6 +76,7 @@ def save_test_prediction(
     match_id: int,
     predicted_home_score: int = 2,
     predicted_away_score: int = 1,
+    predicted_advancing_team_id: int = 1,
     now_utc: datetime = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
 ):
     return save_match_prediction(
@@ -89,6 +90,7 @@ def save_test_prediction(
         username="evsab",
         predicted_home_score=predicted_home_score,
         predicted_away_score=predicted_away_score,
+        predicted_advancing_team_id=predicted_advancing_team_id,
         now_utc=now_utc,
     )
 
@@ -100,6 +102,7 @@ def save_test_result(
     match_id: int,
     home_score: int = 2,
     away_score: int = 1,
+    advancing_team_id: int = 1,
     now_utc: datetime = datetime(
         2026,
         6,
@@ -120,6 +123,7 @@ def save_test_result(
         username="evsab",
         home_score=home_score,
         away_score=away_score,
+        advancing_team_id=advancing_team_id,
         now_utc=now_utc,
     )
 
@@ -490,6 +494,9 @@ def test_create_match_creates_teams_stage_event_and_request(
 
     assert result.was_created is True
     assert result.match.id == 1
+    assert result.match.tie_id == 1
+    assert result.match.home_team_id == 1
+    assert result.match.away_team_id == 2
     assert result.match.home_team_name == "Аргентина"
     assert result.match.away_team_name == "Бразилия"
     assert result.match.starts_at_utc == "2026-06-11T18:00:00Z"
@@ -518,6 +525,19 @@ def test_create_match_creates_teams_stage_event_and_request(
             ORDER BY id ASC
             """
         ).fetchall()
+        tie = connection.execute(
+            """
+            SELECT
+                id,
+                stage_id,
+                scoring_rule_set_id,
+                name,
+                position,
+                is_two_legged,
+                advancing_team_id
+            FROM ties
+            """
+        ).fetchone()
         event = connection.execute(
             """
             SELECT
@@ -544,11 +564,20 @@ def test_create_match_creates_teams_stage_event_and_request(
         ).fetchone()
 
     assert dict(stage) == {
-        "name": "Основной этап",
+        "name": "Плей-офф",
         "position": 1,
-        "stage_type": "other",
+        "stage_type": "knockout",
     }
     assert [team["name"] for team in teams] == ["Аргентина", "Бразилия"]
+    assert dict(tie) == {
+        "id": result.match.tie_id,
+        "stage_id": 1,
+        "scoring_rule_set_id": 1,
+        "name": "Аргентина — Бразилия",
+        "position": 1,
+        "is_two_legged": 0,
+        "advancing_team_id": None,
+    }
     assert dict(event) == {
         "contest_id": contest.id,
         "actor_user_id": 1,
@@ -571,8 +600,14 @@ def test_create_match_creates_teams_stage_event_and_request(
         "scoring_rule_set_id": 1,
         "stage": {
             "id": 1,
-            "name": "Основной этап",
-            "type": "other",
+            "name": "Плей-офф",
+            "type": "knockout",
+        },
+        "tie": {
+            "id": 1,
+            "is_two_legged": False,
+            "name": "Аргентина — Бразилия",
+            "position": 1,
         },
         "starts_at_utc": "2026-06-11T18:00:00Z",
     }
@@ -831,6 +866,7 @@ def test_get_contest_details_returns_only_current_users_prediction(
         username="second-user",
         predicted_home_score=0,
         predicted_away_score=0,
+        predicted_advancing_team_id=2,
         now_utc=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
     )
 
@@ -853,9 +889,11 @@ def test_get_contest_details_returns_only_current_users_prediction(
     assert primary_prediction is not None
     assert primary_prediction.home_score == 2
     assert primary_prediction.away_score == 1
+    assert primary_prediction.advancing_team_id == 1
     assert second_prediction is not None
     assert second_prediction.home_score == 0
     assert second_prediction.away_score == 0
+    assert second_prediction.advancing_team_id == 2
 
 
 def test_save_match_prediction_rejects_match_at_or_after_start(
@@ -888,7 +926,7 @@ def test_save_match_prediction_rejects_match_at_or_after_start(
     assert predictions_count == 0
 
 
-def test_save_match_result_creates_corrects_clears_scores_and_writes_events(
+def test_save_match_result_creates_corrects_recalculates_scores_and_writes_events(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "predictor.db"
@@ -899,56 +937,145 @@ def test_save_match_result_creates_corrects_clears_scores_and_writes_events(
         contest_id=contest.id,
     ).match
 
-    save_test_prediction(
-        database_path=database_path,
-        contest_id=contest.id,
-        match_id=match.id,
+    def save_prediction_for_user(
+        *,
+        telegram_user_id: int,
+        predicted_home_score: int,
+        predicted_away_score: int,
+        predicted_advancing_team_id: int,
+    ) -> None:
+        save_match_prediction(
+            database_path=database_path,
+            telegram_chat_id=TELEGRAM_CHAT_ID,
+            contest_id=contest.id,
+            match_id=match.id,
+            telegram_user_id=telegram_user_id,
+            first_name=f"User {telegram_user_id}",
+            last_name=None,
+            username=f"user-{telegram_user_id}",
+            predicted_home_score=predicted_home_score,
+            predicted_away_score=predicted_away_score,
+            predicted_advancing_team_id=predicted_advancing_team_id,
+            now_utc=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        )
+
+    save_prediction_for_user(
+        telegram_user_id=123,
         predicted_home_score=2,
         predicted_away_score=1,
+        predicted_advancing_team_id=1,
     )
-
-    with create_connection(database_path) as connection:
-        connection.execute(
-            """
-            INSERT INTO match_prediction_scores (
-                match_prediction_id,
-                scoring_rule_set_id,
-                score_type,
-                points
-            )
-            SELECT
-                match_predictions.id,
-                matches.scoring_rule_set_id,
-                'exact_score',
-                3
-            FROM match_predictions
-            JOIN matches ON matches.id = match_predictions.match_id
-            WHERE match_predictions.match_id = ?
-            """,
-            (match.id,),
-        )
+    save_prediction_for_user(
+        telegram_user_id=456,
+        predicted_home_score=3,
+        predicted_away_score=2,
+        predicted_advancing_team_id=1,
+    )
+    save_prediction_for_user(
+        telegram_user_id=789,
+        predicted_home_score=1,
+        predicted_away_score=0,
+        predicted_advancing_team_id=1,
+    )
+    save_prediction_for_user(
+        telegram_user_id=101112,
+        predicted_home_score=0,
+        predicted_away_score=1,
+        predicted_advancing_team_id=2,
+    )
+    save_prediction_for_user(
+        telegram_user_id=131415,
+        predicted_home_score=0,
+        predicted_away_score=0,
+        predicted_advancing_team_id=2,
+    )
 
     first_result = save_test_result(
         database_path=database_path,
         contest_id=contest.id,
         match_id=match.id,
-        home_score=1,
-        away_score=0,
+        home_score=2,
+        away_score=1,
+        advancing_team_id=1,
     )
+
+    with create_connection(database_path) as connection:
+        first_match_scores = connection.execute(
+            """
+            SELECT
+                users.telegram_user_id,
+                match_prediction_scores.score_type,
+                match_prediction_scores.points
+            FROM match_prediction_scores
+            JOIN match_predictions
+                ON match_predictions.id =
+                    match_prediction_scores.match_prediction_id
+            JOIN users
+                ON users.id = match_predictions.user_id
+            ORDER BY users.telegram_user_id ASC
+            """
+        ).fetchall()
+        first_tie_scores = connection.execute(
+            """
+            SELECT
+                users.telegram_user_id,
+                tie_prediction_scores.points
+            FROM tie_prediction_scores
+            JOIN tie_predictions
+                ON tie_predictions.id =
+                    tie_prediction_scores.tie_prediction_id
+            JOIN users
+                ON users.id = tie_predictions.user_id
+            WHERE tie_predictions.tie_id = ?
+            ORDER BY users.telegram_user_id ASC
+            """,
+            (match.tie_id,),
+        ).fetchall()
+
+    assert first_result.was_created is True
+    assert first_result.result.home_score == 2
+    assert first_result.result.away_score == 1
+    assert first_result.result.advancing_team_id == 1
+    assert [dict(score) for score in first_match_scores] == [
+        {
+            "telegram_user_id": 123,
+            "score_type": "exact_score",
+            "points": 3,
+        },
+        {
+            "telegram_user_id": 456,
+            "score_type": "goal_difference",
+            "points": 2,
+        },
+        {
+            "telegram_user_id": 789,
+            "score_type": "goal_difference",
+            "points": 2,
+        },
+    ]
+    assert [dict(score) for score in first_tie_scores] == [
+        {
+            "telegram_user_id": 123,
+            "points": 1,
+        },
+        {
+            "telegram_user_id": 456,
+            "points": 1,
+        },
+        {
+            "telegram_user_id": 789,
+            "points": 1,
+        },
+    ]
+
     second_result = save_test_result(
         database_path=database_path,
         contest_id=contest.id,
         match_id=match.id,
-        home_score=2,
-        away_score=0,
+        home_score=1,
+        away_score=1,
+        advancing_team_id=2,
     )
-
-    assert first_result.was_created is True
-    assert first_result.result.home_score == 1
-    assert first_result.result.away_score == 0
-    assert second_result.was_created is False
-    assert second_result.result.home_score == 2
-    assert second_result.result.away_score == 0
 
     contest_details = get_contest_details(
         database_path=database_path,
@@ -958,41 +1085,57 @@ def test_save_match_result_creates_corrects_clears_scores_and_writes_events(
     )
     match_details = contest_details.matches[0]
 
-    assert match_details.status == "finished"
-    assert match_details.result is not None
-    assert match_details.result.home_score == 2
-    assert match_details.result.away_score == 0
-    assert match_details.prediction is not None
-    assert match_details.prediction.home_score == 2
-    assert match_details.prediction.away_score == 1
-
-    with pytest.raises(
-        PredictionUnavailableError,
-        match="Прогнозы на этот матч уже закрыты",
-    ):
-        save_test_prediction(
-            database_path=database_path,
-            contest_id=contest.id,
-            match_id=match.id,
-            predicted_home_score=3,
-            predicted_away_score=1,
-        )
-
     with create_connection(database_path) as connection:
         saved_match = connection.execute(
             """
-            SELECT status, home_score_regular, away_score_regular
+            SELECT
+                status,
+                home_score_final,
+                away_score_final
             FROM matches
             WHERE id = ?
             """,
             (match.id,),
         ).fetchone()
-        scores_count = connection.execute(
+        saved_tie = connection.execute(
             """
-            SELECT COUNT(*)
+            SELECT advancing_team_id
+            FROM ties
+            WHERE id = ?
+            """,
+            (match.tie_id,),
+        ).fetchone()
+        corrected_match_scores = connection.execute(
+            """
+            SELECT
+                users.telegram_user_id,
+                match_prediction_scores.score_type,
+                match_prediction_scores.points
             FROM match_prediction_scores
+            JOIN match_predictions
+                ON match_predictions.id =
+                    match_prediction_scores.match_prediction_id
+            JOIN users
+                ON users.id = match_predictions.user_id
+            ORDER BY users.telegram_user_id ASC
             """
-        ).fetchone()[0]
+        ).fetchall()
+        corrected_tie_scores = connection.execute(
+            """
+            SELECT
+                users.telegram_user_id,
+                tie_prediction_scores.points
+            FROM tie_prediction_scores
+            JOIN tie_predictions
+                ON tie_predictions.id =
+                    tie_prediction_scores.tie_prediction_id
+            JOIN users
+                ON users.id = tie_predictions.user_id
+            WHERE tie_predictions.tie_id = ?
+            ORDER BY users.telegram_user_id ASC
+            """,
+            (match.tie_id,),
+        ).fetchall()
         events = connection.execute(
             """
             SELECT
@@ -1010,12 +1153,49 @@ def test_save_match_result_creates_corrects_clears_scores_and_writes_events(
             """
         ).fetchall()
 
+    assert second_result.was_created is False
+    assert second_result.result.home_score == 1
+    assert second_result.result.away_score == 1
+    assert second_result.result.advancing_team_id == 2
+
+    assert match_details.status == "finished"
+    assert match_details.result is not None
+    assert match_details.result.home_score == 1
+    assert match_details.result.away_score == 1
+    assert match_details.result.advancing_team_id == 2
+
+    assert match_details.prediction is not None
+    assert match_details.prediction.home_score == 2
+    assert match_details.prediction.away_score == 1
+    assert match_details.prediction.advancing_team_id == 1
+
     assert dict(saved_match) == {
         "status": "finished",
-        "home_score_regular": 2,
-        "away_score_regular": 0,
+        "home_score_final": 1,
+        "away_score_final": 1,
     }
-    assert scores_count == 0
+    assert dict(saved_tie) == {
+        "advancing_team_id": 2,
+    }
+
+    assert [dict(score) for score in corrected_match_scores] == [
+        {
+            "telegram_user_id": 131415,
+            "score_type": "goal_difference",
+            "points": 2,
+        },
+    ]
+    assert [dict(score) for score in corrected_tie_scores] == [
+        {
+            "telegram_user_id": 101112,
+            "points": 1,
+        },
+        {
+            "telegram_user_id": 131415,
+            "points": 1,
+        },
+    ]
+
     assert [dict(event) for event in events] == [
         {
             "actor_user_id": 1,
@@ -1036,18 +1216,21 @@ def test_save_match_result_creates_corrects_clears_scores_and_writes_events(
         {
             "previous_result": None,
             "result": {
-                "away_score": 0,
-                "home_score": 1,
+                "advancing_team_id": 1,
+                "away_score": 1,
+                "home_score": 2,
             },
         },
         {
             "previous_result": {
-                "away_score": 0,
-                "home_score": 1,
+                "advancing_team_id": 1,
+                "away_score": 1,
+                "home_score": 2,
             },
             "result": {
-                "away_score": 0,
-                "home_score": 2,
+                "advancing_team_id": 2,
+                "away_score": 1,
+                "home_score": 1,
             },
         },
     ]
@@ -1091,7 +1274,7 @@ def test_save_match_result_rejects_match_before_start_without_writes(
     with create_connection(database_path) as connection:
         saved_match = connection.execute(
             """
-            SELECT status, home_score_regular, away_score_regular
+            SELECT status, home_score_final, away_score_final
             FROM matches
             WHERE id = ?
             """,
@@ -1103,8 +1286,8 @@ def test_save_match_result_rejects_match_before_start_without_writes(
 
     assert dict(saved_match) == {
         "status": "scheduled",
-        "home_score_regular": None,
-        "away_score_regular": None,
+        "home_score_final": None,
+        "away_score_final": None,
     }
     assert events_count_after == events_count_before
 
@@ -1146,7 +1329,7 @@ def test_save_match_result_rejects_cancelled_match_without_writes(
     with create_connection(database_path) as connection:
         saved_match = connection.execute(
             """
-            SELECT status, home_score_regular, away_score_regular
+            SELECT status, home_score_final, away_score_final
             FROM matches
             WHERE id = ?
             """,
@@ -1158,8 +1341,8 @@ def test_save_match_result_rejects_cancelled_match_without_writes(
 
     assert dict(saved_match) == {
         "status": "cancelled",
-        "home_score_regular": None,
-        "away_score_regular": None,
+        "home_score_final": None,
+        "away_score_final": None,
     }
     assert events_count_after == events_count_before
 
@@ -1203,7 +1386,7 @@ def test_save_match_result_validates_scores_before_writes(
     with create_connection(database_path) as connection:
         saved_match = connection.execute(
             """
-            SELECT status, home_score_regular, away_score_regular
+            SELECT status, home_score_final, away_score_final
             FROM matches
             WHERE id = ?
             """,
@@ -1215,7 +1398,7 @@ def test_save_match_result_validates_scores_before_writes(
 
     assert dict(saved_match) == {
         "status": "scheduled",
-        "home_score_regular": None,
-        "away_score_regular": None,
+        "home_score_final": None,
+        "away_score_final": None,
     }
     assert events_count_after == events_count_before

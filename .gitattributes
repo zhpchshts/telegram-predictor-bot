@@ -1,0 +1,2 @@
+# Keep all text files in LF format across Windows and Linux.
+* text=auto eol=lf

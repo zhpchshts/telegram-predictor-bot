@@ -635,16 +635,22 @@ def test_create_match_creates_match_and_returns_contest_details(
     )
 
     assert response.status_code == 201
+
     response_data = response.json()
+
     assert response_data["was_created"] is True
     assert response_data["match"] == {
         "id": 1,
+        "tie_id": 1,
+        "home_team_id": 1,
         "home_team_name": "Аргентина",
+        "away_team_id": 2,
         "away_team_name": "Бразилия",
         "starts_at_utc": "2026-06-11T18:00:00Z",
         "status": "scheduled",
         "result": None,
         "prediction": None,
+        "prediction_score": None,
     }
 
     contest_response = client.get(
@@ -653,7 +659,9 @@ def test_create_match_creates_match_and_returns_contest_details(
     )
 
     assert contest_response.status_code == 200
-    assert contest_response.json()["contest"]["matches"] == [response_data["match"]]
+    assert contest_response.json()["contest"]["matches"] == [
+        response_data["match"],
+    ]
 
 
 def test_create_match_reuses_result_for_same_idempotency_key(
@@ -777,7 +785,9 @@ def test_save_match_prediction_creates_updates_and_returns_prediction(
             "starts_at_utc": "2030-06-11T18:00:00Z",
         },
     )
+
     assert match_response.status_code == 201
+
     match_id = match_response.json()["match"]["id"]
 
     first_response = client.put(
@@ -786,6 +796,7 @@ def test_save_match_prediction_creates_updates_and_returns_prediction(
         json={
             "predicted_home_score": 2,
             "predicted_away_score": 1,
+            "predicted_advancing_team_id": 1,
         },
     )
     second_response = client.put(
@@ -794,6 +805,7 @@ def test_save_match_prediction_creates_updates_and_returns_prediction(
         json={
             "predicted_home_score": 3,
             "predicted_away_score": 1,
+            "predicted_advancing_team_id": 1,
         },
     )
 
@@ -802,14 +814,17 @@ def test_save_match_prediction_creates_updates_and_returns_prediction(
         "prediction": {
             "home_score": 2,
             "away_score": 1,
+            "advancing_team_id": 1,
         },
         "was_created": True,
     }
+
     assert second_response.status_code == 200
     assert second_response.json() == {
         "prediction": {
             "home_score": 3,
             "away_score": 1,
+            "advancing_team_id": 1,
         },
         "was_created": False,
     }
@@ -823,7 +838,10 @@ def test_save_match_prediction_creates_updates_and_returns_prediction(
     assert contest_response.json()["contest"]["matches"] == [
         {
             "id": match_id,
+            "tie_id": 1,
+            "home_team_id": 1,
             "home_team_name": "Аргентина",
+            "away_team_id": 2,
             "away_team_name": "Бразилия",
             "starts_at_utc": "2030-06-11T18:00:00Z",
             "status": "scheduled",
@@ -831,8 +849,10 @@ def test_save_match_prediction_creates_updates_and_returns_prediction(
             "prediction": {
                 "home_score": 3,
                 "away_score": 1,
+                "advancing_team_id": 1,
             },
-        }
+            "prediction_score": None,
+        },
     ]
 
 
@@ -867,6 +887,7 @@ def test_save_match_prediction_rejects_closed_match(
         json={
             "predicted_home_score": 2,
             "predicted_away_score": 1,
+            "predicted_advancing_team_id": 1,
         },
     )
 
@@ -907,6 +928,7 @@ def test_save_match_prediction_rejects_negative_score(
         json={
             "predicted_home_score": -1,
             "predicted_away_score": 0,
+            "predicted_advancing_team_id": 1,
         },
     )
 
@@ -949,14 +971,16 @@ def test_save_match_result_creates_updates_and_returns_result(
         json={
             "home_score": 2,
             "away_score": 1,
+            "advancing_team_id": 1,
         },
     )
     second_response = client.put(
         f"/api/tma/contests/{contest['id']}/matches/{match_id}/result",
         headers=build_tma_headers(),
         json={
-            "home_score": 3,
+            "home_score": 1,
             "away_score": 1,
+            "advancing_team_id": 2,
         },
     )
 
@@ -965,14 +989,17 @@ def test_save_match_result_creates_updates_and_returns_result(
         "result": {
             "home_score": 2,
             "away_score": 1,
+            "advancing_team_id": 1,
         },
         "was_created": True,
     }
+
     assert second_response.status_code == 200
     assert second_response.json() == {
         "result": {
-            "home_score": 3,
+            "home_score": 1,
             "away_score": 1,
+            "advancing_team_id": 2,
         },
         "was_created": False,
     }
@@ -986,17 +1013,109 @@ def test_save_match_result_creates_updates_and_returns_result(
     assert contest_response.json()["contest"]["matches"] == [
         {
             "id": match_id,
+            "tie_id": 1,
+            "home_team_id": 1,
             "home_team_name": "Аргентина",
+            "away_team_id": 2,
             "away_team_name": "Бразилия",
             "starts_at_utc": "2020-06-11T18:00:00Z",
             "status": "finished",
             "result": {
-                "home_score": 3,
+                "home_score": 1,
                 "away_score": 1,
+                "advancing_team_id": 2,
             },
             "prediction": None,
-        }
+            "prediction_score": None,
+        },
     ]
+
+
+def test_get_contest_returns_prediction_score_after_result(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="create-score-match"),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2030-06-11T18:00:00Z",
+        },
+    )
+
+    assert match_response.status_code == 201
+
+    match = match_response.json()["match"]
+    match_id = match["id"]
+    home_team_id = match["home_team_id"]
+
+    prediction_response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match_id}/prediction",
+        headers=build_tma_headers(),
+        json={
+            "predicted_home_score": 2,
+            "predicted_away_score": 1,
+            "predicted_advancing_team_id": home_team_id,
+        },
+    )
+
+    assert prediction_response.status_code == 201
+
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE matches
+            SET starts_at_utc = ?
+            WHERE id = ?
+            """,
+            ("2020-06-11T18:00:00Z", match_id),
+        )
+
+    result_response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match_id}/result",
+        headers=build_tma_headers(),
+        json={
+            "home_score": 2,
+            "away_score": 1,
+            "advancing_team_id": home_team_id,
+        },
+    )
+
+    assert result_response.status_code == 201
+
+    contest_response = client.get(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert contest_response.status_code == 200
+
+    saved_match = contest_response.json()["contest"]["matches"][0]
+
+    assert saved_match["prediction_score"] == {
+        "total_points": 4,
+        "awards": [
+            {
+                "type": "exact_score",
+                "points": 3,
+            },
+            {
+                "type": "advancing_team",
+                "points": 1,
+            },
+        ],
+    }
 
 
 def test_save_match_result_rejects_match_before_start(
@@ -1032,6 +1151,7 @@ def test_save_match_result_rejects_match_before_start(
         json={
             "home_score": 2,
             "away_score": 1,
+            "advancing_team_id": 1,
         },
     )
 
@@ -1074,6 +1194,7 @@ def test_save_match_result_rejects_negative_score(
         json={
             "home_score": -1,
             "away_score": 0,
+            "advancing_team_id": 1,
         },
     )
 
@@ -1126,6 +1247,7 @@ def test_save_match_result_rejects_cancelled_match(
         json={
             "home_score": 2,
             "away_score": 1,
+            "advancing_team_id": 1,
         },
     )
 

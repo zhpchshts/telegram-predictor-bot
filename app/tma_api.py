@@ -46,11 +46,13 @@ class CreateMatchRequest(BaseModel):
 class SaveMatchPredictionRequest(BaseModel):
     predicted_home_score: int
     predicted_away_score: int
+    predicted_advancing_team_id: int
 
 
 class SaveMatchResultRequest(BaseModel):
     home_score: int
     away_score: int
+    advancing_team_id: int
 
 
 @router.get("/bootstrap")
@@ -259,6 +261,7 @@ async def save_tma_match_prediction(
             username=context.user.username,
             predicted_home_score=payload.predicted_home_score,
             predicted_away_score=payload.predicted_away_score,
+            predicted_advancing_team_id=payload.predicted_advancing_team_id,
         )
     except ContestNotFoundError as error:
         raise HTTPException(
@@ -320,6 +323,7 @@ async def save_tma_match_result(
             username=context.user.username,
             home_score=payload.home_score,
             away_score=payload.away_score,
+            advancing_team_id=payload.advancing_team_id,
         )
     except ContestNotFoundError as error:
         raise HTTPException(
@@ -416,7 +420,10 @@ def _serialize_contest_details(contest) -> dict[str, object]:
 def _serialize_match(match) -> dict[str, object]:
     return {
         "id": match.id,
+        "tie_id": match.tie_id,
+        "home_team_id": match.home_team_id,
         "home_team_name": match.home_team_name,
+        "away_team_id": match.away_team_id,
         "away_team_name": match.away_team_name,
         "starts_at_utc": match.starts_at_utc,
         "status": match.status,
@@ -428,6 +435,11 @@ def _serialize_match(match) -> dict[str, object]:
             if match.prediction is not None
             else None
         ),
+        "prediction_score": (
+            _serialize_prediction_score(match.prediction_score)
+            if match.prediction_score is not None
+            else None
+        ),
     }
 
 
@@ -435,6 +447,7 @@ def _serialize_result(result) -> dict[str, int]:
     return {
         "home_score": result.home_score,
         "away_score": result.away_score,
+        "advancing_team_id": result.advancing_team_id,
     }
 
 
@@ -442,4 +455,18 @@ def _serialize_prediction(prediction) -> dict[str, int]:
     return {
         "home_score": prediction.home_score,
         "away_score": prediction.away_score,
+        "advancing_team_id": prediction.advancing_team_id,
+    }
+
+
+def _serialize_prediction_score(score) -> dict[str, object]:
+    return {
+        "total_points": score.total_points,
+        "awards": [
+            {
+                "type": award.score_type,
+                "points": award.points,
+            }
+            for award in score.awards
+        ],
     }

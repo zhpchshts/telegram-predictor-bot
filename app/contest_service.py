@@ -8,6 +8,10 @@ from pathlib import Path
 import secrets
 
 from app.database import database_connection
+from app.scoring_service import (
+    recalculate_match_prediction_scores,
+    recalculate_tie_prediction_scores,
+)
 
 
 WORLD_CUP_2026_COMPETITION_NAME = "Чемпионат мира"
@@ -62,23 +66,41 @@ class ContestCreationResult:
 class MatchPrediction:
     home_score: int
     away_score: int
+    advancing_team_id: int
 
 
 @dataclass(frozen=True, slots=True)
 class MatchResult:
     home_score: int
     away_score: int
+    advancing_team_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class PredictionScoreAward:
+    score_type: str
+    points: int
+
+
+@dataclass(frozen=True, slots=True)
+class MatchPredictionScore:
+    total_points: int
+    awards: tuple[PredictionScoreAward, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class MatchSummary:
     id: int
+    tie_id: int
+    home_team_id: int
     home_team_name: str
+    away_team_id: int
     away_team_name: str
     starts_at_utc: str
     status: str
     result: MatchResult | None
     prediction: MatchPrediction | None
+    prediction_score: MatchPredictionScore | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,19 +172,33 @@ def get_contest_details(
             """
             SELECT
                 matches.id,
+                matches.tie_id,
+                home_team.id AS home_team_id,
                 home_team.name AS home_team_name,
+                away_team.id AS away_team_id,
                 away_team.name AS away_team_name,
                 matches.starts_at_utc,
                 matches.status,
-                matches.home_score_regular,
-                matches.away_score_regular,
+                matches.home_score_final,
+                matches.away_score_final,
+                ties.advancing_team_id,
                 match_predictions.predicted_home_score,
-                match_predictions.predicted_away_score
+                match_predictions.predicted_away_score,
+                tie_predictions.predicted_advancing_team_id,
+                match_prediction_scores.score_type AS match_score_type,
+                match_prediction_scores.points AS match_score_points,
+                tie_prediction_scores.points AS advancing_team_points
             FROM matches
-            JOIN stages ON stages.id = matches.stage_id
-            JOIN competitions ON competitions.id = stages.competition_id
-            JOIN teams AS home_team ON home_team.id = matches.home_team_id
-            JOIN teams AS away_team ON away_team.id = matches.away_team_id
+            JOIN ties
+                ON ties.id = matches.tie_id
+            JOIN stages
+                ON stages.id = matches.stage_id
+            JOIN competitions
+                ON competitions.id = stages.competition_id
+            JOIN teams AS home_team
+                ON home_team.id = matches.home_team_id
+            JOIN teams AS away_team
+                ON away_team.id = matches.away_team_id
             LEFT JOIN match_predictions
                 ON match_predictions.match_id = matches.id
                 AND match_predictions.user_id = (
@@ -170,10 +206,23 @@ def get_contest_details(
                     FROM users
                     WHERE users.telegram_user_id = ?
                 )
+            LEFT JOIN tie_predictions
+                ON tie_predictions.tie_id = matches.tie_id
+                AND tie_predictions.user_id = (
+                    SELECT users.id
+                    FROM users
+                    WHERE users.telegram_user_id = ?
+                )
+            LEFT JOIN match_prediction_scores
+                ON match_prediction_scores.match_prediction_id =
+                    match_predictions.id
+            LEFT JOIN tie_prediction_scores
+                ON tie_prediction_scores.tie_prediction_id =
+                    tie_predictions.id
             WHERE competitions.contest_id = ?
             ORDER BY matches.starts_at_utc ASC, matches.id ASC
             """,
-            (telegram_user_id, contest_id),
+            (telegram_user_id, telegram_user_id, contest_id),
         ).fetchall()
 
     return ContestDetails(
@@ -292,21 +341,51 @@ def create_match(
             connection,
             team_name=normalized_away_team_name,
         )
+        scoring_rule_set_id = int(competition_row["scoring_rule_set_id"])
+        tie_position = _get_next_tie_position(
+            connection,
+            stage_id=stage_id,
+        )
+        tie_name = f"{normalized_home_team_name} — {normalized_away_team_name}"
+
+        tie_id = int(
+            connection.execute(
+                """
+                INSERT INTO ties (
+                    stage_id,
+                    scoring_rule_set_id,
+                    name,
+                    position,
+                    is_two_legged
+                )
+                VALUES (?, ?, ?, ?, 0)
+                """,
+                (
+                    stage_id,
+                    scoring_rule_set_id,
+                    tie_name,
+                    tie_position,
+                ),
+            ).lastrowid
+        )
+
         match_id = int(
             connection.execute(
                 """
                 INSERT INTO matches (
                     stage_id,
+                    tie_id,
                     scoring_rule_set_id,
                     home_team_id,
                     away_team_id,
                     starts_at_utc
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stage_id,
-                    int(competition_row["scoring_rule_set_id"]),
+                    tie_id,
+                    scoring_rule_set_id,
                     home_team_id,
                     away_team_id,
                     normalized_starts_at_utc,
@@ -325,11 +404,17 @@ def create_match(
                     "name": normalized_home_team_name,
                     "was_created": home_team_was_created,
                 },
-                "scoring_rule_set_id": int(competition_row["scoring_rule_set_id"]),
+                "scoring_rule_set_id": scoring_rule_set_id,
                 "stage": {
                     "id": stage_id,
                     "name": stage_name,
                     "type": stage_type,
+                },
+                "tie": {
+                    "id": tie_id,
+                    "is_two_legged": False,
+                    "name": tie_name,
+                    "position": tie_position,
                 },
                 "starts_at_utc": normalized_starts_at_utc,
             },
@@ -404,6 +489,7 @@ def save_match_prediction(
     username: str | None,
     predicted_home_score: int,
     predicted_away_score: int,
+    predicted_advancing_team_id: int,
     now_utc: datetime | None = None,
 ) -> MatchPredictionSaveResult:
     normalized_home_score = _normalize_prediction_score(
@@ -413,6 +499,10 @@ def save_match_prediction(
     normalized_away_score = _normalize_prediction_score(
         predicted_away_score,
         field_name="Прогноз второй команды",
+    )
+    normalized_advancing_team_id = _normalize_advancing_team_id(
+        predicted_advancing_team_id,
+        field_name="Прогноз победителя противостояния",
     )
     resolved_now_utc = _resolve_now_utc(now_utc)
 
@@ -427,12 +517,25 @@ def save_match_prediction(
             contest_id=contest_id,
             match_id=match_id,
         )
+
         if match_row is None:
             raise MatchNotFoundError("Матч не найден.")
 
         if not _is_prediction_open(match_row, now_utc=resolved_now_utc):
             raise PredictionUnavailableError("Прогнозы на этот матч уже закрыты.")
 
+        if match_row["tie_id"] is None:
+            raise RuntimeError("У матча не определено противостояние.")
+
+        _validate_advancing_team_for_match(
+            match_row,
+            advancing_team_id=normalized_advancing_team_id,
+            home_score=normalized_home_score,
+            away_score=normalized_away_score,
+            field_name="Прогноз победителя противостояния",
+        )
+
+        tie_id = int(match_row["tie_id"])
         user_id = _upsert_user(
             connection,
             telegram_user_id=telegram_user_id,
@@ -440,15 +543,25 @@ def save_match_prediction(
             last_name=last_name,
             username=username,
         )
-        existing_prediction = connection.execute(
+
+        existing_match_prediction = connection.execute(
             """
             SELECT id
             FROM match_predictions
-            WHERE match_id = ?
-              AND user_id = ?
+            WHERE match_id = ? AND user_id = ?
             """,
             (match_id, user_id),
         ).fetchone()
+
+        existing_tie_prediction = connection.execute(
+            """
+            SELECT id
+            FROM tie_predictions
+            WHERE tie_id = ? AND user_id = ?
+            """,
+            (tie_id, user_id),
+        ).fetchone()
+
         connection.execute(
             """
             INSERT INTO match_predictions (
@@ -471,13 +584,35 @@ def save_match_prediction(
             ),
         )
 
-    return MatchPredictionSaveResult(
-        prediction=MatchPrediction(
-            home_score=normalized_home_score,
-            away_score=normalized_away_score,
-        ),
-        was_created=existing_prediction is None,
-    )
+        connection.execute(
+            """
+            INSERT INTO tie_predictions (
+                tie_id,
+                user_id,
+                predicted_advancing_team_id
+            )
+            VALUES (?, ?, ?)
+            ON CONFLICT(tie_id, user_id) DO UPDATE SET
+                predicted_advancing_team_id = excluded.predicted_advancing_team_id,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                tie_id,
+                user_id,
+                normalized_advancing_team_id,
+            ),
+        )
+
+        return MatchPredictionSaveResult(
+            prediction=MatchPrediction(
+                home_score=normalized_home_score,
+                away_score=normalized_away_score,
+                advancing_team_id=normalized_advancing_team_id,
+            ),
+            was_created=(
+                existing_match_prediction is None and existing_tie_prediction is None
+            ),
+        )
 
 
 def save_match_result(
@@ -492,6 +627,7 @@ def save_match_result(
     username: str | None,
     home_score: int,
     away_score: int,
+    advancing_team_id: int,
     now_utc: datetime | None = None,
 ) -> MatchResultSaveResult:
     normalized_home_score = _normalize_match_result_score(
@@ -501,6 +637,10 @@ def save_match_result(
     normalized_away_score = _normalize_match_result_score(
         away_score,
         field_name="Результат второй команды",
+    )
+    normalized_advancing_team_id = _normalize_advancing_team_id(
+        advancing_team_id,
+        field_name="Победитель противостояния",
     )
     resolved_now_utc = _resolve_now_utc(now_utc)
 
@@ -515,6 +655,7 @@ def save_match_result(
             contest_id=contest_id,
             match_id=match_id,
         )
+
         if match_row is None:
             raise MatchNotFoundError("Матч не найден.")
 
@@ -531,6 +672,18 @@ def save_match_result(
                 "Результат можно внести только после начала матча."
             )
 
+        if match_row["tie_id"] is None:
+            raise RuntimeError("У матча не определено противостояние.")
+
+        _validate_advancing_team_for_match(
+            match_row,
+            advancing_team_id=normalized_advancing_team_id,
+            home_score=normalized_home_score,
+            away_score=normalized_away_score,
+            field_name="Победитель противостояния",
+        )
+
+        tie_id = int(match_row["tie_id"])
         actor_user_id = _upsert_user(
             connection,
             telegram_user_id=telegram_user_id,
@@ -542,22 +695,11 @@ def save_match_result(
 
         connection.execute(
             """
-            DELETE FROM match_prediction_scores
-            WHERE match_prediction_id IN (
-                SELECT id
-                FROM match_predictions
-                WHERE match_id = ?
-            )
-            """,
-            (match_id,),
-        )
-        connection.execute(
-            """
             UPDATE matches
             SET
                 status = 'finished',
-                home_score_regular = ?,
-                away_score_regular = ?
+                home_score_final = ?,
+                away_score_final = ?
             WHERE id = ?
             """,
             (
@@ -567,10 +709,32 @@ def save_match_result(
             ),
         )
 
+        connection.execute(
+            """
+            UPDATE ties
+            SET advancing_team_id = ?
+            WHERE id = ?
+            """,
+            (
+                normalized_advancing_team_id,
+                tie_id,
+            ),
+        )
+
+        recalculate_match_prediction_scores(
+            connection,
+            match_id=match_id,
+        )
+        recalculate_tie_prediction_scores(
+            connection,
+            tie_id=tie_id,
+        )
+
         event_payload = json.dumps(
             {
                 "previous_result": (
                     {
+                        "advancing_team_id": previous_result.advancing_team_id,
                         "away_score": previous_result.away_score,
                         "home_score": previous_result.home_score,
                     }
@@ -578,6 +742,7 @@ def save_match_result(
                     else None
                 ),
                 "result": {
+                    "advancing_team_id": normalized_advancing_team_id,
                     "away_score": normalized_away_score,
                     "home_score": normalized_home_score,
                 },
@@ -586,6 +751,7 @@ def save_match_result(
             separators=(",", ":"),
             sort_keys=True,
         )
+
         connection.execute(
             """
             INSERT INTO event_log (
@@ -612,13 +778,14 @@ def save_match_result(
             ),
         )
 
-    return MatchResultSaveResult(
-        result=MatchResult(
-            home_score=normalized_home_score,
-            away_score=normalized_away_score,
-        ),
-        was_created=previous_result is None,
-    )
+        return MatchResultSaveResult(
+            result=MatchResult(
+                home_score=normalized_home_score,
+                away_score=normalized_away_score,
+                advancing_team_id=normalized_advancing_team_id,
+            ),
+            was_created=previous_result is None,
+        )
 
 
 def create_world_cup_2026_contest(
@@ -933,19 +1100,29 @@ def _get_match_row(
         """
         SELECT
             matches.id,
+            matches.tie_id,
+            home_team.id AS home_team_id,
             home_team.name AS home_team_name,
+            away_team.id AS away_team_id,
             away_team.name AS away_team_name,
             matches.starts_at_utc,
             matches.status,
-            matches.home_score_regular,
-            matches.away_score_regular
+            matches.home_score_final,
+            matches.away_score_final,
+            ties.advancing_team_id
         FROM matches
-        JOIN stages ON stages.id = matches.stage_id
-        JOIN competitions ON competitions.id = stages.competition_id
-        JOIN teams AS home_team ON home_team.id = matches.home_team_id
-        JOIN teams AS away_team ON away_team.id = matches.away_team_id
+        JOIN ties
+            ON ties.id = matches.tie_id
+        JOIN stages
+            ON stages.id = matches.stage_id
+        JOIN competitions
+            ON competitions.id = stages.competition_id
+        JOIN teams AS home_team
+            ON home_team.id = matches.home_team_id
+        JOIN teams AS away_team
+            ON away_team.id = matches.away_team_id
         WHERE competitions.contest_id = ?
-          AND matches.id = ?
+            AND matches.id = ?
         """,
         (contest_id, match_id),
     ).fetchone()
@@ -984,10 +1161,30 @@ def _get_or_create_first_stage(
             )
             VALUES (?, ?, ?, ?)
             """,
-            (competition_id, "Основной этап", 1, "other"),
+            (competition_id, "Плей-офф", 1, "knockout"),
         ).lastrowid
     )
-    return stage_id, "Основной этап", "other"
+    return stage_id, "Плей-офф", "knockout"
+
+
+def _get_next_tie_position(
+    connection,
+    *,
+    stage_id: int,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COALESCE(MAX(position), 0) + 1 AS next_position
+        FROM ties
+        WHERE stage_id = ?
+        """,
+        (stage_id,),
+    ).fetchone()
+
+    if row is None:
+        raise RuntimeError("Не удалось определить позицию противостояния.")
+
+    return int(row["next_position"])
 
 
 def _find_or_create_team(
@@ -1084,40 +1281,99 @@ def _build_match_request_fingerprint(
 
 def _match_result_from_row(row) -> MatchResult | None:
     if (
-        "home_score_regular" not in row.keys()
-        or "away_score_regular" not in row.keys()
-        or row["home_score_regular"] is None
-        or row["away_score_regular"] is None
+        "home_score_final" not in row.keys()
+        or "away_score_final" not in row.keys()
+        or "advancing_team_id" not in row.keys()
+        or row["home_score_final"] is None
+        or row["away_score_final"] is None
+        or row["advancing_team_id"] is None
     ):
         return None
 
     return MatchResult(
-        home_score=int(row["home_score_regular"]),
-        away_score=int(row["away_score_regular"]),
+        home_score=int(row["home_score_final"]),
+        away_score=int(row["away_score_final"]),
+        advancing_team_id=int(row["advancing_team_id"]),
     )
 
 
 def _match_summary_from_row(row) -> MatchSummary:
     result = _match_result_from_row(row)
     prediction = None
+
     if (
         "predicted_home_score" in row.keys()
+        and "predicted_away_score" in row.keys()
+        and "predicted_advancing_team_id" in row.keys()
         and row["predicted_home_score"] is not None
         and row["predicted_away_score"] is not None
+        and row["predicted_advancing_team_id"] is not None
     ):
         prediction = MatchPrediction(
             home_score=int(row["predicted_home_score"]),
             away_score=int(row["predicted_away_score"]),
+            advancing_team_id=int(row["predicted_advancing_team_id"]),
         )
+
+    prediction_score = _match_prediction_score_from_row(
+        row,
+        result=result,
+        prediction=prediction,
+    )
 
     return MatchSummary(
         id=int(row["id"]),
+        tie_id=int(row["tie_id"]),
+        home_team_id=int(row["home_team_id"]),
         home_team_name=str(row["home_team_name"]),
+        away_team_id=int(row["away_team_id"]),
         away_team_name=str(row["away_team_name"]),
         starts_at_utc=str(row["starts_at_utc"]),
         status=str(row["status"]),
         result=result,
         prediction=prediction,
+        prediction_score=prediction_score,
+    )
+
+
+def _match_prediction_score_from_row(
+    row,
+    *,
+    result: MatchResult | None,
+    prediction: MatchPrediction | None,
+) -> MatchPredictionScore | None:
+    if result is None or prediction is None:
+        return None
+
+    awards: list[PredictionScoreAward] = []
+
+    if (
+        "match_score_type" in row.keys()
+        and "match_score_points" in row.keys()
+        and row["match_score_type"] is not None
+        and row["match_score_points"] is not None
+    ):
+        awards.append(
+            PredictionScoreAward(
+                score_type=str(row["match_score_type"]),
+                points=int(row["match_score_points"]),
+            )
+        )
+
+    if (
+        "advancing_team_points" in row.keys()
+        and row["advancing_team_points"] is not None
+    ):
+        awards.append(
+            PredictionScoreAward(
+                score_type="advancing_team",
+                points=int(row["advancing_team_points"]),
+            )
+        )
+
+    return MatchPredictionScore(
+        total_points=sum(award.points for award in awards),
+        awards=tuple(awards),
     )
 
 
@@ -1143,6 +1399,45 @@ def _normalize_match_result_score(
     if value < 0:
         raise ValueError(f"{field_name} не может быть отрицательным.")
     return value
+
+
+def _normalize_advancing_team_id(
+    value: int,
+    *,
+    field_name: str,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} должен быть идентификатором команды.")
+
+    if value <= 0:
+        raise ValueError(f"{field_name} должен быть идентификатором команды.")
+
+    return value
+
+
+def _validate_advancing_team_for_match(
+    match_row,
+    *,
+    advancing_team_id: int,
+    home_score: int,
+    away_score: int,
+    field_name: str,
+) -> None:
+    home_team_id = int(match_row["home_team_id"])
+    away_team_id = int(match_row["away_team_id"])
+
+    if advancing_team_id not in {home_team_id, away_team_id}:
+        raise ValueError(f"{field_name} должен быть одной из команд матча.")
+
+    if home_score == away_score:
+        return
+
+    expected_advancing_team_id = (
+        home_team_id if home_score > away_score else away_team_id
+    )
+
+    if advancing_team_id != expected_advancing_team_id:
+        raise ValueError(f"{field_name} должен совпадать с победителем по счёту.")
 
 
 def _resolve_now_utc(now_utc: datetime | None) -> datetime:

@@ -122,17 +122,17 @@ CREATE TABLE IF NOT EXISTS matches (
     status TEXT NOT NULL DEFAULT 'scheduled' CHECK (
         status IN ('scheduled', 'started', 'finished', 'cancelled')
     ),
-    home_score_regular INTEGER,
-    away_score_regular INTEGER,
+    home_score_final INTEGER,
+    away_score_final INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK (home_team_id != away_team_id),
     CHECK (
-        (home_score_regular IS NULL AND away_score_regular IS NULL)
+        (home_score_final IS NULL AND away_score_final IS NULL)
         OR (
-            home_score_regular IS NOT NULL
-            AND away_score_regular IS NOT NULL
-            AND home_score_regular >= 0
-            AND away_score_regular >= 0
+            home_score_final IS NOT NULL
+            AND away_score_final IS NOT NULL
+            AND home_score_final >= 0
+            AND away_score_final >= 0
         )
     )
 );
