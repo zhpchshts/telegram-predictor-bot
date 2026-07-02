@@ -643,6 +643,7 @@ def test_create_match_creates_match_and_returns_contest_details(
         "away_team_name": "Бразилия",
         "starts_at_utc": "2026-06-11T18:00:00Z",
         "status": "scheduled",
+        "prediction": None,
     }
 
     contest_response = client.get(
@@ -751,3 +752,163 @@ def test_get_contest_returns_not_found_for_unknown_contest(
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Конкурс не найден."}
+
+
+def test_save_match_prediction_creates_updates_and_returns_prediction(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="create-future-match"),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2030-06-11T18:00:00Z",
+        },
+    )
+    assert match_response.status_code == 201
+    match_id = match_response.json()["match"]["id"]
+
+    first_response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match_id}/prediction",
+        headers=build_tma_headers(),
+        json={
+            "predicted_home_score": 2,
+            "predicted_away_score": 1,
+        },
+    )
+    second_response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match_id}/prediction",
+        headers=build_tma_headers(),
+        json={
+            "predicted_home_score": 3,
+            "predicted_away_score": 1,
+        },
+    )
+
+    assert first_response.status_code == 201
+    assert first_response.json() == {
+        "prediction": {
+            "home_score": 2,
+            "away_score": 1,
+        },
+        "was_created": True,
+    }
+    assert second_response.status_code == 200
+    assert second_response.json() == {
+        "prediction": {
+            "home_score": 3,
+            "away_score": 1,
+        },
+        "was_created": False,
+    }
+
+    contest_response = client.get(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert contest_response.status_code == 200
+    assert contest_response.json()["contest"]["matches"] == [
+        {
+            "id": match_id,
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2030-06-11T18:00:00Z",
+            "status": "scheduled",
+            "prediction": {
+                "home_score": 3,
+                "away_score": 1,
+            },
+        }
+    ]
+
+
+def test_save_match_prediction_rejects_closed_match(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="create-closed-match"),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2020-06-11T18:00:00Z",
+        },
+    )
+    assert match_response.status_code == 201
+    match_id = match_response.json()["match"]["id"]
+
+    response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match_id}/prediction",
+        headers=build_tma_headers(),
+        json={
+            "predicted_home_score": 2,
+            "predicted_away_score": 1,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Прогнозы на этот матч уже закрыты.",
+    }
+
+
+def test_save_match_prediction_rejects_negative_score(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="create-future-match"),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2030-06-11T18:00:00Z",
+        },
+    )
+    assert match_response.status_code == 201
+    match_id = match_response.json()["match"]["id"]
+
+    response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match_id}/prediction",
+        headers=build_tma_headers(),
+        json={
+            "predicted_home_score": -1,
+            "predicted_away_score": 0,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "Прогноз первой команды не может быть отрицательным.",
+    }

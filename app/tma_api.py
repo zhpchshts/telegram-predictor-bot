@@ -11,10 +11,13 @@ from app.contest_service import (
     ContestCreationConflictError,
     ContestNotFoundError,
     MatchCreationConflictError,
+    MatchNotFoundError,
+    PredictionUnavailableError,
     create_match,
     create_world_cup_2026_contest,
     get_active_contests,
     get_contest_details,
+    save_match_prediction,
 )
 from app.tma_context import TmaContext, TmaContextError, build_tma_context
 
@@ -36,6 +39,11 @@ class CreateMatchRequest(BaseModel):
     home_team_name: str
     away_team_name: str
     starts_at_utc: str
+
+
+class SaveMatchPredictionRequest(BaseModel):
+    predicted_home_score: int
+    predicted_away_score: int
 
 
 @router.get("/bootstrap")
@@ -141,6 +149,7 @@ async def get_tma_contest(
             database_path=settings.database_path,
             telegram_chat_id=context.chat.telegram_chat_id,
             contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
         )
     except ContestNotFoundError as error:
         raise HTTPException(
@@ -216,6 +225,67 @@ async def create_tma_match(
     )
 
 
+@router.put("/contests/{contest_id}/matches/{match_id}/prediction")
+async def save_tma_match_prediction(
+    contest_id: int,
+    match_id: int,
+    payload: SaveMatchPredictionRequest,
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> JSONResponse:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+
+    try:
+        result = save_match_prediction(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            match_id=match_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            predicted_home_score=payload.predicted_home_score,
+            predicted_away_score=payload.predicted_away_score,
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except MatchNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except PredictionUnavailableError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    response_status = (
+        status.HTTP_201_CREATED if result.was_created else status.HTTP_200_OK
+    )
+    return JSONResponse(
+        status_code=response_status,
+        content={
+            "prediction": _serialize_prediction(result.prediction),
+            "was_created": result.was_created,
+        },
+    )
+
+
 def _get_verified_tma_context(
     *,
     x_telegram_init_data: str | None,
@@ -282,4 +352,16 @@ def _serialize_match(match) -> dict[str, object]:
         "away_team_name": match.away_team_name,
         "starts_at_utc": match.starts_at_utc,
         "status": match.status,
+        "prediction": (
+            _serialize_prediction(match.prediction)
+            if match.prediction is not None
+            else None
+        ),
+    }
+
+
+def _serialize_prediction(prediction) -> dict[str, int]:
+    return {
+        "home_score": prediction.home_score,
+        "away_score": prediction.away_score,
     }

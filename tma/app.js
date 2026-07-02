@@ -465,7 +465,203 @@ function createContestDetailsCard(contest, onBack) {
   return card;
 }
 
-function createMatchesCard(matches) {
+function isMatchPredictionOpen(match) {
+  if (match.status !== "scheduled") {
+    return false;
+  }
+
+  const startsAt = new Date(match.starts_at_utc);
+
+  return (
+    !Number.isNaN(startsAt.getTime()) &&
+    startsAt.getTime() > Date.now()
+  );
+}
+
+function createMatchPredictionSection(contest, match) {
+  const prediction = match.prediction;
+  const section = createElement("div", {
+    className: "match-prediction-section",
+  });
+  const heading = createElement("h3", {
+    className: "match-prediction-heading",
+    text: "Ваш прогноз",
+  });
+
+  if (!isMatchPredictionOpen(match)) {
+    const closedMessage = createElement("p", {
+      className: "match-prediction-closed",
+      text: prediction
+        ? `Ваш прогноз: ${prediction.home_score} : ${prediction.away_score}`
+        : "Прогнозы на этот матч закрыты.",
+    });
+
+    section.append(heading, closedMessage);
+    return section;
+  }
+
+  const hint = createElement("p", {
+    className: "match-prediction-hint",
+    text: "Прогноз можно изменить до начала матча.",
+  });
+  const form = createElement("form", {
+    className: "match-prediction-form",
+  });
+  const scoreGrid = createElement("div", {
+    className: "match-score-grid",
+  });
+  const homeScoreField = createElement("label", {
+    className: "match-score-field",
+  });
+  const homeScoreLabel = createElement("span", {
+    className: "match-score-label",
+    text: match.home_team_name,
+  });
+  const homeScoreInput = createElement("input", {
+    className: "text-input match-score-input",
+  });
+  const awayScoreField = createElement("label", {
+    className: "match-score-field",
+  });
+  const awayScoreLabel = createElement("span", {
+    className: "match-score-label",
+    text: match.away_team_name,
+  });
+  const awayScoreInput = createElement("input", {
+    className: "text-input match-score-input",
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  let submitLabel = prediction
+    ? "Сохранить изменения"
+    : "Сохранить прогноз";
+  const submitButton = createActionButton(
+    submitLabel,
+    "primary-action-button",
+    "submit",
+  );
+
+  homeScoreInput.id = `match-${match.id}-home-score`;
+  homeScoreInput.name = `match-${match.id}-home-score`;
+  homeScoreInput.type = "number";
+  homeScoreInput.min = "0";
+  homeScoreInput.step = "1";
+  homeScoreInput.inputMode = "numeric";
+  homeScoreInput.value = prediction ? String(prediction.home_score) : "";
+  homeScoreInput.required = true;
+
+  awayScoreInput.id = `match-${match.id}-away-score`;
+  awayScoreInput.name = `match-${match.id}-away-score`;
+  awayScoreInput.type = "number";
+  awayScoreInput.min = "0";
+  awayScoreInput.step = "1";
+  awayScoreInput.inputMode = "numeric";
+  awayScoreInput.value = prediction ? String(prediction.away_score) : "";
+  awayScoreInput.required = true;
+
+  homeScoreField.append(homeScoreLabel, homeScoreInput);
+  awayScoreField.append(awayScoreLabel, awayScoreInput);
+  scoreGrid.append(homeScoreField, awayScoreField);
+  actions.append(submitButton);
+  form.append(scoreGrid, message, actions);
+  section.append(heading, hint, form);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const homeScoreValue = homeScoreInput.value.trim();
+    const awayScoreValue = awayScoreInput.value.trim();
+    const homeScore = Number(homeScoreValue);
+    const awayScore = Number(awayScoreValue);
+
+    if (
+      !homeScoreValue ||
+      !Number.isSafeInteger(homeScore) ||
+      homeScore < 0
+    ) {
+      homeScoreInput.setAttribute("aria-invalid", "true");
+      setFormMessage(
+        message,
+        "Укажите неотрицательный целый счёт первой команды.",
+        "error",
+      );
+      homeScoreInput.focus();
+      return;
+    }
+
+    homeScoreInput.removeAttribute("aria-invalid");
+
+    if (
+      !awayScoreValue ||
+      !Number.isSafeInteger(awayScore) ||
+      awayScore < 0
+    ) {
+      awayScoreInput.setAttribute("aria-invalid", "true");
+      setFormMessage(
+        message,
+        "Укажите неотрицательный целый счёт второй команды.",
+        "error",
+      );
+      awayScoreInput.focus();
+      return;
+    }
+
+    awayScoreInput.removeAttribute("aria-invalid");
+    submitButton.disabled = true;
+    submitButton.textContent = "Сохраняем…";
+
+    try {
+      const result = await apiRequest(
+        `/api/tma/contests/${contest.id}/matches/${match.id}/prediction`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            predicted_home_score: homeScore,
+            predicted_away_score: awayScore,
+          }),
+        },
+      );
+
+      if (!result || !result.prediction) {
+        throw new Error("Сервер вернул некорректный ответ при сохранении прогноза.");
+      }
+
+      match.prediction = result.prediction;
+      homeScoreInput.value = String(result.prediction.home_score);
+      awayScoreInput.value = String(result.prediction.away_score);
+      submitLabel = "Сохранить изменения";
+      submitButton.textContent = submitLabel;
+      setFormMessage(
+        message,
+        result.was_created
+          ? "Прогноз сохранён."
+          : "Прогноз обновлён.",
+        "success",
+      );
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : "Не удалось сохранить прогноз.";
+
+      setFormMessage(message, errorMessage, "error");
+      submitButton.textContent = submitLabel;
+    } finally {
+      submitButton.disabled = false;
+    }
+  });
+
+  return section;
+}
+
+function createMatchesCard(contest, matches) {
   if (matches.length === 0) {
     return createInfoCard(
       "Матчи",
@@ -504,7 +700,12 @@ function createMatchesCard(matches) {
       text: match.status === "scheduled" ? "Запланирован" : match.status,
     });
 
-    item.append(teams, startsAt, status);
+    item.append(
+      teams,
+      startsAt,
+      status,
+      createMatchPredictionSection(contest, match),
+    );
     list.append(item);
   }
 
@@ -796,7 +997,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
     createContestDetailsCard(contest, () => {
       renderContestScreen(bootstrap);
     }),
-    createMatchesCard(matches),
+    createMatchesCard(contest, matches),
     createMatchFormCard(bootstrap, contest, state),
   );
 }

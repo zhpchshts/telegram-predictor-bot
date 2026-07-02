@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -9,10 +10,12 @@ from app.contest_service import (
     ContestCreationConflictError,
     ContestNotFoundError,
     MatchCreationConflictError,
+    PredictionUnavailableError,
     create_match,
     create_world_cup_2026_contest,
     get_active_contests,
     get_contest_details,
+    save_match_prediction,
 )
 from app.database import create_connection, initialize_database
 
@@ -61,6 +64,30 @@ def create_test_match(
         away_team_name=away_team_name,
         starts_at_utc=starts_at_utc,
         idempotency_key=idempotency_key,
+    )
+
+
+def save_test_prediction(
+    *,
+    database_path: Path,
+    contest_id: int,
+    match_id: int,
+    predicted_home_score: int = 2,
+    predicted_away_score: int = 1,
+    now_utc: datetime = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+):
+    return save_match_prediction(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest_id,
+        match_id=match_id,
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        predicted_home_score=predicted_home_score,
+        predicted_away_score=predicted_away_score,
+        now_utc=now_utc,
     )
 
 
@@ -670,3 +697,159 @@ def test_create_match_reuses_team_regardless_of_letter_case(
             "away_team_id": 3,
         },
     ]
+
+
+def test_save_match_prediction_creates_updates_and_does_not_write_event(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+
+    with create_connection(database_path) as connection:
+        events_count_before = connection.execute(
+            "SELECT COUNT(*) FROM event_log"
+        ).fetchone()[0]
+
+    first_result = save_test_prediction(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        predicted_home_score=2,
+        predicted_away_score=1,
+    )
+    second_result = save_test_prediction(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        predicted_home_score=3,
+        predicted_away_score=1,
+    )
+
+    assert first_result.was_created is True
+    assert first_result.prediction.home_score == 2
+    assert first_result.prediction.away_score == 1
+    assert second_result.was_created is False
+    assert second_result.prediction.home_score == 3
+    assert second_result.prediction.away_score == 1
+
+    contest_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+    )
+    assert contest_details.matches[0].prediction is not None
+    assert contest_details.matches[0].prediction.home_score == 3
+    assert contest_details.matches[0].prediction.away_score == 1
+
+    with create_connection(database_path) as connection:
+        predictions = connection.execute(
+            """
+            SELECT
+                predicted_home_score,
+                predicted_away_score
+            FROM match_predictions
+            """
+        ).fetchall()
+        events_count_after = connection.execute(
+            "SELECT COUNT(*) FROM event_log"
+        ).fetchone()[0]
+
+    assert [dict(prediction) for prediction in predictions] == [
+        {
+            "predicted_home_score": 3,
+            "predicted_away_score": 1,
+        }
+    ]
+    assert events_count_after == events_count_before
+
+
+def test_get_contest_details_returns_only_current_users_prediction(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+
+    save_test_prediction(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        predicted_home_score=2,
+        predicted_away_score=1,
+    )
+    save_match_prediction(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        match_id=match.id,
+        telegram_user_id=456,
+        first_name="Second",
+        last_name=None,
+        username="second-user",
+        predicted_home_score=0,
+        predicted_away_score=0,
+        now_utc=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+    )
+
+    primary_user_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+    )
+    second_user_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=456,
+    )
+
+    primary_prediction = primary_user_details.matches[0].prediction
+    second_prediction = second_user_details.matches[0].prediction
+
+    assert primary_prediction is not None
+    assert primary_prediction.home_score == 2
+    assert primary_prediction.away_score == 1
+    assert second_prediction is not None
+    assert second_prediction.home_score == 0
+    assert second_prediction.away_score == 0
+
+
+def test_save_match_prediction_rejects_match_at_or_after_start(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+
+    with pytest.raises(
+        PredictionUnavailableError,
+        match="Прогнозы на этот матч уже закрыты",
+    ):
+        save_test_prediction(
+            database_path=database_path,
+            contest_id=contest.id,
+            match_id=match.id,
+            now_utc=datetime(2026, 6, 11, 18, 0, tzinfo=timezone.utc),
+        )
+
+    with create_connection(database_path) as connection:
+        predictions_count = connection.execute(
+            "SELECT COUNT(*) FROM match_predictions"
+        ).fetchone()[0]
+
+    assert predictions_count == 0

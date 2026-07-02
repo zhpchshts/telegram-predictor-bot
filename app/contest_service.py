@@ -32,6 +32,14 @@ class MatchCreationConflictError(ValueError):
     """Raised when an idempotency key is reused with different request data."""
 
 
+class MatchNotFoundError(ValueError):
+    """Raised when a match is unavailable in the current contest."""
+
+
+class PredictionUnavailableError(ValueError):
+    """Raised when a prediction can no longer be changed."""
+
+
 @dataclass(frozen=True, slots=True)
 class ActiveContestSummary:
     id: int
@@ -47,12 +55,19 @@ class ContestCreationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class MatchPrediction:
+    home_score: int
+    away_score: int
+
+
+@dataclass(frozen=True, slots=True)
 class MatchSummary:
     id: int
     home_team_name: str
     away_team_name: str
     starts_at_utc: str
     status: str
+    prediction: MatchPrediction | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +82,12 @@ class ContestDetails:
 @dataclass(frozen=True, slots=True)
 class MatchCreationResult:
     match: MatchSummary
+    was_created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MatchPredictionSaveResult:
+    prediction: MatchPrediction
     was_created: bool
 
 
@@ -100,6 +121,7 @@ def get_contest_details(
     database_path: Path,
     telegram_chat_id: int,
     contest_id: int,
+    telegram_user_id: int | None = None,
 ) -> ContestDetails:
     with database_connection(database_path) as connection:
         contest_row = _get_active_contest_row(
@@ -114,16 +136,25 @@ def get_contest_details(
                 home_team.name AS home_team_name,
                 away_team.name AS away_team_name,
                 matches.starts_at_utc,
-                matches.status
+                matches.status,
+                match_predictions.predicted_home_score,
+                match_predictions.predicted_away_score
             FROM matches
             JOIN stages ON stages.id = matches.stage_id
             JOIN competitions ON competitions.id = stages.competition_id
             JOIN teams AS home_team ON home_team.id = matches.home_team_id
             JOIN teams AS away_team ON away_team.id = matches.away_team_id
+            LEFT JOIN match_predictions
+                ON match_predictions.match_id = matches.id
+                AND match_predictions.user_id = (
+                    SELECT users.id
+                    FROM users
+                    WHERE users.telegram_user_id = ?
+                )
             WHERE competitions.contest_id = ?
             ORDER BY matches.starts_at_utc ASC, matches.id ASC
             """,
-            (contest_id,),
+            (telegram_user_id, contest_id),
         ).fetchall()
 
     return ContestDetails(
@@ -339,6 +370,94 @@ def create_match(
     return MatchCreationResult(
         match=_match_summary_from_row(match_row),
         was_created=True,
+    )
+
+
+def save_match_prediction(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    match_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    predicted_home_score: int,
+    predicted_away_score: int,
+    now_utc: datetime | None = None,
+) -> MatchPredictionSaveResult:
+    normalized_home_score = _normalize_prediction_score(
+        predicted_home_score,
+        field_name="Прогноз первой команды",
+    )
+    normalized_away_score = _normalize_prediction_score(
+        predicted_away_score,
+        field_name="Прогноз второй команды",
+    )
+    resolved_now_utc = _resolve_now_utc(now_utc)
+
+    with database_connection(database_path) as connection:
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        match_row = _get_match_row(
+            connection,
+            contest_id=contest_id,
+            match_id=match_id,
+        )
+        if match_row is None:
+            raise MatchNotFoundError("Матч не найден.")
+
+        if not _is_prediction_open(match_row, now_utc=resolved_now_utc):
+            raise PredictionUnavailableError("Прогнозы на этот матч уже закрыты.")
+
+        user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+        existing_prediction = connection.execute(
+            """
+            SELECT id
+            FROM match_predictions
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            (match_id, user_id),
+        ).fetchone()
+        connection.execute(
+            """
+            INSERT INTO match_predictions (
+                match_id,
+                user_id,
+                predicted_home_score,
+                predicted_away_score
+            )
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(match_id, user_id) DO UPDATE SET
+                predicted_home_score = excluded.predicted_home_score,
+                predicted_away_score = excluded.predicted_away_score,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                match_id,
+                user_id,
+                normalized_home_score,
+                normalized_away_score,
+            ),
+        )
+
+    return MatchPredictionSaveResult(
+        prediction=MatchPrediction(
+            home_score=normalized_home_score,
+            away_score=normalized_away_score,
+        ),
+        was_created=existing_prediction is None,
     )
 
 
@@ -802,13 +921,68 @@ def _build_match_request_fingerprint(
 
 
 def _match_summary_from_row(row) -> MatchSummary:
+    prediction = None
+    if (
+        "predicted_home_score" in row.keys()
+        and row["predicted_home_score"] is not None
+        and row["predicted_away_score"] is not None
+    ):
+        prediction = MatchPrediction(
+            home_score=int(row["predicted_home_score"]),
+            away_score=int(row["predicted_away_score"]),
+        )
+
     return MatchSummary(
         id=int(row["id"]),
         home_team_name=str(row["home_team_name"]),
         away_team_name=str(row["away_team_name"]),
         starts_at_utc=str(row["starts_at_utc"]),
         status=str(row["status"]),
+        prediction=prediction,
     )
+
+
+def _normalize_prediction_score(
+    value: int,
+    *,
+    field_name: str,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} должен быть целым числом.")
+    if value < 0:
+        raise ValueError(f"{field_name} не может быть отрицательным.")
+    return value
+
+
+def _resolve_now_utc(now_utc: datetime | None) -> datetime:
+    if now_utc is None:
+        return datetime.now(timezone.utc)
+
+    if now_utc.tzinfo is None or now_utc.utcoffset() is None:
+        raise ValueError("Текущее время должно содержать часовой пояс.")
+
+    return now_utc.astimezone(timezone.utc)
+
+
+def _is_prediction_open(
+    match_row,
+    *,
+    now_utc: datetime,
+) -> bool:
+    if str(match_row["status"]) != "scheduled":
+        return False
+
+    try:
+        starts_at_utc = datetime.fromisoformat(
+            str(match_row["starts_at_utc"]).replace("Z", "+00:00")
+        )
+    except ValueError as error:
+        raise RuntimeError("У матча сохранена некорректная дата начала.") from error
+
+    if starts_at_utc.tzinfo is None or starts_at_utc.utcoffset() is None:
+        raise RuntimeError("У матча сохранена дата начала без часового пояса.")
+
+    return starts_at_utc.astimezone(timezone.utc) > now_utc
 
 
 def _normalize_contest_name(value: str) -> str:
