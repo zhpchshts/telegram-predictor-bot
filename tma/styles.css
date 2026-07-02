@@ -338,7 +338,7 @@ h2 {
 }
 
 .match-teams {
-  color: var(--tg-theme-text-color, #111111);
+  color: inherit;
   line-height: 1.35;
 }
 
