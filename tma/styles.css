@@ -316,6 +316,28 @@ h2 {
   font-weight: 700;
 }
 
+.contest-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.contest-tab {
+  min-width: 0;
+  padding-right: 8px;
+  padding-left: 8px;
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.contest-tab.is-active {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+}
+
 .matches-card {
   display: grid;
   gap: 14px;

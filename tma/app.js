@@ -5,6 +5,11 @@ let telegram = window.Telegram?.WebApp || null;
 const TELEGRAM_INIT_DATA_QUERY_PARAM = "tgWebAppData";
 const IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
 const CONTEST_NAME_MAX_LENGTH = 80;
+const CONTEST_TABS = [
+  { id: "predictions", label: "Прогнозы" },
+  { id: "leaderboard", label: "Рейтинг" },
+  { id: "matches", label: "Матчи" },
+];
 
 const chatSummaryElement = document.querySelector("#chat-summary");
 const appContentElement = document.querySelector("#app-content");
@@ -448,7 +453,7 @@ function createContestDetailsCard(contest, onBack) {
   });
   const description = createElement("p", {
     className: "subtitle",
-    text: "Добавляйте матчи, чтобы участники могли делать прогнозы.",
+    text: "Делайте прогнозы, следите за рейтингом и управляйте матчами.",
   });
   const actions = createElement("div", {
     className: "form-actions",
@@ -526,6 +531,37 @@ function createLeaderboardCard(leaderboard) {
   card.append(heading, description, list);
 
   return card;
+}
+
+function getActiveContestTab(tab) {
+  return CONTEST_TABS.some((candidate) => candidate.id === tab)
+    ? tab
+    : "predictions";
+}
+
+function createContestTabs(activeTab, onSelectTab) {
+  const tabs = createElement("nav", {
+    className: "contest-tabs",
+  });
+
+  tabs.setAttribute("aria-label", "Разделы конкурса");
+
+  for (const tab of CONTEST_TABS) {
+    const button = createActionButton(tab.label, "contest-tab");
+
+    if (tab.id === activeTab) {
+      button.classList.add("is-active");
+      button.setAttribute("aria-current", "page");
+    }
+
+    button.addEventListener("click", () => {
+      onSelectTab(tab.id);
+    });
+
+    tabs.append(button);
+  }
+
+  return tabs;
 }
 
 function isMatchPredictionOpen(match) {
@@ -1261,23 +1297,22 @@ function createMatchPredictionSection(contest, match) {
   return section;
 }
 
-function createMatchesCard(contest, matches, state, onResultSaved) {
+function createMatchesCard(
+  contest,
+  matches,
+  state,
+  onResultSaved,
+  { title, emptyMessages, showPredictions, showResults },
+) {
   if (matches.length === 0) {
-    return createInfoCard(
-      "Матчи",
-      [
-        "Матчей пока нет.",
-        "Добавьте первый матч ниже. После этого участники смогут перейти к прогнозам.",
-      ],
-      "matches-card",
-    );
+    return createInfoCard(title, emptyMessages, "matches-card");
   }
 
   const card = createElement("section", {
     className: "info-card matches-card",
   });
   const heading = createElement("h2", {
-    text: "Матчи",
+    text: title,
   });
   const list = createElement("ol", {
     className: "match-list",
@@ -1299,14 +1334,19 @@ function createMatchesCard(contest, matches, state, onResultSaved) {
       className: "match-status",
       text: getMatchStatusLabel(match.status),
     });
+    const sections = [teams, startsAt, status];
 
-    item.append(
-      teams,
-      startsAt,
-      status,
-      createMatchPredictionSection(contest, match),
-      createMatchResultSection(contest, match, state, onResultSaved),
-    );
+    if (showPredictions) {
+      sections.push(createMatchPredictionSection(contest, match));
+    }
+
+    if (showResults) {
+      sections.push(
+        createMatchResultSection(contest, match, state, onResultSaved),
+      );
+    }
+
+    item.append(...sections);
     list.append(item);
   }
 
@@ -1529,6 +1569,7 @@ function createMatchFormCard(bootstrap, contest, state) {
       };
 
       renderContestDetailsScreen(bootstrap, updatedContest, {
+        activeTab: "matches",
         matchFormMessage: successMessage,
         matchFormMessageType: "success",
       });
@@ -1595,23 +1636,65 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
   const leaderboard = Array.isArray(contest.leaderboard)
     ? contest.leaderboard
     : [];
-
-  chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
-  appContentElement.replaceChildren(
+  const activeTab = getActiveContestTab(state.activeTab);
+  const cards = [
     createContestDetailsCard(contest, () => {
       renderContestScreen(bootstrap);
     }),
-    createLeaderboardCard(leaderboard),
-    createMatchesCard(contest, matches, state, (resultState) => {
+    createContestTabs(activeTab, (nextTab) => {
+      if (nextTab === activeTab) {
+        return;
+      }
+
       void openContest(bootstrap, contest.id, {
         ...state,
-        resultMatchId: resultState.matchId,
-        resultMessage: resultState.message,
-        resultMessageType: resultState.type,
+        activeTab: nextTab,
       });
     }),
-    createMatchFormCard(bootstrap, contest, state),
-  );
+  ];
+
+  if (activeTab === "leaderboard") {
+    cards.push(createLeaderboardCard(leaderboard));
+  } else if (activeTab === "matches") {
+    cards.push(
+      createMatchesCard(
+        contest,
+        matches,
+        state,
+        (resultState) => {
+          void openContest(bootstrap, contest.id, {
+            ...state,
+            activeTab: "matches",
+            resultMatchId: resultState.matchId,
+            resultMessage: resultState.message,
+            resultMessageType: resultState.type,
+          });
+        },
+        {
+          title: "Матчи",
+          emptyMessages: ["Матчей пока нет.", "Добавьте первый матч ниже."],
+          showPredictions: false,
+          showResults: true,
+        },
+      ),
+      createMatchFormCard(bootstrap, contest, state),
+    );
+  } else {
+    cards.push(
+      createMatchesCard(contest, matches, state, null, {
+        title: "Прогнозы",
+        emptyMessages: [
+          "Матчей пока нет.",
+          "Когда кто-то добавит матч, здесь можно будет сохранить прогноз.",
+        ],
+        showPredictions: true,
+        showResults: false,
+      }),
+    );
+  }
+
+  chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
+  appContentElement.replaceChildren(...cards);
 }
 
 async function openContest(bootstrap, contestId, state = {}) {
