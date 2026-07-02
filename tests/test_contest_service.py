@@ -1402,3 +1402,81 @@ def test_save_match_result_validates_scores_before_writes(
         "away_score_final": None,
     }
     assert events_count_after == events_count_before
+
+
+def test_get_contest_details_returns_leaderboard_with_competition_places(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+
+    save_test_prediction(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        predicted_home_score=2,
+        predicted_away_score=1,
+        predicted_advancing_team_id=1,
+    )
+
+    for (
+        telegram_user_id,
+        first_name,
+        predicted_home_score,
+        predicted_away_score,
+        predicted_advancing_team_id,
+    ) in (
+        (456, "Alice", 3, 2, 1),
+        (789, "Bob", 4, 3, 1),
+        (101112, "Carol", 0, 1, 2),
+    ):
+        save_match_prediction(
+            database_path=database_path,
+            telegram_chat_id=TELEGRAM_CHAT_ID,
+            contest_id=contest.id,
+            match_id=match.id,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=None,
+            username=first_name.lower(),
+            predicted_home_score=predicted_home_score,
+            predicted_away_score=predicted_away_score,
+            predicted_advancing_team_id=predicted_advancing_team_id,
+            now_utc=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        )
+
+    save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        home_score=2,
+        away_score=1,
+        advancing_team_id=1,
+    )
+
+    contest_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+    )
+
+    assert [
+        (
+            entry.place,
+            entry.participant_name,
+            entry.total_points,
+        )
+        for entry in contest_details.leaderboard
+    ] == [
+        (1, "Eugene Sabir", 4),
+        (2, "Alice", 3),
+        (2, "Bob", 3),
+        (4, "Carol", 0),
+    ]

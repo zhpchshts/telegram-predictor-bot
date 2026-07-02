@@ -413,7 +413,18 @@ def _serialize_contest_details(contest) -> dict[str, object]:
         "name": contest.name,
         "slug": contest.slug,
         "created_at": contest.created_at,
+        "leaderboard": [
+            _serialize_leaderboard_entry(entry) for entry in contest.leaderboard
+        ],
         "matches": [_serialize_match(match) for match in contest.matches],
+    }
+
+
+def _serialize_leaderboard_entry(entry) -> dict[str, object]:
+    return {
+        "place": entry.place,
+        "participant_name": entry.participant_name,
+        "total_points": entry.total_points,
     }
 
 

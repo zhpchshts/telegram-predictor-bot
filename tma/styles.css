@@ -461,3 +461,45 @@ h2 {
   font-weight: 600;
   line-height: 1.45;
 }
+
+.leaderboard-list {
+  display: grid;
+  gap: 0;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.leaderboard-list-item {
+  display: grid;
+  grid-template-columns: minmax(2.25rem, auto) minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.leaderboard-list-item:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.leaderboard-place {
+  color: var(--accent);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.leaderboard-participant-name {
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.leaderboard-points {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}

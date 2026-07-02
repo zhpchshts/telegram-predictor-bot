@@ -465,6 +465,69 @@ function createContestDetailsCard(contest, onBack) {
   return card;
 }
 
+function createLeaderboardCard(leaderboard) {
+  const entries = Array.isArray(leaderboard) ? leaderboard : [];
+
+  if (entries.length === 0) {
+    return createInfoCard(
+      "Рейтинг",
+      [
+        "Участники появятся здесь после сохранения первого прогноза.",
+      ],
+      "leaderboard-card",
+    );
+  }
+
+  const card = createElement("section", {
+    className: "info-card leaderboard-card",
+  });
+  const heading = createElement("h2", {
+    text: "Рейтинг",
+  });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: "При равенстве баллов участники делят место: 1, 2, 2, 4.",
+  });
+  const list = createElement("ul", {
+    className: "leaderboard-list",
+  });
+
+  for (const entry of entries) {
+    const place = Number.isSafeInteger(entry?.place) ? entry.place : 0;
+    const participantName =
+      typeof entry?.participant_name === "string" &&
+      entry.participant_name
+        ? entry.participant_name
+        : "Участник";
+    const totalPoints = Number.isSafeInteger(entry?.total_points)
+      ? entry.total_points
+      : 0;
+
+    const item = createElement("li", {
+      className: "leaderboard-list-item",
+    });
+    const placeElement = createElement("span", {
+      className: "leaderboard-place",
+      text: `${place}.`,
+    });
+    const nameElement = createElement("span", {
+      className: "leaderboard-participant-name",
+      text: participantName,
+    });
+    const pointsElement = createElement("span", {
+      className: "leaderboard-points",
+      text: `${totalPoints} ${getPointsLabel(totalPoints)}`,
+    });
+
+    item.append(placeElement, nameElement, pointsElement);
+    list.append(item);
+  }
+
+  card.append(heading, description, list);
+
+  return card;
+}
+
 function isMatchPredictionOpen(match) {
   if (match.status !== "scheduled") {
     return false;
@@ -1529,12 +1592,16 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
   const chatTitle = chat.title || "этого чата";
   const userName = getUserDisplayName(user);
   const matches = Array.isArray(contest.matches) ? contest.matches : [];
+  const leaderboard = Array.isArray(contest.leaderboard)
+    ? contest.leaderboard
+    : [];
 
   chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
   appContentElement.replaceChildren(
     createContestDetailsCard(contest, () => {
       renderContestScreen(bootstrap);
     }),
+    createLeaderboardCard(leaderboard),
     createMatchesCard(contest, matches, state, (resultState) => {
       void openContest(bootstrap, contest.id, {
         ...state,

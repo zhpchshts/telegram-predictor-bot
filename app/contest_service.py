@@ -89,6 +89,13 @@ class MatchPredictionScore:
 
 
 @dataclass(frozen=True, slots=True)
+class ContestLeaderboardEntry:
+    place: int
+    participant_name: str
+    total_points: int
+
+
+@dataclass(frozen=True, slots=True)
 class MatchSummary:
     id: int
     tie_id: int
@@ -109,6 +116,7 @@ class ContestDetails:
     name: str
     slug: str
     created_at: str
+    leaderboard: tuple[ContestLeaderboardEntry, ...]
     matches: tuple[MatchSummary, ...]
 
 
@@ -225,13 +233,92 @@ def get_contest_details(
             (telegram_user_id, telegram_user_id, contest_id),
         ).fetchall()
 
-    return ContestDetails(
-        id=int(contest_row["id"]),
-        name=str(contest_row["name"]),
-        slug=str(contest_row["slug"]),
-        created_at=str(contest_row["created_at"]),
-        matches=tuple(_match_summary_from_row(row) for row in match_rows),
-    )
+        leaderboard_rows = connection.execute(
+            """
+            WITH contest_participants AS (
+                SELECT match_predictions.user_id
+                FROM match_predictions
+                JOIN matches
+                ON matches.id = match_predictions.match_id
+                JOIN stages
+                ON stages.id = matches.stage_id
+                JOIN competitions
+                ON competitions.id = stages.competition_id
+                WHERE competitions.contest_id = ?
+
+                UNION
+
+                SELECT tie_predictions.user_id
+                FROM tie_predictions
+                JOIN ties
+                ON ties.id = tie_predictions.tie_id
+                JOIN stages
+                ON stages.id = ties.stage_id
+                JOIN competitions
+                ON competitions.id = stages.competition_id
+                WHERE competitions.contest_id = ?
+            ),
+            score_points AS (
+                SELECT
+                    match_predictions.user_id,
+                    match_prediction_scores.points
+                FROM match_prediction_scores
+                JOIN match_predictions
+                ON match_predictions.id =
+                    match_prediction_scores.match_prediction_id
+                JOIN matches
+                ON matches.id = match_predictions.match_id
+                JOIN stages
+                ON stages.id = matches.stage_id
+                JOIN competitions
+                ON competitions.id = stages.competition_id
+                WHERE competitions.contest_id = ?
+
+                UNION ALL
+
+                SELECT
+                    tie_predictions.user_id,
+                    tie_prediction_scores.points
+                FROM tie_prediction_scores
+                JOIN tie_predictions
+                ON tie_predictions.id =
+                    tie_prediction_scores.tie_prediction_id
+                JOIN ties
+                ON ties.id = tie_predictions.tie_id
+                JOIN stages
+                ON stages.id = ties.stage_id
+                JOIN competitions
+                ON competitions.id = stages.competition_id
+                WHERE competitions.contest_id = ?
+            )
+            SELECT
+                users.id AS user_id,
+                users.first_name,
+                users.last_name,
+                COALESCE(SUM(score_points.points), 0) AS total_points
+            FROM contest_participants
+            JOIN users
+            ON users.id = contest_participants.user_id
+            LEFT JOIN score_points
+            ON score_points.user_id = contest_participants.user_id
+            GROUP BY users.id, users.first_name, users.last_name
+            ORDER BY
+                total_points DESC,
+                users.first_name COLLATE NOCASE ASC,
+                COALESCE(users.last_name, '') COLLATE NOCASE ASC,
+                users.id ASC
+            """,
+            (contest_id, contest_id, contest_id, contest_id),
+        ).fetchall()
+
+        return ContestDetails(
+            id=int(contest_row["id"]),
+            name=str(contest_row["name"]),
+            slug=str(contest_row["slug"]),
+            created_at=str(contest_row["created_at"]),
+            leaderboard=_contest_leaderboard_from_rows(leaderboard_rows),
+            matches=tuple(_match_summary_from_row(row) for row in match_rows),
+        )
 
 
 def create_match(
@@ -1375,6 +1462,38 @@ def _match_prediction_score_from_row(
         total_points=sum(award.points for award in awards),
         awards=tuple(awards),
     )
+
+
+def _contest_leaderboard_from_rows(
+    rows,
+) -> tuple[ContestLeaderboardEntry, ...]:
+    leaderboard: list[ContestLeaderboardEntry] = []
+    previous_total_points: int | None = None
+    place = 0
+
+    for position, row in enumerate(rows, start=1):
+        total_points = int(row["total_points"])
+
+        if total_points != previous_total_points:
+            place = position
+            previous_total_points = total_points
+
+        participant_name = (
+            " ".join(
+                str(value) for value in (row["first_name"], row["last_name"]) if value
+            )
+            or "Участник"
+        )
+
+        leaderboard.append(
+            ContestLeaderboardEntry(
+                place=place,
+                participant_name=participant_name,
+                total_points=total_points,
+            )
+        )
+
+    return tuple(leaderboard)
 
 
 def _normalize_prediction_score(

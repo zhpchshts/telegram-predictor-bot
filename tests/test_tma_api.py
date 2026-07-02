@@ -560,6 +560,7 @@ def test_get_contest_returns_details_with_empty_matches(
             "name": "ЧМ-2026: прогнозы",
             "slug": contest["slug"],
             "created_at": contest["created_at"],
+            "leaderboard": [],
             "matches": [],
         }
     }
@@ -1116,6 +1117,13 @@ def test_get_contest_returns_prediction_score_after_result(
             },
         ],
     }
+    assert contest_response.json()["contest"]["leaderboard"] == [
+        {
+            "place": 1,
+            "participant_name": "Eugene Sabir",
+            "total_points": 4,
+        }
+    ]
 
 
 def test_save_match_result_rejects_match_before_start(
