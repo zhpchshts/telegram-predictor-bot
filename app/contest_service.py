@@ -48,6 +48,10 @@ class MatchResultUnavailableError(ValueError):
     """Raised when a result cannot be saved for the match."""
 
 
+class ChampionUnavailableError(ValueError):
+    """Raised when the tournament champion cannot be saved yet."""
+
+
 @dataclass(frozen=True, slots=True)
 class ActiveContestSummary:
     id: int
@@ -89,6 +93,25 @@ class MatchPredictionScore:
 
 
 @dataclass(frozen=True, slots=True)
+class TeamSummary:
+    id: int
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ChampionPredictionDetails:
+    is_enabled: bool
+    deadline_at: str | None
+    points: int
+    candidates: tuple[TeamSummary, ...]
+    prediction: TeamSummary | None
+    actual_champion: TeamSummary | None
+    is_open: bool
+    is_tournament_completed: bool
+    awarded_points: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class ContestLeaderboardEntry:
     place: int
     participant_name: str
@@ -116,6 +139,7 @@ class ContestDetails:
     name: str
     slug: str
     created_at: str
+    champion_prediction: ChampionPredictionDetails
     leaderboard: tuple[ContestLeaderboardEntry, ...]
     matches: tuple[MatchSummary, ...]
 
@@ -233,17 +257,23 @@ def get_contest_details(
             (telegram_user_id, telegram_user_id, contest_id),
         ).fetchall()
 
+        champion_prediction = _get_champion_prediction_details(
+            connection,
+            contest_id=contest_id,
+            telegram_user_id=telegram_user_id,
+        )
+
         leaderboard_rows = connection.execute(
             """
             WITH contest_participants AS (
                 SELECT match_predictions.user_id
                 FROM match_predictions
                 JOIN matches
-                ON matches.id = match_predictions.match_id
+                    ON matches.id = match_predictions.match_id
                 JOIN stages
-                ON stages.id = matches.stage_id
+                    ON stages.id = matches.stage_id
                 JOIN competitions
-                ON competitions.id = stages.competition_id
+                    ON competitions.id = stages.competition_id
                 WHERE competitions.contest_id = ?
 
                 UNION
@@ -251,12 +281,18 @@ def get_contest_details(
                 SELECT tie_predictions.user_id
                 FROM tie_predictions
                 JOIN ties
-                ON ties.id = tie_predictions.tie_id
+                    ON ties.id = tie_predictions.tie_id
                 JOIN stages
-                ON stages.id = ties.stage_id
+                    ON stages.id = ties.stage_id
                 JOIN competitions
-                ON competitions.id = stages.competition_id
+                    ON competitions.id = stages.competition_id
                 WHERE competitions.contest_id = ?
+
+                UNION
+
+                SELECT champion_predictions.user_id
+                FROM champion_predictions
+                WHERE champion_predictions.contest_id = ?
             ),
             score_points AS (
                 SELECT
@@ -264,14 +300,14 @@ def get_contest_details(
                     match_prediction_scores.points
                 FROM match_prediction_scores
                 JOIN match_predictions
-                ON match_predictions.id =
-                    match_prediction_scores.match_prediction_id
+                    ON match_predictions.id =
+                        match_prediction_scores.match_prediction_id
                 JOIN matches
-                ON matches.id = match_predictions.match_id
+                    ON matches.id = match_predictions.match_id
                 JOIN stages
-                ON stages.id = matches.stage_id
+                    ON stages.id = matches.stage_id
                 JOIN competitions
-                ON competitions.id = stages.competition_id
+                    ON competitions.id = stages.competition_id
                 WHERE competitions.contest_id = ?
 
                 UNION ALL
@@ -281,15 +317,29 @@ def get_contest_details(
                     tie_prediction_scores.points
                 FROM tie_prediction_scores
                 JOIN tie_predictions
-                ON tie_predictions.id =
-                    tie_prediction_scores.tie_prediction_id
+                    ON tie_predictions.id =
+                        tie_prediction_scores.tie_prediction_id
                 JOIN ties
-                ON ties.id = tie_predictions.tie_id
+                    ON ties.id = tie_predictions.tie_id
                 JOIN stages
-                ON stages.id = ties.stage_id
+                    ON stages.id = ties.stage_id
                 JOIN competitions
-                ON competitions.id = stages.competition_id
+                    ON competitions.id = stages.competition_id
                 WHERE competitions.contest_id = ?
+
+                UNION ALL
+
+                SELECT
+                    champion_predictions.user_id,
+                    contests.champion_prediction_points AS points
+                FROM champion_predictions
+                JOIN contests
+                    ON contests.id = champion_predictions.contest_id
+                WHERE champion_predictions.contest_id = ?
+                    AND contests.champion_prediction_enabled = 1
+                    AND contests.champion_team_id IS NOT NULL
+                    AND champion_predictions.predicted_team_id =
+                        contests.champion_team_id
             )
             SELECT
                 users.id AS user_id,
@@ -298,9 +348,9 @@ def get_contest_details(
                 COALESCE(SUM(score_points.points), 0) AS total_points
             FROM contest_participants
             JOIN users
-            ON users.id = contest_participants.user_id
+                ON users.id = contest_participants.user_id
             LEFT JOIN score_points
-            ON score_points.user_id = contest_participants.user_id
+                ON score_points.user_id = contest_participants.user_id
             GROUP BY users.id, users.first_name, users.last_name
             ORDER BY
                 total_points DESC,
@@ -308,7 +358,14 @@ def get_contest_details(
                 COALESCE(users.last_name, '') COLLATE NOCASE ASC,
                 users.id ASC
             """,
-            (contest_id, contest_id, contest_id, contest_id),
+            (
+                contest_id,
+                contest_id,
+                contest_id,
+                contest_id,
+                contest_id,
+                contest_id,
+            ),
         ).fetchall()
 
         return ContestDetails(
@@ -316,6 +373,7 @@ def get_contest_details(
             name=str(contest_row["name"]),
             slug=str(contest_row["slug"]),
             created_at=str(contest_row["created_at"]),
+            champion_prediction=champion_prediction,
             leaderboard=_contest_leaderboard_from_rows(leaderboard_rows),
             matches=tuple(_match_summary_from_row(row) for row in match_rows),
         )
@@ -875,6 +933,279 @@ def save_match_result(
         )
 
 
+def save_champion_prediction_settings(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    enabled: bool,
+    deadline_at: str | None,
+    points: int,
+) -> None:
+    normalized_enabled = _normalize_champion_prediction_enabled(enabled)
+    normalized_points = _normalize_champion_prediction_points(points)
+
+    if normalized_enabled:
+        if deadline_at is None:
+            raise ValueError("Укажите, когда прогноз на чемпиона закрывается.")
+
+        normalized_deadline_at = _normalize_champion_prediction_deadline_at(deadline_at)
+    else:
+        normalized_deadline_at = None
+
+    with database_connection(database_path) as connection:
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        actor_user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+
+        previous_row = _get_champion_prediction_configuration_row(
+            connection,
+            contest_id=contest_id,
+        )
+        if previous_row is None:
+            raise RuntimeError("Не удалось найти настройки прогноза чемпиона.")
+
+        connection.execute(
+            """
+            UPDATE contests
+            SET
+                champion_prediction_enabled = ?,
+                champion_prediction_deadline_at = ?,
+                champion_prediction_points = ?,
+                champion_team_id = CASE
+                    WHEN ? = 1 THEN champion_team_id
+                    ELSE NULL
+                END
+            WHERE id = ?
+            """,
+            (
+                int(normalized_enabled),
+                normalized_deadline_at,
+                normalized_points,
+                int(normalized_enabled),
+                contest_id,
+            ),
+        )
+
+        _write_champion_event(
+            connection,
+            contest_id=contest_id,
+            actor_user_id=actor_user_id,
+            event_type="contest.champion_prediction_settings_updated",
+            payload={
+                "enabled": normalized_enabled,
+                "deadline_at": normalized_deadline_at,
+                "points": normalized_points,
+                "previous_enabled": bool(previous_row["champion_prediction_enabled"]),
+                "previous_deadline_at": previous_row["champion_prediction_deadline_at"],
+                "previous_points": int(previous_row["champion_prediction_points"]),
+            },
+        )
+
+
+def save_champion_prediction(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    predicted_team_id: int,
+    now_utc: datetime | None = None,
+) -> TeamSummary:
+    normalized_team_id = _normalize_champion_team_id(
+        predicted_team_id,
+        field_name="Прогноз на чемпиона",
+    )
+    resolved_now_utc = _resolve_now_utc(now_utc)
+
+    with database_connection(database_path) as connection:
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+
+        configuration_row = _get_champion_prediction_configuration_row(
+            connection,
+            contest_id=contest_id,
+        )
+        if configuration_row is None:
+            raise RuntimeError("Не удалось найти настройки прогноза чемпиона.")
+
+        if not bool(configuration_row["champion_prediction_enabled"]):
+            raise PredictionUnavailableError(
+                "Прогноз на чемпиона в этом конкурсе выключен."
+            )
+
+        deadline_at = configuration_row["champion_prediction_deadline_at"]
+        if deadline_at is None:
+            raise PredictionUnavailableError(
+                "Для прогноза на чемпиона не задан дедлайн."
+            )
+
+        if not _is_champion_prediction_open(
+            str(deadline_at),
+            now_utc=resolved_now_utc,
+        ):
+            raise PredictionUnavailableError("Прогноз на чемпиона уже закрыт.")
+
+        team_row = _get_champion_candidate_team_row(
+            connection,
+            contest_id=contest_id,
+            team_id=normalized_team_id,
+        )
+        if team_row is None:
+            raise ValueError("Выбранная команда не участвует в этом конкурсе.")
+
+        user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+
+        existing_prediction = connection.execute(
+            """
+            SELECT id
+            FROM champion_predictions
+            WHERE contest_id = ?
+                AND user_id = ?
+            """,
+            (contest_id, user_id),
+        ).fetchone()
+
+        connection.execute(
+            """
+            INSERT INTO champion_predictions (
+                contest_id,
+                user_id,
+                predicted_team_id
+            )
+            VALUES (?, ?, ?)
+            ON CONFLICT(contest_id, user_id) DO UPDATE SET
+                predicted_team_id = excluded.predicted_team_id,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (contest_id, user_id, normalized_team_id),
+        )
+
+        _write_champion_event(
+            connection,
+            contest_id=contest_id,
+            actor_user_id=user_id,
+            event_type=(
+                "champion_prediction.created"
+                if existing_prediction is None
+                else "champion_prediction.updated"
+            ),
+            payload={"predicted_team_id": normalized_team_id},
+        )
+
+        return _team_summary_from_row(team_row)
+
+
+def save_contest_champion(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    champion_team_id: int,
+) -> TeamSummary:
+    normalized_team_id = _normalize_champion_team_id(
+        champion_team_id,
+        field_name="Фактический чемпион",
+    )
+
+    with database_connection(database_path) as connection:
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+
+        configuration_row = _get_champion_prediction_configuration_row(
+            connection,
+            contest_id=contest_id,
+        )
+        if configuration_row is None:
+            raise RuntimeError("Не удалось найти настройки прогноза чемпиона.")
+
+        if not bool(configuration_row["champion_prediction_enabled"]):
+            raise ChampionUnavailableError("Сначала включите прогноз на чемпиона.")
+
+        if not _is_contest_completed(connection, contest_id=contest_id):
+            raise ChampionUnavailableError(
+                "Чемпиона можно указать после завершения всех матчей конкурса."
+            )
+
+        team_row = _get_champion_candidate_team_row(
+            connection,
+            contest_id=contest_id,
+            team_id=normalized_team_id,
+        )
+        if team_row is None:
+            raise ValueError("Выбранная команда не участвует в этом конкурсе.")
+
+        actor_user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+
+        previous_champion_team_id = configuration_row["champion_team_id"]
+        if previous_champion_team_id == normalized_team_id:
+            return _team_summary_from_row(team_row)
+
+        connection.execute(
+            """
+            UPDATE contests
+            SET champion_team_id = ?
+            WHERE id = ?
+            """,
+            (normalized_team_id, contest_id),
+        )
+
+        _write_champion_event(
+            connection,
+            contest_id=contest_id,
+            actor_user_id=actor_user_id,
+            event_type=(
+                "contest.champion_recorded"
+                if previous_champion_team_id is None
+                else "contest.champion_corrected"
+            ),
+            payload={
+                "champion_team_id": normalized_team_id,
+                "previous_champion_team_id": previous_champion_team_id,
+            },
+        )
+
+        return _team_summary_from_row(team_row)
+
+
 def create_world_cup_2026_contest(
     *,
     database_path: Path,
@@ -1213,6 +1544,344 @@ def _get_match_row(
         """,
         (contest_id, match_id),
     ).fetchone()
+
+
+def _get_champion_prediction_details(
+    connection,
+    *,
+    contest_id: int,
+    telegram_user_id: int | None,
+) -> ChampionPredictionDetails:
+    configuration_row = connection.execute(
+        """
+        SELECT
+            contests.champion_prediction_enabled,
+            contests.champion_prediction_deadline_at,
+            contests.champion_prediction_points,
+            actual_team.id AS actual_champion_id,
+            actual_team.name AS actual_champion_name,
+            predicted_team.id AS predicted_team_id,
+            predicted_team.name AS predicted_team_name
+        FROM contests
+        LEFT JOIN teams AS actual_team
+            ON actual_team.id = contests.champion_team_id
+        LEFT JOIN users AS prediction_user
+            ON prediction_user.telegram_user_id = ?
+        LEFT JOIN champion_predictions
+            ON champion_predictions.contest_id = contests.id
+            AND champion_predictions.user_id = prediction_user.id
+        LEFT JOIN teams AS predicted_team
+            ON predicted_team.id = champion_predictions.predicted_team_id
+        WHERE contests.id = ?
+        """,
+        (telegram_user_id, contest_id),
+    ).fetchone()
+
+    if configuration_row is None:
+        raise RuntimeError("Не удалось найти настройки прогноза чемпиона.")
+
+    is_enabled = bool(configuration_row["champion_prediction_enabled"])
+    deadline_at = configuration_row["champion_prediction_deadline_at"]
+    deadline_at_value = str(deadline_at) if deadline_at is not None else None
+
+    actual_champion = (
+        TeamSummary(
+            id=int(configuration_row["actual_champion_id"]),
+            name=str(configuration_row["actual_champion_name"]),
+        )
+        if configuration_row["actual_champion_id"] is not None
+        else None
+    )
+    prediction = (
+        TeamSummary(
+            id=int(configuration_row["predicted_team_id"]),
+            name=str(configuration_row["predicted_team_name"]),
+        )
+        if configuration_row["predicted_team_id"] is not None
+        else None
+    )
+
+    awarded_points = None
+    if is_enabled and actual_champion is not None and prediction is not None:
+        awarded_points = (
+            int(configuration_row["champion_prediction_points"])
+            if actual_champion.id == prediction.id
+            else 0
+        )
+
+    return ChampionPredictionDetails(
+        is_enabled=is_enabled,
+        deadline_at=deadline_at_value,
+        points=int(configuration_row["champion_prediction_points"]),
+        candidates=tuple(
+            _team_summary_from_row(row)
+            for row in _get_champion_candidate_team_rows(
+                connection,
+                contest_id=contest_id,
+            )
+        ),
+        prediction=prediction,
+        actual_champion=actual_champion,
+        is_open=(
+            is_enabled
+            and deadline_at_value is not None
+            and _is_champion_prediction_open(
+                deadline_at_value,
+                now_utc=_resolve_now_utc(None),
+            )
+        ),
+        is_tournament_completed=_is_contest_completed(
+            connection,
+            contest_id=contest_id,
+        ),
+        awarded_points=awarded_points,
+    )
+
+
+def _get_champion_prediction_configuration_row(
+    connection,
+    *,
+    contest_id: int,
+):
+    return connection.execute(
+        """
+        SELECT
+            champion_prediction_enabled,
+            champion_prediction_deadline_at,
+            champion_prediction_points,
+            champion_team_id
+        FROM contests
+        WHERE id = ?
+        """,
+        (contest_id,),
+    ).fetchone()
+
+
+def _get_champion_candidate_team_rows(
+    connection,
+    *,
+    contest_id: int,
+):
+    return connection.execute(
+        """
+        SELECT
+            teams.id,
+            teams.name
+        FROM teams
+        JOIN (
+            SELECT matches.home_team_id AS team_id
+            FROM matches
+            JOIN stages
+                ON stages.id = matches.stage_id
+            JOIN competitions
+                ON competitions.id = stages.competition_id
+            WHERE competitions.contest_id = ?
+
+            UNION
+
+            SELECT matches.away_team_id AS team_id
+            FROM matches
+            JOIN stages
+                ON stages.id = matches.stage_id
+            JOIN competitions
+                ON competitions.id = stages.competition_id
+            WHERE competitions.contest_id = ?
+        ) AS contest_teams
+            ON contest_teams.team_id = teams.id
+        ORDER BY teams.name COLLATE NOCASE ASC, teams.id ASC
+        """,
+        (contest_id, contest_id),
+    ).fetchall()
+
+
+def _get_champion_candidate_team_row(
+    connection,
+    *,
+    contest_id: int,
+    team_id: int,
+):
+    return connection.execute(
+        """
+        SELECT
+            teams.id,
+            teams.name
+        FROM teams
+        JOIN (
+            SELECT matches.home_team_id AS team_id
+            FROM matches
+            JOIN stages
+                ON stages.id = matches.stage_id
+            JOIN competitions
+                ON competitions.id = stages.competition_id
+            WHERE competitions.contest_id = ?
+
+            UNION
+
+            SELECT matches.away_team_id AS team_id
+            FROM matches
+            JOIN stages
+                ON stages.id = matches.stage_id
+            JOIN competitions
+                ON competitions.id = stages.competition_id
+            WHERE competitions.contest_id = ?
+        ) AS contest_teams
+            ON contest_teams.team_id = teams.id
+        WHERE teams.id = ?
+        """,
+        (contest_id, contest_id, team_id),
+    ).fetchone()
+
+
+def _is_contest_completed(
+    connection,
+    *,
+    contest_id: int,
+) -> bool:
+    completion_row = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS total_matches,
+            SUM(
+                CASE
+                    WHEN matches.status IN ('finished', 'cancelled') THEN 1
+                    ELSE 0
+                END
+            ) AS completed_matches
+        FROM matches
+        JOIN stages
+            ON stages.id = matches.stage_id
+        JOIN competitions
+            ON competitions.id = stages.competition_id
+        WHERE competitions.contest_id = ?
+        """,
+        (contest_id,),
+    ).fetchone()
+
+    if completion_row is None:
+        return False
+
+    total_matches = int(completion_row["total_matches"])
+    completed_matches = int(completion_row["completed_matches"] or 0)
+
+    return total_matches > 0 and total_matches == completed_matches
+
+
+def _is_champion_prediction_open(
+    deadline_at: str,
+    *,
+    now_utc: datetime,
+) -> bool:
+    try:
+        deadline_utc = datetime.fromisoformat(deadline_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RuntimeError(
+            "У конкурса сохранён некорректный дедлайн прогноза чемпиона."
+        ) from error
+
+    if deadline_utc.tzinfo is None or deadline_utc.utcoffset() is None:
+        raise RuntimeError(
+            "У конкурса сохранён дедлайн прогноза чемпиона без часового пояса."
+        )
+
+    return deadline_utc.astimezone(timezone.utc) > now_utc
+
+
+def _normalize_champion_prediction_enabled(value: bool) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(
+            "Настройка прогноза на чемпиона должна быть логическим значением."
+        )
+
+    return value
+
+
+def _normalize_champion_prediction_points(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("Баллы за чемпиона должны быть целым неотрицательным числом.")
+
+    if value < 0:
+        raise ValueError("Баллы за чемпиона не могут быть отрицательными.")
+
+    return value
+
+
+def _normalize_champion_prediction_deadline_at(value: str) -> str:
+    normalized_value = value.strip()
+    if not normalized_value:
+        raise ValueError("Укажите, когда прогноз на чемпиона закрывается.")
+
+    try:
+        parsed_value = datetime.fromisoformat(normalized_value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(
+            "Некорректная дата и время закрытия прогноза на чемпиона."
+        ) from error
+
+    if parsed_value.tzinfo is None or parsed_value.utcoffset() is None:
+        raise ValueError(
+            "Дата и время закрытия прогноза на чемпиона должны содержать часовой пояс."
+        )
+
+    return (
+        parsed_value.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _normalize_champion_team_id(
+    value: int,
+    *,
+    field_name: str,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} должен быть идентификатором команды.")
+
+    return value
+
+
+def _team_summary_from_row(row) -> TeamSummary:
+    return TeamSummary(
+        id=int(row["id"]),
+        name=str(row["name"]),
+    )
+
+
+def _write_champion_event(
+    connection,
+    *,
+    contest_id: int,
+    actor_user_id: int,
+    event_type: str,
+    payload: dict[str, object],
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO event_log (
+            contest_id,
+            actor_user_id,
+            event_type,
+            entity_type,
+            entity_id,
+            payload_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            contest_id,
+            actor_user_id,
+            event_type,
+            "contest",
+            contest_id,
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        ),
+    )
 
 
 def _get_or_create_first_stage(

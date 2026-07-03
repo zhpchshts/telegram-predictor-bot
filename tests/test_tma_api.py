@@ -560,6 +560,17 @@ def test_get_contest_returns_details_with_empty_matches(
             "name": "ЧМ-2026: прогнозы",
             "slug": contest["slug"],
             "created_at": contest["created_at"],
+            "champion_prediction": {
+                "is_enabled": False,
+                "deadline_at": None,
+                "points": 5,
+                "candidates": [],
+                "prediction": None,
+                "actual_champion": None,
+                "is_open": False,
+                "is_tournament_completed": False,
+                "awarded_points": None,
+            },
             "leaderboard": [],
             "matches": [],
         }

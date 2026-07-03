@@ -26,14 +26,19 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS contests (
-    id INTEGER PRIMARY KEY,
-    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    slug TEXT NOT NULL UNIQUE,
-    is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  id INTEGER PRIMARY KEY,
+  chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+  champion_prediction_enabled INTEGER NOT NULL DEFAULT 0
+    CHECK (champion_prediction_enabled IN (0, 1)),
+  champion_prediction_deadline_at TEXT,
+  champion_prediction_points INTEGER NOT NULL DEFAULT 5
+    CHECK (champion_prediction_points >= 0),
+  champion_team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
 CREATE TABLE IF NOT EXISTS contest_creation_requests (
     id INTEGER PRIMARY KEY,
     chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -169,6 +174,16 @@ CREATE TABLE IF NOT EXISTS tie_predictions (
     UNIQUE (tie_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS champion_predictions (
+  id INTEGER PRIMARY KEY,
+  contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  predicted_team_id INTEGER NOT NULL REFERENCES teams(id),
+  submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (contest_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS match_prediction_scores (
     id INTEGER PRIMARY KEY,
     match_prediction_id INTEGER NOT NULL REFERENCES match_predictions(id)
@@ -238,6 +253,12 @@ CREATE INDEX IF NOT EXISTS idx_tie_predictions_tie_id
 CREATE INDEX IF NOT EXISTS idx_tie_predictions_user_id
     ON tie_predictions(user_id);
 
+CREATE INDEX IF NOT EXISTS idx_champion_predictions_contest_id
+  ON champion_predictions(contest_id);
+
+CREATE INDEX IF NOT EXISTS idx_champion_predictions_user_id
+  ON champion_predictions(user_id);
+
 CREATE INDEX IF NOT EXISTS idx_event_log_contest_id
     ON event_log(contest_id);
 """
@@ -252,9 +273,53 @@ def create_connection(database_path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _migrate_contests_for_champion_predictions(
+    connection: sqlite3.Connection,
+) -> None:
+    contest_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(contests)")
+    }
+
+    if "champion_prediction_enabled" not in contest_columns:
+        connection.execute(
+            """
+            ALTER TABLE contests
+            ADD COLUMN champion_prediction_enabled INTEGER NOT NULL DEFAULT 0
+            CHECK (champion_prediction_enabled IN (0, 1))
+            """
+        )
+
+    if "champion_prediction_deadline_at" not in contest_columns:
+        connection.execute(
+            """
+            ALTER TABLE contests
+            ADD COLUMN champion_prediction_deadline_at TEXT
+            """
+        )
+
+    if "champion_prediction_points" not in contest_columns:
+        connection.execute(
+            """
+            ALTER TABLE contests
+            ADD COLUMN champion_prediction_points INTEGER NOT NULL DEFAULT 5
+            CHECK (champion_prediction_points >= 0)
+            """
+        )
+
+    if "champion_team_id" not in contest_columns:
+        connection.execute(
+            """
+            ALTER TABLE contests
+            ADD COLUMN champion_team_id INTEGER
+            REFERENCES teams(id) ON DELETE SET NULL
+            """
+        )
+
+
 def initialize_database(database_path: Path) -> None:
     with create_connection(database_path) as connection:
         connection.executescript(SCHEMA)
+        _migrate_contests_for_champion_predictions(connection)
 
 
 @contextmanager

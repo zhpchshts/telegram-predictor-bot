@@ -517,7 +517,7 @@ function createLeaderboardCard(leaderboard) {
   return card;
 }
 
-function createContestRulesCard() {
+function createContestRulesCard(championPrediction) {
   const card = document.createElement("details");
   const summary = document.createElement("summary");
   const summaryContent = createElement("div", {
@@ -527,9 +527,19 @@ function createContestRulesCard() {
     className: "contest-rules-title",
     text: "Правила начисления",
   });
+  const isChampionPredictionEnabled =
+    championPrediction?.is_enabled === true;
+  const championPoints = Number.isSafeInteger(championPrediction?.points)
+    ? championPrediction.points
+    : 5;
   const overview = createElement("span", {
     className: "contest-rules-overview",
-    text: "3 — счёт · 2 — разница · 1 — исход · +1 — победитель",
+    text: isChampionPredictionEnabled
+      ? (
+        "3 — счёт · 2 — разница · 1 — исход · +1 — победитель · " +
+        `+${championPoints} — чемпион`
+      )
+      : "3 — счёт · 2 — разница · 1 — исход · +1 — победитель",
   });
   const body = createElement("div", {
     className: "contest-rules-body",
@@ -546,11 +556,25 @@ function createContestRulesCard() {
     createElement("p", {
       text: "За верно выбранного победителя противостояния — ещё 1 балл.",
     }),
+  );
+
+  if (isChampionPredictionEnabled) {
+    body.append(
+      createElement("p", {
+        text: (
+          `За верно выбранного чемпиона — ещё ${championPoints} ` +
+          `${getPointsLabel(championPoints)}.`
+        ),
+      }),
+    );
+  }
+
+  body.append(
     createElement("p", {
       text: "Счёт учитывается после 90 или 120 минут. Голы серии пенальти в него не входят.",
     }),
     createElement("p", {
-      text: "Прогноз можно изменить до начала матча.",
+      text: "Прогноз на матч можно изменить до начала матча.",
     }),
   );
 
@@ -1343,14 +1367,739 @@ function createMatchPredictionSection(contest, match) {
   return section;
 }
 
+
+function getChampionPrediction(contest) {
+  const championPrediction = contest?.champion_prediction;
+
+  if (!championPrediction || typeof championPrediction !== "object") {
+    return {
+      is_enabled: false,
+      deadline_at: null,
+      points: 5,
+      candidates: [],
+      prediction: null,
+      actual_champion: null,
+      is_open: false,
+      is_tournament_completed: false,
+      awarded_points: null,
+    };
+  }
+
+  return {
+    is_enabled: championPrediction.is_enabled === true,
+    deadline_at: typeof championPrediction.deadline_at === "string"
+      ? championPrediction.deadline_at
+      : null,
+    points: Number.isSafeInteger(championPrediction.points)
+      ? championPrediction.points
+      : 5,
+    candidates: Array.isArray(championPrediction.candidates)
+      ? championPrediction.candidates
+      : [],
+    prediction: championPrediction.prediction || null,
+    actual_champion: championPrediction.actual_champion || null,
+    is_open: championPrediction.is_open === true,
+    is_tournament_completed: championPrediction.is_tournament_completed === true,
+    awarded_points: Number.isSafeInteger(championPrediction.awarded_points)
+      ? championPrediction.awarded_points
+      : null,
+  };
+}
+
+function formatDateTimeLocalValue(utcValue) {
+  if (typeof utcValue !== "string") {
+    return "";
+  }
+
+  const date = new Date(utcValue);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function createChampionTeamSelect(
+  candidates,
+  {
+    id,
+    name,
+    selectedTeamId = null,
+    includeEmptyOption = true,
+  } = {},
+) {
+  const select = createElement("select", {
+    className: "text-input champion-team-select",
+  });
+  const normalizedSelectedTeamId = Number.isSafeInteger(selectedTeamId)
+    ? selectedTeamId
+    : null;
+
+  select.id = id || "";
+  select.name = name || "";
+
+  if (includeEmptyOption) {
+    const emptyOption = createElement("option", {
+      text: "Выберите команду",
+    });
+
+    emptyOption.value = "";
+    emptyOption.disabled = true;
+    emptyOption.selected = normalizedSelectedTeamId === null;
+    select.append(emptyOption);
+  }
+
+  for (const candidate of candidates) {
+    if (
+      !Number.isSafeInteger(candidate?.id) ||
+      typeof candidate?.name !== "string" ||
+      !candidate.name
+    ) {
+      continue;
+    }
+
+    const option = createElement("option", {
+      text: candidate.name,
+    });
+
+    option.value = String(candidate.id);
+    option.selected = candidate.id === normalizedSelectedTeamId;
+    select.append(option);
+  }
+
+  return select;
+}
+
+function createChampionPredictionSettingsDisclosure(
+  contest,
+  championPrediction,
+  onUpdated,
+) {
+  const disclosure = document.createElement("details");
+  const summary = document.createElement("summary");
+  const summaryContent = createElement("div", {
+    className: "match-form-summary-content",
+  });
+  const title = createElement("span", {
+    className: "match-form-title",
+    text: championPrediction.is_enabled
+      ? "Настройки прогноза чемпиона"
+      : "Настроить прогноз чемпиона",
+  });
+  const overview = createElement("span", {
+    className: "match-form-overview",
+    text: championPrediction.is_enabled
+      ? "Срок и баллы"
+      : "Включить прогноз",
+  });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: (
+      "Укажите, до какого времени можно выбрать чемпиона и " +
+      "сколько баллов принесёт верный прогноз."
+    ),
+  });
+  const form = createElement("form", {
+    className: "form-fields",
+  });
+  const enabledField = createElement("label", {
+    className: "champion-enable-option",
+  });
+  const enabledInput = createElement("input");
+  const enabledText = createElement("span", {
+    text: "Включить прогноз на чемпиона",
+  });
+  const deadlineField = createElement("label", {
+    className: "form-field",
+  });
+  const deadlineLabel = createElement("span", {
+    className: "form-field-label",
+    text: "Прогноз закрывается",
+  });
+  const deadlineInput = createElement("input", {
+    className: "text-input",
+  });
+  const pointsField = createElement("label", {
+    className: "form-field",
+  });
+  const pointsLabel = createElement("span", {
+    className: "form-field-label",
+    text: "Баллы за верный прогноз",
+  });
+  const pointsInput = createElement("input", {
+    className: "text-input",
+  });
+  const hint = createElement("p", {
+    className: "form-hint",
+    text: (
+      "После указанного времени участники больше не смогут " +
+      "создать или изменить свой выбор."
+    ),
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const submitButton = createActionButton(
+    championPrediction.is_enabled ? "Сохранить настройки" : "Включить прогноз",
+    "primary-action-button",
+    "submit",
+  );
+
+  disclosure.className = "match-form-disclosure champion-settings-disclosure";
+  summaryContent.append(title, overview);
+  summary.append(summaryContent);
+
+  enabledInput.id = `contest-${contest.id}-champion-enabled`;
+  enabledInput.name = `contest-${contest.id}-champion-enabled`;
+  enabledInput.type = "checkbox";
+  enabledInput.checked = championPrediction.is_enabled;
+  enabledField.append(enabledInput, enabledText);
+
+  deadlineInput.id = `contest-${contest.id}-champion-deadline`;
+  deadlineInput.name = `contest-${contest.id}-champion-deadline`;
+  deadlineInput.type = "datetime-local";
+  deadlineInput.step = "60";
+  deadlineInput.value = formatDateTimeLocalValue(
+    championPrediction.deadline_at,
+  );
+
+  pointsInput.id = `contest-${contest.id}-champion-points`;
+  pointsInput.name = `contest-${contest.id}-champion-points`;
+  pointsInput.type = "number";
+  pointsInput.min = "0";
+  pointsInput.step = "1";
+  pointsInput.inputMode = "numeric";
+  pointsInput.value = String(championPrediction.points);
+
+  function syncEnabledState() {
+    const isEnabled = enabledInput.checked;
+
+    deadlineInput.disabled = !isEnabled;
+    deadlineInput.required = isEnabled;
+    deadlineField.classList.toggle("is-disabled", !isEnabled);
+    hint.hidden = !isEnabled;
+    submitButton.textContent = isEnabled
+      ? (
+        championPrediction.is_enabled
+          ? "Сохранить настройки"
+          : "Включить прогноз"
+      )
+      : "Выключить прогноз";
+  }
+
+  syncEnabledState();
+
+  enabledInput.addEventListener("change", syncEnabledState);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const enabled = enabledInput.checked;
+    const pointsValue = pointsInput.value.trim();
+    const points = Number(pointsValue);
+    const deadlineAt = enabled ? new Date(deadlineInput.value) : null;
+
+    if (
+      !pointsValue ||
+      !Number.isSafeInteger(points) ||
+      points < 0
+    ) {
+      pointsInput.setAttribute("aria-invalid", "true");
+      setFormMessage(
+        message,
+        "Укажите целое неотрицательное количество баллов.",
+        "error",
+      );
+      pointsInput.focus();
+      return;
+    }
+
+    pointsInput.removeAttribute("aria-invalid");
+
+    if (
+      enabled &&
+      (
+        !deadlineInput.value ||
+        deadlineAt === null ||
+        Number.isNaN(deadlineAt.getTime())
+      )
+    ) {
+      deadlineInput.setAttribute("aria-invalid", "true");
+      setFormMessage(
+        message,
+        "Укажите дату и время закрытия прогноза.",
+        "error",
+      );
+      deadlineInput.focus();
+      return;
+    }
+
+    deadlineInput.removeAttribute("aria-invalid");
+
+    submitButton.disabled = true;
+    submitButton.textContent = "Сохраняем…";
+
+    try {
+      const result = await apiRequest(
+        `/api/tma/contests/${contest.id}/champion-prediction/settings`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            enabled,
+            deadline_at: enabled ? deadlineAt.toISOString() : null,
+            points,
+          }),
+        },
+      );
+
+      if (!result || !result.champion_prediction) {
+        throw new Error(
+          "Сервер вернул некорректный ответ при сохранении настроек.",
+        );
+      }
+
+      onUpdated();
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : "Не удалось сохранить настройки прогноза.";
+
+      setFormMessage(message, errorMessage, "error");
+      syncEnabledState();
+      submitButton.disabled = false;
+    }
+  });
+
+  deadlineField.append(deadlineLabel, deadlineInput);
+  pointsField.append(pointsLabel, pointsInput);
+  actions.append(submitButton);
+  form.append(
+    enabledField,
+    deadlineField,
+    pointsField,
+    hint,
+    message,
+    actions,
+  );
+  disclosure.append(summary, description, form);
+
+  return disclosure;
+}
+
+function createChampionPredictionChoiceSection(
+  contest,
+  championPrediction,
+  onUpdated,
+) {
+  const section = createElement("div", {
+    className: "champion-card-section",
+  });
+  const heading = createElement("h3", {
+    className: "match-prediction-heading",
+    text: "Ваш прогноз",
+  });
+  const candidates = championPrediction.candidates;
+
+  section.append(heading);
+
+  if (candidates.length === 0) {
+    section.append(
+      createElement("p", {
+        className: "match-prediction-closed",
+        text: "Добавьте хотя бы один матч, чтобы выбрать чемпиона.",
+      }),
+    );
+    return section;
+  }
+
+  if (!championPrediction.is_open) {
+    const text = championPrediction.prediction
+      ? `Ваш прогноз: ${championPrediction.prediction.name}.`
+      : "Вы не выбрали чемпиона до закрытия прогноза.";
+
+    section.append(
+      createElement("p", {
+        className: "match-prediction-closed",
+        text,
+      }),
+    );
+    return section;
+  }
+
+  const hint = createElement("p", {
+    className: "match-prediction-hint",
+    text: championPrediction.prediction
+      ? "До дедлайна можно изменить выбранную команду."
+      : "Выберите команду, которая, по вашему мнению, станет чемпионом.",
+  });
+  const form = createElement("form", {
+    className: "champion-choice-form",
+  });
+  const field = createElement("label", {
+    className: "form-field",
+  });
+  const label = createElement("span", {
+    className: "form-field-label",
+    text: "Чемпион турнира",
+  });
+  const select = createChampionTeamSelect(candidates, {
+    id: `contest-${contest.id}-champion-prediction`,
+    name: `contest-${contest.id}-champion-prediction`,
+    selectedTeamId: championPrediction.prediction?.id ?? null,
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const submitButton = createActionButton(
+    championPrediction.prediction ? "Изменить прогноз" : "Сохранить прогноз",
+    "primary-action-button",
+    "submit",
+  );
+
+  field.append(label, select);
+  actions.append(submitButton);
+  form.append(field, message, actions);
+  section.append(hint, form);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const predictedTeamId = Number(select.value);
+
+    if (!Number.isSafeInteger(predictedTeamId) || predictedTeamId <= 0) {
+      select.setAttribute("aria-invalid", "true");
+      setFormMessage(message, "Выберите команду.", "error");
+      select.focus();
+      return;
+    }
+
+    select.removeAttribute("aria-invalid");
+    submitButton.disabled = true;
+    submitButton.textContent = "Сохраняем…";
+
+    try {
+      const result = await apiRequest(
+        `/api/tma/contests/${contest.id}/champion-prediction`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            predicted_team_id: predictedTeamId,
+          }),
+        },
+      );
+
+      if (!result || !result.prediction) {
+        throw new Error(
+          "Сервер вернул некорректный ответ при сохранении прогноза.",
+        );
+      }
+
+      onUpdated();
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : "Не удалось сохранить прогноз на чемпиона.";
+
+      setFormMessage(message, errorMessage, "error");
+      submitButton.textContent = championPrediction.prediction
+        ? "Изменить прогноз"
+        : "Сохранить прогноз";
+      submitButton.disabled = false;
+    }
+  });
+
+  return section;
+}
+
+function createContestChampionSection(
+  contest,
+  championPrediction,
+  onUpdated,
+) {
+  const section = createElement("div", {
+    className: "champion-card-section",
+  });
+  const heading = createElement("h3", {
+    className: "match-prediction-heading",
+    text: "Итог турнира",
+  });
+  const candidates = championPrediction.candidates;
+
+  section.append(heading);
+
+  if (!championPrediction.is_tournament_completed) {
+    section.append(
+      createElement("p", {
+        className: "match-prediction-closed",
+        text: (
+          "Фактического чемпиона можно указать после завершения " +
+          "всех матчей конкурса."
+        ),
+      }),
+    );
+    return section;
+  }
+
+  if (candidates.length === 0) {
+    return section;
+  }
+
+  const disclosure = document.createElement("details");
+  const summary = document.createElement("summary");
+  const summaryTitle = createElement("span", {
+    className: "match-result-summary-title",
+    text: championPrediction.actual_champion
+      ? `Чемпион: ${championPrediction.actual_champion.name}`
+      : "Указать чемпиона",
+  });
+  const summaryAction = createElement("span", {
+    className: "match-result-summary-action",
+    text: championPrediction.actual_champion ? "Изменить" : "Открыть",
+  });
+  const hint = createElement("p", {
+    className: "match-prediction-hint",
+    text: (
+      "Выберите победителя турнира. При исправлении рейтинг " +
+      "автоматически пересчитается."
+    ),
+  });
+  const form = createElement("form", {
+    className: "champion-choice-form",
+  });
+  const field = createElement("label", {
+    className: "form-field",
+  });
+  const label = createElement("span", {
+    className: "form-field-label",
+    text: "Фактический чемпион",
+  });
+  const select = createChampionTeamSelect(candidates, {
+    id: `contest-${contest.id}-actual-champion`,
+    name: `contest-${contest.id}-actual-champion`,
+    selectedTeamId: championPrediction.actual_champion?.id ?? null,
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const submitButton = createActionButton(
+    championPrediction.actual_champion
+      ? "Сохранить изменения"
+      : "Сохранить чемпиона",
+    "primary-action-button",
+    "submit",
+  );
+
+  disclosure.className = "match-result-disclosure champion-result-disclosure";
+  summary.append(summaryTitle, summaryAction);
+  field.append(label, select);
+  actions.append(submitButton);
+  form.append(field, message, actions);
+  disclosure.append(summary, hint, form);
+  section.append(disclosure);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const championTeamId = Number(select.value);
+
+    if (!Number.isSafeInteger(championTeamId) || championTeamId <= 0) {
+      select.setAttribute("aria-invalid", "true");
+      setFormMessage(message, "Выберите фактического чемпиона.", "error");
+      select.focus();
+      return;
+    }
+
+    select.removeAttribute("aria-invalid");
+    submitButton.disabled = true;
+    submitButton.textContent = "Сохраняем…";
+
+    try {
+      const result = await apiRequest(
+        `/api/tma/contests/${contest.id}/champion`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            champion_team_id: championTeamId,
+          }),
+        },
+      );
+
+      if (!result || !result.champion) {
+        throw new Error(
+          "Сервер вернул некорректный ответ при сохранении чемпиона.",
+        );
+      }
+
+      onUpdated();
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : "Не удалось сохранить фактического чемпиона.";
+
+      setFormMessage(message, errorMessage, "error");
+      submitButton.textContent = championPrediction.actual_champion
+        ? "Сохранить изменения"
+        : "Сохранить чемпиона";
+      submitButton.disabled = false;
+    }
+  });
+
+  return section;
+}
+
+function createChampionPredictionCard(contest, state, onUpdated) {
+  const championPrediction = getChampionPrediction(contest);
+  const item = createElement("li", {
+    className: "match-list-item champion-card",
+  });
+  const header = createElement("div", {
+    className: "match-card-header",
+  });
+  const title = createElement("strong", {
+    className: "match-teams",
+    text: "Чемпион турнира",
+  });
+  const status = createElement("span", {
+    className: "champion-card-status",
+  });
+  const meta = createElement("div", {
+    className: "champion-card-meta",
+  });
+
+  if (!championPrediction.is_enabled) {
+    status.textContent = "Не настроен";
+    status.classList.add("champion-card-status--disabled");
+  } else if (championPrediction.actual_champion) {
+    status.textContent = "Завершён";
+    status.classList.add("champion-card-status--completed");
+  } else if (championPrediction.is_open) {
+    status.textContent = "Открыт";
+    status.classList.add("champion-card-status--open");
+  } else {
+    status.textContent = "Закрыт";
+    status.classList.add("champion-card-status--closed");
+  }
+
+  header.append(title, status);
+  item.append(header);
+
+  if (!championPrediction.is_enabled) {
+    item.append(
+      createElement("p", {
+        className: "match-prediction-closed",
+        text: "Настройте прогноз на чемпиона, чтобы участники могли выбрать команду.",
+      }),
+      createChampionPredictionSettingsDisclosure(
+        contest,
+        championPrediction,
+        onUpdated,
+      ),
+    );
+    return item;
+  }
+
+  meta.append(
+    createElement("p", {
+      className: "match-meta",
+      text: championPrediction.deadline_at
+        ? `Прогноз закрывается: ${formatMatchStartsAt(championPrediction.deadline_at)}`
+        : "Дедлайн прогноза не задан.",
+    }),
+    createElement("p", {
+      className: "match-meta",
+      text: `За верный прогноз: +${championPrediction.points} ${getPointsLabel(championPrediction.points)}.`,
+    }),
+  );
+
+  item.append(meta);
+
+  if (
+    championPrediction.actual_champion &&
+    championPrediction.prediction
+  ) {
+    item.append(
+      createElement("p", {
+        className: championPrediction.awarded_points > 0
+          ? "champion-award champion-award--success"
+          : "champion-award",
+        text: championPrediction.awarded_points > 0
+          ? (
+            `Ваш прогноз: ${championPrediction.prediction.name}. ` +
+            `Начислено: +${championPrediction.awarded_points} ` +
+            `${getPointsLabel(championPrediction.awarded_points)}.`
+          )
+          : `Ваш прогноз: ${championPrediction.prediction.name}.`,
+      }),
+    );
+  }
+
+  item.append(
+    createChampionPredictionChoiceSection(
+      contest,
+      championPrediction,
+      onUpdated,
+    ),
+    createContestChampionSection(
+      contest,
+      championPrediction,
+      onUpdated,
+    ),
+    createChampionPredictionSettingsDisclosure(
+      contest,
+      championPrediction,
+      onUpdated,
+    ),
+  );
+
+  return item;
+}
+
 function createMatchesCard(
   contest,
   matches,
   state,
   onResultSaved,
-  { title, emptyMessages, showPredictions, showResults },
+  {
+    title,
+    emptyMessages,
+    showPredictions,
+    showResults,
+    leadingItems = [],
+  },
 ) {
-  if (matches.length === 0) {
+  const normalizedLeadingItems = Array.isArray(leadingItems)
+    ? leadingItems.filter(Boolean)
+    : [];
+
+  if (matches.length === 0 && normalizedLeadingItems.length === 0) {
     return createInfoCard(title, emptyMessages, "matches-card");
   }
 
@@ -1360,52 +2109,71 @@ function createMatchesCard(
   const heading = createElement("h2", {
     text: title,
   });
-  const list = createElement("ol", {
-    className: "match-list",
-  });
 
-  for (const match of matches) {
-    const item = createElement("li", {
-      className: "match-list-item",
-    });
-    const header = createElement("div", {
-      className: "match-card-header",
-    });
-    const teams = createElement("strong", {
-      className: "match-teams",
-      text: `${match.home_team_name} — ${match.away_team_name}`,
-    });
-    const status = createElement("span", {
-      className: `match-status match-status--${match.status}`,
-      text: getMatchStatusLabel(match.status),
-    });
-    const meta = createElement("div", {
-      className: "match-card-meta",
-    });
-    const startsAt = createElement("p", {
-      className: "match-meta",
-      text: `Начало: ${formatMatchStartsAt(match.starts_at_utc)}`,
-    });
-    const sections = [header, meta];
+  card.append(heading);
 
-    header.append(teams, status);
-    meta.append(startsAt);
+  if (normalizedLeadingItems.length > 0 || matches.length > 0) {
+    const list = createElement("ol", {
+      className: "match-list",
+    });
 
-    if (showPredictions) {
-      sections.push(createMatchPredictionSection(contest, match));
+    list.append(...normalizedLeadingItems);
+
+    for (const match of matches) {
+      const item = createElement("li", {
+        className: "match-list-item",
+      });
+      const header = createElement("div", {
+        className: "match-card-header",
+      });
+      const teams = createElement("strong", {
+        className: "match-teams",
+        text: `${match.home_team_name} — ${match.away_team_name}`,
+      });
+      const status = createElement("span", {
+        className: `match-status match-status--${match.status}`,
+        text: getMatchStatusLabel(match.status),
+      });
+      const meta = createElement("div", {
+        className: "match-card-meta",
+      });
+      const startsAt = createElement("p", {
+        className: "match-meta",
+        text: `Начало: ${formatMatchStartsAt(match.starts_at_utc)}`,
+      });
+      const sections = [header, meta];
+
+      header.append(teams, status);
+      meta.append(startsAt);
+
+      if (showPredictions) {
+        sections.push(createMatchPredictionSection(contest, match));
+      }
+
+      if (showResults) {
+        sections.push(
+          createMatchResultSection(contest, match, state, onResultSaved),
+        );
+      }
+
+      item.append(...sections);
+      list.append(item);
     }
 
-    if (showResults) {
-      sections.push(
-        createMatchResultSection(contest, match, state, onResultSaved),
-      );
-    }
-
-    item.append(...sections);
-    list.append(item);
+    card.append(list);
   }
 
-  card.append(heading, list);
+  if (matches.length === 0) {
+    for (const message of emptyMessages) {
+      card.append(
+        createElement("p", {
+          className: "subtitle",
+          text: message,
+        }),
+      );
+    }
+  }
+
   return card;
 }
 
@@ -1746,13 +2514,25 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
           emptyMessages: ["Матчей пока нет.", "Добавьте первый матч ниже."],
           showPredictions: false,
           showResults: true,
+          leadingItems: [
+            createChampionPredictionCard(
+              contest,
+              state,
+              () => {
+                void openContest(bootstrap, contest.id, {
+                  ...state,
+                  activeTab: "matches",
+                });
+              },
+            ),
+          ],
         },
       ),
       createMatchFormCard(bootstrap, contest, state),
     );
   } else {
     cards.push(
-      createContestRulesCard(),
+      createContestRulesCard(contest.champion_prediction),
       createMatchesCard(contest, matches, state, null, {
         title: "Прогнозы",
         emptyMessages: [

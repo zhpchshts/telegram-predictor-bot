@@ -789,3 +789,123 @@ summary:focus-visible {
     font-size: 0.77rem;
   }
 }
+
+.champion-card {
+  gap: 11px;
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface-subtle));
+}
+
+.champion-card-meta {
+  display: grid;
+  gap: 3px;
+}
+
+.champion-card-status {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-height: 22px;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.champion-card-status--open {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--accent);
+}
+
+.champion-card-status--closed,
+.champion-card-status--disabled {
+  border-color: color-mix(in srgb, var(--text) 16%, var(--border));
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  color: var(--muted);
+}
+
+.champion-card-status--completed {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--border));
+  background: color-mix(in srgb, var(--success) 9%, transparent);
+  color: var(--success);
+}
+
+.champion-card-section {
+  display: grid;
+  gap: 10px;
+  margin-top: 2px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.champion-choice-form {
+  display: grid;
+  gap: 12px;
+}
+
+.champion-team-select {
+  cursor: pointer;
+}
+
+.champion-enable-option {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.champion-enable-option input {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.form-field.is-disabled {
+  opacity: 0.55;
+}
+
+.champion-award {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.champion-award--success {
+  color: var(--success);
+}
+
+.champion-settings-disclosure > .subtitle,
+.champion-settings-disclosure > .form-fields,
+.champion-result-disclosure > .match-prediction-hint,
+.champion-result-disclosure > .champion-choice-form {
+  margin-right: 12px;
+  margin-left: 12px;
+}
+
+.champion-settings-disclosure > .subtitle,
+.champion-result-disclosure > .match-prediction-hint {
+  margin-top: 1px;
+}
+
+.champion-settings-disclosure > .form-fields,
+.champion-result-disclosure > .champion-choice-form {
+  margin-top: 16px;
+  margin-bottom: 12px;
+}

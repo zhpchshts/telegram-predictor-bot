@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from app.config import load_settings
 from app.contest_service import (
+    ChampionUnavailableError,
     ContestCreationConflictError,
     ContestNotFoundError,
     MatchCreationConflictError,
@@ -18,6 +19,9 @@ from app.contest_service import (
     create_world_cup_2026_contest,
     get_active_contests,
     get_contest_details,
+    save_champion_prediction,
+    save_champion_prediction_settings,
+    save_contest_champion,
     save_match_prediction,
     save_match_result,
 )
@@ -55,6 +59,20 @@ class SaveMatchResultRequest(BaseModel):
     advancing_team_id: int
 
 
+class SaveChampionPredictionSettingsRequest(BaseModel):
+    enabled: bool
+    deadline_at: str | None = None
+    points: int
+
+
+class SaveChampionPredictionRequest(BaseModel):
+    predicted_team_id: int
+
+
+class SaveContestChampionRequest(BaseModel):
+    champion_team_id: int
+
+
 @router.get("/bootstrap")
 async def get_tma_bootstrap(
     x_telegram_init_data: Annotated[
@@ -66,12 +84,10 @@ async def get_tma_bootstrap(
         x_telegram_init_data=x_telegram_init_data,
     )
     settings = load_settings()
-
     active_contests = get_active_contests(
         database_path=settings.database_path,
         telegram_chat_id=context.chat.telegram_chat_id,
     )
-
     return {
         "context": _serialize_context(context),
         "active_contests": [
@@ -95,7 +111,6 @@ async def create_tma_contest(
     context = _get_verified_tma_context(
         x_telegram_init_data=x_telegram_init_data,
     )
-
     if not idempotency_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -103,7 +118,6 @@ async def create_tma_contest(
         )
 
     settings = load_settings()
-
     try:
         result = create_world_cup_2026_contest(
             database_path=settings.database_path,
@@ -130,7 +144,6 @@ async def create_tma_contest(
     response_status = (
         status.HTTP_201_CREATED if result.was_created else status.HTTP_200_OK
     )
-
     return JSONResponse(
         status_code=response_status,
         content={
@@ -152,7 +165,6 @@ async def get_tma_contest(
         x_telegram_init_data=x_telegram_init_data,
     )
     settings = load_settings()
-
     try:
         contest = get_contest_details(
             database_path=settings.database_path,
@@ -248,7 +260,6 @@ async def save_tma_match_prediction(
         x_telegram_init_data=x_telegram_init_data,
     )
     settings = load_settings()
-
     try:
         result = save_match_prediction(
             database_path=settings.database_path,
@@ -310,7 +321,6 @@ async def save_tma_match_result(
         x_telegram_init_data=x_telegram_init_data,
     )
     settings = load_settings()
-
     try:
         result = save_match_result(
             database_path=settings.database_path,
@@ -358,6 +368,148 @@ async def save_tma_match_result(
     )
 
 
+@router.put("/contests/{contest_id}/champion-prediction/settings")
+async def save_tma_champion_prediction_settings(
+    contest_id: int,
+    payload: SaveChampionPredictionSettingsRequest,
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> JSONResponse:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+    try:
+        save_champion_prediction_settings(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            enabled=payload.enabled,
+            deadline_at=payload.deadline_at,
+            points=payload.points,
+        )
+        contest = get_contest_details(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        content={
+            "champion_prediction": _serialize_champion_prediction(
+                contest.champion_prediction
+            ),
+        },
+    )
+
+
+@router.put("/contests/{contest_id}/champion-prediction")
+async def save_tma_champion_prediction(
+    contest_id: int,
+    payload: SaveChampionPredictionRequest,
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> JSONResponse:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+    try:
+        prediction = save_champion_prediction(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            predicted_team_id=payload.predicted_team_id,
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except PredictionUnavailableError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        content={"prediction": _serialize_team_summary(prediction)},
+    )
+
+
+@router.put("/contests/{contest_id}/champion")
+async def save_tma_contest_champion(
+    contest_id: int,
+    payload: SaveContestChampionRequest,
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> JSONResponse:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+    try:
+        champion = save_contest_champion(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            champion_team_id=payload.champion_team_id,
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except ChampionUnavailableError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        content={"champion": _serialize_team_summary(champion)},
+    )
+
+
 def _get_verified_tma_context(
     *,
     x_telegram_init_data: str | None,
@@ -369,7 +521,6 @@ def _get_verified_tma_context(
         )
 
     settings = load_settings()
-
     try:
         return build_tma_context(
             init_data=x_telegram_init_data,
@@ -413,10 +564,44 @@ def _serialize_contest_details(contest) -> dict[str, object]:
         "name": contest.name,
         "slug": contest.slug,
         "created_at": contest.created_at,
+        "champion_prediction": _serialize_champion_prediction(
+            contest.champion_prediction
+        ),
         "leaderboard": [
             _serialize_leaderboard_entry(entry) for entry in contest.leaderboard
         ],
         "matches": [_serialize_match(match) for match in contest.matches],
+    }
+
+
+def _serialize_champion_prediction(champion_prediction) -> dict[str, object]:
+    return {
+        "is_enabled": champion_prediction.is_enabled,
+        "deadline_at": champion_prediction.deadline_at,
+        "points": champion_prediction.points,
+        "candidates": [
+            _serialize_team_summary(team) for team in champion_prediction.candidates
+        ],
+        "prediction": (
+            _serialize_team_summary(champion_prediction.prediction)
+            if champion_prediction.prediction is not None
+            else None
+        ),
+        "actual_champion": (
+            _serialize_team_summary(champion_prediction.actual_champion)
+            if champion_prediction.actual_champion is not None
+            else None
+        ),
+        "is_open": champion_prediction.is_open,
+        "is_tournament_completed": champion_prediction.is_tournament_completed,
+        "awarded_points": champion_prediction.awarded_points,
+    }
+
+
+def _serialize_team_summary(team) -> dict[str, object]:
+    return {
+        "id": team.id,
+        "name": team.name,
     }
 
 
