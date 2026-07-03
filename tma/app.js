@@ -1975,23 +1975,9 @@ function createContestChampionSection(
   return section;
 }
 
-function createChampionPredictionCard(contest, state, onUpdated) {
-  const championPrediction = getChampionPrediction(contest);
-  const item = createElement("li", {
-    className: "match-list-item champion-card",
-  });
-  const header = createElement("div", {
-    className: "match-card-header",
-  });
-  const title = createElement("strong", {
-    className: "match-teams",
-    text: "Чемпион турнира",
-  });
+function createChampionCardStatus(championPrediction) {
   const status = createElement("span", {
     className: "champion-card-status",
-  });
-  const meta = createElement("div", {
-    className: "champion-card-meta",
   });
 
   if (!championPrediction.is_enabled) {
@@ -2008,23 +1994,13 @@ function createChampionPredictionCard(contest, state, onUpdated) {
     status.classList.add("champion-card-status--closed");
   }
 
-  header.append(title, status);
-  item.append(header);
+  return status;
+}
 
-  if (!championPrediction.is_enabled) {
-    item.append(
-      createElement("p", {
-        className: "match-prediction-closed",
-        text: "Настройте прогноз на чемпиона, чтобы участники могли выбрать команду.",
-      }),
-      createChampionPredictionSettingsDisclosure(
-        contest,
-        championPrediction,
-        onUpdated,
-      ),
-    );
-    return item;
-  }
+function createChampionPredictionMeta(championPrediction) {
+  const meta = createElement("div", {
+    className: "champion-card-meta",
+  });
 
   meta.append(
     createElement("p", {
@@ -2035,16 +2011,98 @@ function createChampionPredictionCard(contest, state, onUpdated) {
     }),
     createElement("p", {
       className: "match-meta",
-      text: `За верный прогноз: +${championPrediction.points} ${getPointsLabel(championPrediction.points)}.`,
+      text: (
+        `За верный прогноз: +${championPrediction.points} ` +
+        `${getPointsLabel(championPrediction.points)}.`
+      ),
     }),
   );
 
-  item.append(meta);
+  return meta;
+}
 
-  if (
-    championPrediction.actual_champion &&
-    championPrediction.prediction
-  ) {
+function createChampionAdministrationCard(contest, state, onUpdated) {
+  const championPrediction = getChampionPrediction(contest);
+  const item = createElement("li", {
+    className: "match-list-item champion-card champion-admin-card",
+  });
+  const header = createElement("div", {
+    className: "match-card-header",
+  });
+  const title = createElement("strong", {
+    className: "match-teams",
+    text: "Прогноз на чемпиона",
+  });
+
+  header.append(title, createChampionCardStatus(championPrediction));
+  item.append(header);
+
+  if (!championPrediction.is_enabled) {
+    item.append(
+      createElement("p", {
+        className: "match-prediction-closed",
+        text: (
+          "Включите прогноз, задайте дедлайн и количество баллов. " +
+          "Участники будут выбирать чемпиона на вкладке «Прогнозы»."
+        ),
+      }),
+      createChampionPredictionSettingsDisclosure(
+        contest,
+        championPrediction,
+        onUpdated,
+      ),
+    );
+    return item;
+  }
+
+  item.append(
+    createChampionPredictionMeta(championPrediction),
+    createChampionPredictionSettingsDisclosure(
+      contest,
+      championPrediction,
+      onUpdated,
+    ),
+    createContestChampionSection(
+      contest,
+      championPrediction,
+      onUpdated,
+    ),
+  );
+
+  return item;
+}
+
+function createChampionPredictionCard(contest, onUpdated) {
+  const championPrediction = getChampionPrediction(contest);
+
+  if (!championPrediction.is_enabled) {
+    return null;
+  }
+
+  const item = createElement("li", {
+    className: "match-list-item champion-card",
+  });
+  const header = createElement("div", {
+    className: "match-card-header",
+  });
+  const title = createElement("strong", {
+    className: "match-teams",
+    text: "Чемпион турнира",
+  });
+
+  header.append(title, createChampionCardStatus(championPrediction));
+  item.append(header, createChampionPredictionMeta(championPrediction));
+
+  if (championPrediction.actual_champion) {
+    item.append(
+      createElement("p", {
+        className: "champion-award",
+        text: `Фактический чемпион: ${championPrediction.actual_champion.name}.`,
+      }),
+    );
+  }
+
+  if (championPrediction.actual_champion && championPrediction.prediction) {
     item.append(
       createElement("p", {
         className: championPrediction.awarded_points > 0
@@ -2067,19 +2125,114 @@ function createChampionPredictionCard(contest, state, onUpdated) {
       championPrediction,
       onUpdated,
     ),
-    createContestChampionSection(
-      contest,
-      championPrediction,
-      onUpdated,
-    ),
-    createChampionPredictionSettingsDisclosure(
-      contest,
-      championPrediction,
-      onUpdated,
-    ),
   );
 
   return item;
+}
+
+function getPredictionSortTime(value) {
+  if (typeof value !== "string") {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime())
+    ? Number.POSITIVE_INFINITY
+    : date.getTime();
+}
+
+function comparePredictionListItems(left, right) {
+  if (left.isOpen !== right.isOpen) {
+    return left.isOpen ? -1 : 1;
+  }
+
+  if (left.sortTime !== right.sortTime) {
+    return left.sortTime < right.sortTime ? -1 : 1;
+  }
+
+  return left.sortKey.localeCompare(right.sortKey);
+}
+
+function createMatchListItem(
+  contest,
+  match,
+  state,
+  onResultSaved,
+  { showPredictions, showResults },
+) {
+  const item = createElement("li", {
+    className: "match-list-item",
+  });
+  const header = createElement("div", {
+    className: "match-card-header",
+  });
+  const teams = createElement("strong", {
+    className: "match-teams",
+    text: `${match.home_team_name} — ${match.away_team_name}`,
+  });
+  const status = createElement("span", {
+    className: `match-status match-status--${match.status}`,
+    text: getMatchStatusLabel(match.status),
+  });
+  const meta = createElement("div", {
+    className: "match-card-meta",
+  });
+  const startsAt = createElement("p", {
+    className: "match-meta",
+    text: `Начало: ${formatMatchStartsAt(match.starts_at_utc)}`,
+  });
+  const sections = [header, meta];
+
+  header.append(teams, status);
+  meta.append(startsAt);
+
+  if (showPredictions) {
+    sections.push(createMatchPredictionSection(contest, match));
+  }
+
+  if (showResults) {
+    sections.push(
+      createMatchResultSection(contest, match, state, onResultSaved),
+    );
+  }
+
+  item.append(...sections);
+  return item;
+}
+
+function createPredictionListItems(contest, matches, onChampionUpdated) {
+  const items = matches.map((match) => ({
+    kind: "match",
+    match,
+    isOpen: isMatchPredictionOpen(match),
+    sortTime: getPredictionSortTime(match.starts_at_utc),
+    sortKey: `match-${String(match.id).padStart(12, "0")}`,
+  }));
+  const championPrediction = getChampionPrediction(contest);
+
+  if (championPrediction.is_enabled) {
+    items.push({
+      kind: "champion",
+      isOpen: championPrediction.is_open,
+      sortTime: getPredictionSortTime(championPrediction.deadline_at),
+      sortKey: "champion",
+    });
+  }
+
+  return items
+    .sort(comparePredictionListItems)
+    .map((item) => {
+      if (item.kind === "champion") {
+        return createChampionPredictionCard(contest, onChampionUpdated);
+      }
+
+      return createMatchListItem(contest, item.match, {}, null, {
+        showPredictions: true,
+        showResults: false,
+      });
+    })
+    .filter(Boolean);
 }
 
 function createMatchesCard(
@@ -2093,13 +2246,20 @@ function createMatchesCard(
     showPredictions,
     showResults,
     leadingItems = [],
+    listItems = null,
   },
 ) {
   const normalizedLeadingItems = Array.isArray(leadingItems)
     ? leadingItems.filter(Boolean)
     : [];
+  const normalizedListItems = Array.isArray(listItems)
+    ? listItems.filter(Boolean)
+    : null;
+  const hasListItems = normalizedListItems !== null
+    ? normalizedListItems.length > 0
+    : normalizedLeadingItems.length > 0 || matches.length > 0;
 
-  if (matches.length === 0 && normalizedLeadingItems.length === 0) {
+  if (matches.length === 0 && !hasListItems) {
     return createInfoCard(title, emptyMessages, "matches-card");
   }
 
@@ -2112,52 +2272,24 @@ function createMatchesCard(
 
   card.append(heading);
 
-  if (normalizedLeadingItems.length > 0 || matches.length > 0) {
+  if (hasListItems) {
     const list = createElement("ol", {
       className: "match-list",
     });
 
-    list.append(...normalizedLeadingItems);
+    if (normalizedListItems !== null) {
+      list.append(...normalizedListItems);
+    } else {
+      list.append(...normalizedLeadingItems);
 
-    for (const match of matches) {
-      const item = createElement("li", {
-        className: "match-list-item",
-      });
-      const header = createElement("div", {
-        className: "match-card-header",
-      });
-      const teams = createElement("strong", {
-        className: "match-teams",
-        text: `${match.home_team_name} — ${match.away_team_name}`,
-      });
-      const status = createElement("span", {
-        className: `match-status match-status--${match.status}`,
-        text: getMatchStatusLabel(match.status),
-      });
-      const meta = createElement("div", {
-        className: "match-card-meta",
-      });
-      const startsAt = createElement("p", {
-        className: "match-meta",
-        text: `Начало: ${formatMatchStartsAt(match.starts_at_utc)}`,
-      });
-      const sections = [header, meta];
-
-      header.append(teams, status);
-      meta.append(startsAt);
-
-      if (showPredictions) {
-        sections.push(createMatchPredictionSection(contest, match));
-      }
-
-      if (showResults) {
-        sections.push(
-          createMatchResultSection(contest, match, state, onResultSaved),
+      for (const match of matches) {
+        list.append(
+          createMatchListItem(contest, match, state, onResultSaved, {
+            showPredictions,
+            showResults,
+          }),
         );
       }
-
-      item.append(...sections);
-      list.append(item);
     }
 
     card.append(list);
@@ -2515,7 +2647,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
           showPredictions: false,
           showResults: true,
           leadingItems: [
-            createChampionPredictionCard(
+            createChampionAdministrationCard(
               contest,
               state,
               () => {
@@ -2541,6 +2673,16 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
         ],
         showPredictions: true,
         showResults: false,
+        listItems: createPredictionListItems(
+          contest,
+          matches,
+          () => {
+            void openContest(bootstrap, contest.id, {
+              ...state,
+              activeTab: "predictions",
+            });
+          },
+        ),
       }),
     );
   }
