@@ -641,6 +641,22 @@ summary:focus-visible {
   padding: 0;
 }
 
+.advancing-team-field.is-required {
+  padding: 11px;
+  border: 1px solid color-mix(
+    in srgb,
+    var(--accent) 58%,
+    var(--border-strong)
+  );
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface-raised));
+}
+
+.advancing-team-field.is-required .form-hint {
+  color: var(--accent);
+  font-weight: 750;
+}
+
 .advancing-team-options {
   display: grid;
   gap: 8px;

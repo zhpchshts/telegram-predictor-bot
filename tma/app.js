@@ -1107,6 +1107,10 @@ function createAdvancingTeamField(
     homeScoreInput,
     awayScoreInput,
     selectedAdvancingTeamId = null,
+    missingDrawSelectionMessage =
+      "При ничьей выберите команду, победившую в серии пенальти.",
+    selectedDrawSelectionMessage = null,
+    highlightMissingDrawSelection = false,
   },
 ) {
   const field = createElement("fieldset", {
@@ -1155,6 +1159,11 @@ function createAdvancingTeamField(
   awayRadio.checked =
     normalizedSelectedAdvancingTeamId === match.away_team_id;
 
+  hint.id = `${idPrefix}-advancing-hint`;
+  hint.setAttribute("aria-live", "polite");
+  homeRadio.setAttribute("aria-describedby", hint.id);
+  awayRadio.setAttribute("aria-describedby", hint.id);
+
   homeOption.append(homeRadio, homeText);
   awayOption.append(awayRadio, awayText);
   options.append(homeOption, awayOption);
@@ -1173,6 +1182,8 @@ function createAdvancingTeamField(
 
     if (!scoreState.isComplete) {
       field.disabled = true;
+      field.classList.remove("is-required");
+      field.removeAttribute("aria-invalid");
       hint.textContent = "Сначала укажите итоговый счёт матча.";
     } else if (scoreState.isDraw) {
       field.disabled = false;
@@ -1182,8 +1193,19 @@ function createAdvancingTeamField(
         awayRadio.checked = false;
       }
 
-      hint.textContent =
-        "При ничьей выберите команду, победившую в серии пенальти.";
+      const isDrawSelectionMissing = !homeRadio.checked && !awayRadio.checked;
+
+      field.classList.toggle(
+        "is-required",
+        highlightMissingDrawSelection && isDrawSelectionMissing,
+      );
+      field.toggleAttribute(
+        "aria-invalid",
+        highlightMissingDrawSelection && isDrawSelectionMissing,
+      );
+      hint.textContent = isDrawSelectionMissing
+        ? missingDrawSelectionMessage
+        : selectedDrawSelectionMessage || missingDrawSelectionMessage;
     } else {
       const advancingTeamId =
         scoreState.homeScore > scoreState.awayScore
@@ -1193,6 +1215,8 @@ function createAdvancingTeamField(
       homeRadio.checked = advancingTeamId === match.home_team_id;
       awayRadio.checked = advancingTeamId === match.away_team_id;
       field.disabled = true;
+      field.classList.remove("is-required");
+      field.removeAttribute("aria-invalid");
       hint.textContent =
         "Победитель противостояния определён итоговым счётом.";
     }
@@ -1208,6 +1232,10 @@ function createAdvancingTeamField(
 
   awayScoreInput.addEventListener("input", () => {
     syncAdvancingTeamField(true);
+  });
+
+  field.addEventListener("change", () => {
+    syncAdvancingTeamField(false);
   });
 
   return {
@@ -1704,6 +1732,10 @@ function createMatchPredictionSection(contest, match) {
     homeScoreInput,
     awayScoreInput,
     selectedAdvancingTeamId: prediction ? prediction.advancing_team_id : null,
+    missingDrawSelectionMessage:
+      "Выберите победителя противостояния, чтобы сохранить прогноз.",
+    selectedDrawSelectionMessage: "Победитель противостояния выбран.",
+    highlightMissingDrawSelection: true,
   });
 
   function setSaveStatus(message, state) {
@@ -1735,7 +1767,8 @@ function createMatchPredictionSection(contest, match) {
     if (advancingTeamId === null) {
       return {
         isReady: false,
-        message: "При ничейном счёте выберите победителя противостояния.",
+        message:
+          "Выберите победителя противостояния, чтобы сохранить прогноз.",
       };
     }
 
