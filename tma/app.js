@@ -824,8 +824,10 @@ function createContestDeletionCard(bootstrap, contest, state) {
   return card;
 }
 
-function createLeaderboardCard(leaderboard) {
+function createLeaderboardCard(leaderboard, championPrediction) {
   const entries = Array.isArray(leaderboard) ? leaderboard : [];
+  const championPredictionSlotsCount =
+    championPrediction?.is_enabled === true ? 1 : 0;
 
   if (entries.length === 0) {
     return createInfoCard(
@@ -891,7 +893,8 @@ function createLeaderboardCard(leaderboard) {
       className: "leaderboard-predictions",
       text: (
         `Прогнозов: ${matchPredictionsCount}+` +
-        `${championPredictionCount} из ${totalMatchesCount}`
+        `${championPredictionCount} из ` +
+        `${totalMatchesCount + championPredictionSlotsCount}`
       ),
     });
     const pointsElement = createElement("span", {
@@ -3195,7 +3198,9 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
   ];
 
   if (activeTab === "leaderboard") {
-    cards.push(createLeaderboardCard(leaderboard));
+    cards.push(
+      createLeaderboardCard(leaderboard, contest.champion_prediction),
+    );
   } else if (activeTab === "matches") {
     cards.push(
       createMatchesCard(
