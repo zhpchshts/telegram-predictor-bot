@@ -1147,6 +1147,9 @@ def test_get_contest_returns_prediction_score_after_result(
             "place": 1,
             "participant_name": "Eugene Sabir",
             "total_points": 4,
+            "match_predictions_count": 1,
+            "champion_prediction_count": 0,
+            "total_matches_count": 1,
         }
     ]
 
@@ -1702,3 +1705,68 @@ def test_delete_match_rejects_completed_contest(
     assert delete_response.json() == {
         "detail": "Конкурс завершён. Изменения в нём больше недоступны.",
     }
+
+
+def test_get_contest_returns_leaderboard_completeness_with_champion_prediction(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="create-champion-match"),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2030-06-11T18:00:00Z",
+        },
+    )
+
+    assert match_response.status_code == 201
+
+    home_team_id = match_response.json()["match"]["home_team_id"]
+
+    settings_response = client.put(
+        f"/api/tma/contests/{contest['id']}/champion-prediction/settings",
+        headers=build_tma_headers(),
+        json={
+            "enabled": True,
+            "deadline_at": "2030-06-10T18:00:00Z",
+            "points": 5,
+        },
+    )
+
+    assert settings_response.status_code == 200
+
+    champion_prediction_response = client.put(
+        f"/api/tma/contests/{contest['id']}/champion-prediction",
+        headers=build_tma_headers(),
+        json={"predicted_team_id": home_team_id},
+    )
+
+    assert champion_prediction_response.status_code == 200
+
+    contest_response = client.get(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert contest_response.status_code == 200
+    assert contest_response.json()["contest"]["leaderboard"] == [
+        {
+            "place": 1,
+            "participant_name": "Eugene Sabir",
+            "total_points": 0,
+            "match_predictions_count": 0,
+            "champion_prediction_count": 1,
+            "total_matches_count": 1,
+        }
+    ]

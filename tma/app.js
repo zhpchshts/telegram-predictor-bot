@@ -857,6 +857,21 @@ function createLeaderboardCard(leaderboard) {
     const totalPoints = Number.isSafeInteger(entry?.total_points)
       ? entry.total_points
       : 0;
+    const matchPredictionsCount = Number.isSafeInteger(
+      entry?.match_predictions_count,
+    )
+      ? entry.match_predictions_count
+      : 0;
+    const championPredictionCount = Number.isSafeInteger(
+      entry?.champion_prediction_count,
+    )
+      ? entry.champion_prediction_count
+      : 0;
+    const totalMatchesCount = Number.isSafeInteger(
+      entry?.total_matches_count,
+    )
+      ? entry.total_matches_count
+      : 0;
 
     const item = createElement("li", {
       className: "leaderboard-list-item",
@@ -865,16 +880,27 @@ function createLeaderboardCard(leaderboard) {
       className: "leaderboard-place",
       text: `${place}.`,
     });
+    const participantElement = createElement("div", {
+      className: "leaderboard-participant",
+    });
     const nameElement = createElement("span", {
       className: "leaderboard-participant-name",
       text: participantName,
+    });
+    const predictionsElement = createElement("span", {
+      className: "leaderboard-predictions",
+      text: (
+        `Прогнозов: ${matchPredictionsCount}+` +
+        `${championPredictionCount} из ${totalMatchesCount}`
+      ),
     });
     const pointsElement = createElement("span", {
       className: "leaderboard-points",
       text: `${totalPoints} ${getPointsLabel(totalPoints)}`,
     });
 
-    item.append(placeElement, nameElement, pointsElement);
+    participantElement.append(nameElement, predictionsElement);
+    item.append(placeElement, participantElement, pointsElement);
     list.append(item);
   }
 

@@ -124,6 +124,9 @@ class ContestLeaderboardEntry:
     place: int
     participant_name: str
     total_points: int
+    match_predictions_count: int
+    champion_prediction_count: int
+    total_matches_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,7 +338,7 @@ def get_contest_details(
                 FROM match_prediction_scores
                 JOIN match_predictions
                     ON match_predictions.id =
-                        match_prediction_scores.match_prediction_id
+                    match_prediction_scores.match_prediction_id
                 JOIN matches
                     ON matches.id = match_predictions.match_id
                 JOIN stages
@@ -352,7 +355,7 @@ def get_contest_details(
                 FROM tie_prediction_scores
                 JOIN tie_predictions
                     ON tie_predictions.id =
-                        tie_prediction_scores.tie_prediction_id
+                    tie_prediction_scores.tie_prediction_id
                 JOIN ties
                     ON ties.id = tie_predictions.tie_id
                 JOIN stages
@@ -373,13 +376,49 @@ def get_contest_details(
                     AND contests.champion_prediction_enabled = 1
                     AND contests.champion_team_id IS NOT NULL
                     AND champion_predictions.predicted_team_id =
-                        contests.champion_team_id
+                    contests.champion_team_id
             )
             SELECT
                 users.id AS user_id,
                 users.first_name,
                 users.last_name,
-                COALESCE(SUM(score_points.points), 0) AS total_points
+                COALESCE(SUM(score_points.points), 0) AS total_points,
+                (
+                    SELECT COUNT(*)
+                    FROM match_predictions
+                    JOIN matches
+                        ON matches.id = match_predictions.match_id
+                    JOIN stages
+                        ON stages.id = matches.stage_id
+                    JOIN competitions
+                        ON competitions.id = stages.competition_id
+                    WHERE competitions.contest_id = ?
+                        AND matches.status != 'cancelled'
+                        AND match_predictions.user_id = users.id
+                ) AS match_predictions_count,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM champion_predictions
+                        JOIN contests
+                            ON contests.id =
+                            champion_predictions.contest_id
+                        WHERE champion_predictions.contest_id = ?
+                            AND champion_predictions.user_id = users.id
+                            AND contests.champion_prediction_enabled = 1
+                    ) THEN 1
+                    ELSE 0
+                END AS champion_prediction_count,
+                (
+                    SELECT COUNT(*)
+                    FROM matches
+                    JOIN stages
+                        ON stages.id = matches.stage_id
+                    JOIN competitions
+                        ON competitions.id = stages.competition_id
+                    WHERE competitions.contest_id = ?
+                        AND matches.status != 'cancelled'
+                ) AS total_matches_count
             FROM contest_participants
             JOIN users
                 ON users.id = contest_participants.user_id
@@ -393,6 +432,9 @@ def get_contest_details(
                 users.id ASC
             """,
             (
+                contest_id,
+                contest_id,
+                contest_id,
                 contest_id,
                 contest_id,
                 contest_id,
@@ -2481,20 +2523,22 @@ def _contest_leaderboard_from_rows(
 
         if total_points != previous_total_points:
             place = position
-            previous_total_points = total_points
 
+        previous_total_points = total_points
         participant_name = (
             " ".join(
                 str(value) for value in (row["first_name"], row["last_name"]) if value
             )
             or "Участник"
         )
-
         leaderboard.append(
             ContestLeaderboardEntry(
                 place=place,
                 participant_name=participant_name,
                 total_points=total_points,
+                match_predictions_count=int(row["match_predictions_count"]),
+                champion_prediction_count=int(row["champion_prediction_count"]),
+                total_matches_count=int(row["total_matches_count"]),
             )
         )
 

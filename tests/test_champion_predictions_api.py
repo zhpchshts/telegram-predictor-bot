@@ -217,6 +217,9 @@ def test_champion_prediction_api_configures_selects_and_records_champion(
             "place": 1,
             "participant_name": "Eugene Sabir",
             "total_points": 7,
+            "match_predictions_count": 0,
+            "champion_prediction_count": 1,
+            "total_matches_count": 1,
         }
     ]
 
