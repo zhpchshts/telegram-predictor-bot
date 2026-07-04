@@ -1280,6 +1280,58 @@ function createPredictionScoreSummary(predictionScore) {
   return summary;
 }
 
+function createPredictionProgressSummary() {
+  return createElement("p", {
+    className: "form-hint match-prediction-progress",
+    text: "Прогнозы сохранены: 0 из 0.",
+  });
+}
+
+function updatePredictionProgress(summary) {
+  if (!summary) {
+    return;
+  }
+
+  const card = summary.closest(".matches-card");
+  const statuses = Array.from(
+    card?.querySelectorAll(".match-prediction-save-status") || [],
+  );
+  const total = statuses.length;
+  const saved = statuses.filter(
+    (status) => status.dataset.saveState === "saved",
+  ).length;
+
+  if (total === 0) {
+    summary.textContent = "Нет матчей, для которых сейчас можно сделать прогноз.";
+    return;
+  }
+
+  summary.textContent =
+    saved === total
+      ? `Прогнозы сохранены: ${saved} из ${total}.`
+      : `Прогнозы сохранены: ${saved} из ${total}. Осталось: ${total - saved}.`;
+}
+
+function ensurePredictionProgressSummary(section) {
+  const card = section.closest(".matches-card");
+  if (!card) {
+    return;
+  }
+
+  let summary = card.querySelector(".match-prediction-progress");
+  if (!summary) {
+    summary = createPredictionProgressSummary();
+    const heading = card.querySelector(":scope > h2");
+    if (heading) {
+      heading.insertAdjacentElement("afterend", summary);
+    } else {
+      card.prepend(summary);
+    }
+  }
+
+  updatePredictionProgress(summary);
+}
+
 function createMatchResultSection(contest, match, state, onResultSaved) {
   const result = match.result;
   const section = createElement("div", {
@@ -1583,8 +1635,8 @@ function createMatchPredictionSection(contest, match) {
   const hint = createElement("p", {
     className: "match-prediction-hint",
     text: (
-      "Укажите итоговый счёт после 90 или 120 минут. " +
-      "При ничьей выберите победителя серии пенальти. " +
+      "Прогноз сохраняется автоматически. Счёт указывайте после 90 или " +
+      "120 минут; при ничьей выберите победителя серии пенальти. " +
       "Прогноз можно изменить до начала матча."
     ),
   });
@@ -1618,19 +1670,15 @@ function createMatchPredictionSection(contest, match) {
   const awayScoreInput = createElement("input", {
     className: "text-input match-score-input",
   });
-  const message = createElement("p", {
-    className: "form-message",
+  const saveStatus = createElement("p", {
+    className: "form-message match-prediction-save-status",
   });
   const actions = createElement("div", {
     className: "form-actions",
   });
-  let submitLabel = prediction
-    ? "Сохранить изменения"
-    : "Сохранить прогноз";
-  const submitButton = createActionButton(
-    submitLabel,
-    "primary-action-button",
-    "submit",
+  const retryButton = createActionButton(
+    "Повторить сохранение",
+    "secondary-action-button",
   );
 
   homeScoreInput.id = `match-${match.id}-home-score`;
@@ -1655,126 +1703,204 @@ function createMatchPredictionSection(contest, match) {
     idPrefix: `match-${match.id}-prediction`,
     homeScoreInput,
     awayScoreInput,
-    selectedAdvancingTeamId: prediction
-      ? prediction.advancing_team_id
-      : null,
+    selectedAdvancingTeamId: prediction ? prediction.advancing_team_id : null,
   });
 
-  homeScoreField.append(homeScoreLabel, homeScoreInput);
-  awayScoreField.append(awayScoreLabel, awayScoreInput);
-  scoreGrid.append(homeScoreField, awayScoreField);
-  actions.append(submitButton);
-  form.append(
-    scoreHeading,
-    scoreGrid,
-    advancingTeamField.element,
-    message,
-    actions,
-  );
-  section.append(heading, hint, form);
+  function setSaveStatus(message, state) {
+    saveStatus.textContent = message;
+    saveStatus.hidden = !message;
+    saveStatus.dataset.saveState = state;
+    saveStatus.classList.toggle("is-error", state === "error");
+    saveStatus.classList.toggle("is-success", state === "saved");
+    retryButton.hidden = state !== "error";
+    updatePredictionProgress(
+      section.closest(".matches-card")?.querySelector(
+        ".match-prediction-progress",
+      ),
+    );
+  }
 
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
+  function readPredictionPayload() {
+    const homeScore = getNonNegativeIntegerInputValue(homeScoreInput);
+    const awayScore = getNonNegativeIntegerInputValue(awayScoreInput);
 
-    const homeScoreValue = homeScoreInput.value.trim();
-    const awayScoreValue = awayScoreInput.value.trim();
-    const homeScore = Number(homeScoreValue);
-    const awayScore = Number(awayScoreValue);
-
-    if (
-      !homeScoreValue ||
-      !Number.isSafeInteger(homeScore) ||
-      homeScore < 0
-    ) {
-      homeScoreInput.setAttribute("aria-invalid", "true");
-      setFormMessage(
-        message,
-        "Укажите неотрицательный целый счёт первой команды.",
-        "error",
-      );
-      homeScoreInput.focus();
-      return;
+    if (homeScore === null || awayScore === null) {
+      return {
+        isReady: false,
+        message: "Укажите неотрицательный целый счёт обеих команд.",
+      };
     }
-
-    homeScoreInput.removeAttribute("aria-invalid");
-
-    if (
-      !awayScoreValue ||
-      !Number.isSafeInteger(awayScore) ||
-      awayScore < 0
-    ) {
-      awayScoreInput.setAttribute("aria-invalid", "true");
-      setFormMessage(
-        message,
-        "Укажите неотрицательный целый счёт второй команды.",
-        "error",
-      );
-      awayScoreInput.focus();
-      return;
-    }
-
-    awayScoreInput.removeAttribute("aria-invalid");
 
     const advancingTeamId = advancingTeamField.getAdvancingTeamId();
-
     if (advancingTeamId === null) {
-      setFormMessage(
-        message,
-        "При ничейном счёте выберите победителя противостояния.",
-        "error",
-      );
-      advancingTeamField.focus();
+      return {
+        isReady: false,
+        message: "При ничейном счёте выберите победителя противостояния.",
+      };
+    }
+
+    return {
+      isReady: true,
+      predicted_home_score: homeScore,
+      predicted_away_score: awayScore,
+      predicted_advancing_team_id: advancingTeamId,
+    };
+  }
+
+  function getPayloadFingerprint(payload) {
+    return [
+      payload.predicted_home_score,
+      payload.predicted_away_score,
+      payload.predicted_advancing_team_id,
+    ].join(":");
+  }
+
+  let isSaving = false;
+  let lastSavedFingerprint = prediction
+    ? getPayloadFingerprint({
+        predicted_home_score: prediction.home_score,
+        predicted_away_score: prediction.away_score,
+        predicted_advancing_team_id: prediction.advancing_team_id,
+      })
+    : null;
+
+  let saveTimer = null;
+
+  function scheduleSave() {
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+
+    const payload = readPredictionPayload();
+    if (!payload.isReady) {
+      setSaveStatus(payload.message, "draft");
       return;
     }
 
-    submitButton.disabled = true;
-    submitButton.textContent = "Сохраняем…";
+    if (!isSaving && getPayloadFingerprint(payload) === lastSavedFingerprint) {
+      setSaveStatus("Сохранено.", "saved");
+      return;
+    }
+
+    setSaveStatus("Изменения будут сохранены…", "draft");
+    saveTimer = window.setTimeout(() => {
+      saveTimer = null;
+      void savePrediction();
+    }, 400);
+  }
+
+  async function savePrediction() {
+    if (isSaving) {
+      return;
+    }
+
+    const payload = readPredictionPayload();
+    if (!payload.isReady) {
+      setSaveStatus(payload.message, "draft");
+      return;
+    }
+
+    const fingerprint = getPayloadFingerprint(payload);
+    if (fingerprint === lastSavedFingerprint) {
+      setSaveStatus("Сохранено.", "saved");
+      return;
+    }
+
+    isSaving = true;
+    setSaveStatus("Сохраняем…", "saving");
 
     try {
       const result = await apiRequest(
         `/api/tma/contests/${contest.id}/matches/${match.id}/prediction`,
         {
           method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            predicted_home_score: homeScore,
-            predicted_away_score: awayScore,
-            predicted_advancing_team_id: advancingTeamId,
-          }),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
         },
       );
-
       if (!result || !result.prediction) {
-        throw new Error(
-          "Сервер вернул некорректный ответ при сохранении прогноза.",
-        );
+        throw new Error("Сервер вернул некорректный ответ при сохранении прогноза.");
       }
 
       match.prediction = result.prediction;
-      homeScoreInput.value = String(result.prediction.home_score);
-      awayScoreInput.value = String(result.prediction.away_score);
-      submitLabel = "Сохранить изменения";
-      submitButton.textContent = submitLabel;
-      setFormMessage(
-        message,
-        result.was_created
-          ? "Прогноз сохранён."
-          : "Прогноз обновлён.",
-        "success",
-      );
+      lastSavedFingerprint = fingerprint;
     } catch (error) {
-      const errorMessage =
-        error instanceof Error
-          ? error.message
-          : "Не удалось сохранить прогноз.";
+      lastSavedFingerprint = null;
+      isSaving = false;
+      const currentPayload = readPredictionPayload();
+      if (
+        currentPayload.isReady &&
+        getPayloadFingerprint(currentPayload) !== fingerprint
+      ) {
+        void savePrediction();
+        return;
+      }
+      if (!currentPayload.isReady) {
+        setSaveStatus(currentPayload.message, "draft");
+        return;
+      }
 
-      setFormMessage(message, errorMessage, "error");
-      submitButton.textContent = submitLabel;
-    } finally {
-      submitButton.disabled = false;
+      const errorMessage =
+        error instanceof Error ? error.message : "Не удалось сохранить прогноз.";
+      setSaveStatus(errorMessage, "error");
+      return;
     }
+
+    isSaving = false;
+    const currentPayload = readPredictionPayload();
+    if (!currentPayload.isReady) {
+      setSaveStatus(currentPayload.message, "draft");
+      return;
+    }
+    if (getPayloadFingerprint(currentPayload) !== lastSavedFingerprint) {
+      void savePrediction();
+      return;
+    }
+
+    setSaveStatus("Сохранено.", "saved");
+  }
+
+  homeScoreField.append(homeScoreLabel, homeScoreInput);
+  awayScoreField.append(awayScoreLabel, awayScoreInput);
+  scoreGrid.append(homeScoreField, awayScoreField);
+  actions.append(retryButton);
+  form.append(
+    scoreHeading,
+    scoreGrid,
+    advancingTeamField.element,
+    saveStatus,
+    actions,
+  );
+  section.append(heading, hint, form);
+
+  retryButton.addEventListener("click", () => {
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    void savePrediction();
+  });
+  homeScoreInput.addEventListener("input", scheduleSave);
+  awayScoreInput.addEventListener("input", scheduleSave);
+  advancingTeamField.element.addEventListener("change", scheduleSave);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    void savePrediction();
+  });
+
+  if (prediction) {
+    setSaveStatus("Сохранено.", "saved");
+  } else {
+    setSaveStatus("", "draft");
+  }
+
+  Promise.resolve().then(() => {
+    ensurePredictionProgressSummary(section);
   });
 
   return section;
