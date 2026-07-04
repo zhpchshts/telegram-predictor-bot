@@ -2540,11 +2540,137 @@ function comparePredictionListItems(left, right) {
   return left.sortKey.localeCompare(right.sortKey);
 }
 
+function createMatchDeletionSection(
+  contest,
+  match,
+  state,
+  onMatchDeletionStateChange,
+) {
+  const section = createElement("div", {
+    className: "match-deletion-section",
+  });
+  const heading = createElement("h3", {
+    className: "match-prediction-heading",
+    text: "Удаление матча",
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const matchName = `${match.home_team_name} — ${match.away_team_name}`;
+  const isConfirming = state.deleteMatchId === match.id;
+
+  setFormMessage(
+    message,
+    isConfirming ? state.deleteMatchMessage || "" : "",
+    isConfirming ? state.deleteMatchMessageType || "" : "",
+  );
+
+  if (!isConfirming) {
+    const description = createElement("p", {
+      className: "match-prediction-closed",
+      text: "Удаляйте матч, только если он был создан по ошибке.",
+    });
+    const continueButton = createActionButton(
+      "Удалить матч",
+      "danger-action-button",
+    );
+
+    continueButton.addEventListener("click", () => {
+      onMatchDeletionStateChange({
+        deleteMatchId: match.id,
+        deleteMatchMessage: "",
+        deleteMatchMessageType: "",
+        matchesMessage: "",
+        matchesMessageType: "",
+      });
+    });
+
+    actions.append(continueButton);
+    section.append(heading, description, message, actions);
+    return section;
+  }
+
+  const panel = createElement("div", {
+    className: "confirmation-panel match-deletion-confirmation",
+  });
+  const summary = createElement("p");
+  const matchNameElement = createElement("strong", {
+    text: matchName,
+  });
+  const details = createElement("p", {
+    className: "form-hint",
+    text: (
+      "Вместе с матчем будут безвозвратно удалены результат, "
+      + "прогнозы участников и начисленные баллы."
+    ),
+  });
+  const cancelButton = createActionButton(
+    "Отмена",
+    "secondary-action-button",
+  );
+  const deleteButton = createActionButton(
+    "Да, удалить матч",
+    "danger-action-button",
+  );
+
+  summary.append("Удалить матч «", matchNameElement, "»?");
+  panel.append(summary, details);
+  actions.append(cancelButton, deleteButton);
+  section.append(heading, panel, message, actions);
+
+  cancelButton.addEventListener("click", () => {
+    onMatchDeletionStateChange({
+      deleteMatchId: null,
+      deleteMatchMessage: "",
+      deleteMatchMessageType: "",
+    });
+  });
+
+  deleteButton.addEventListener("click", async () => {
+    deleteButton.disabled = true;
+    cancelButton.disabled = true;
+    deleteButton.textContent = "Удаляем…";
+
+    try {
+      await apiRequest(
+        `/api/tma/contests/${contest.id}/matches/${match.id}`,
+        {
+          method: "DELETE",
+        },
+      );
+
+      onMatchDeletionStateChange({
+        deleteMatchId: null,
+        deleteMatchMessage: "",
+        deleteMatchMessageType: "",
+        matchesMessage: `Матч «${matchName}» удалён.`,
+        matchesMessageType: "success",
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error
+        ? error.message
+        : "Не удалось удалить матч.";
+
+      onMatchDeletionStateChange({
+        deleteMatchId: match.id,
+        deleteMatchMessage: errorMessage,
+        deleteMatchMessageType: "error",
+      });
+    }
+  });
+
+  return section;
+}
+
 function createMatchListItem(
   contest,
   match,
   state,
   onResultSaved,
+  onMatchDeletionStateChange,
   { showPredictions, showResults },
 ) {
   const item = createElement("li", {
@@ -2583,6 +2709,21 @@ function createMatchListItem(
     );
   }
 
+  if (
+    showResults
+    && contest.is_active !== false
+    && onMatchDeletionStateChange
+  ) {
+    sections.push(
+      createMatchDeletionSection(
+        contest,
+        match,
+        state,
+        onMatchDeletionStateChange,
+      ),
+    );
+  }
+
   item.append(...sections);
   return item;
 }
@@ -2613,7 +2754,7 @@ function createPredictionListItems(contest, matches, onChampionUpdated) {
         return createChampionPredictionCard(contest, onChampionUpdated);
       }
 
-      return createMatchListItem(contest, item.match, {}, null, {
+      return createMatchListItem(contest, item.match, {}, null, null, {
         showPredictions: true,
         showResults: false,
       });
@@ -2626,6 +2767,7 @@ function createMatchesCard(
   matches,
   state,
   onResultSaved,
+  onMatchDeletionStateChange,
   {
     title,
     emptyMessages,
@@ -2641,11 +2783,15 @@ function createMatchesCard(
   const normalizedListItems = Array.isArray(listItems)
     ? listItems.filter(Boolean)
     : null;
+  const visibleMessage = showResults ? state.matchesMessage || "" : "";
+  const visibleMessageType = showResults
+    ? state.matchesMessageType || ""
+    : "";
   const hasListItems = normalizedListItems !== null
     ? normalizedListItems.length > 0
     : normalizedLeadingItems.length > 0 || matches.length > 0;
 
-  if (matches.length === 0 && !hasListItems) {
+  if (matches.length === 0 && !hasListItems && !visibleMessage) {
     return createInfoCard(title, emptyMessages, "matches-card");
   }
 
@@ -2655,8 +2801,12 @@ function createMatchesCard(
   const heading = createElement("h2", {
     text: title,
   });
+  const message = createElement("p", {
+    className: "form-message",
+  });
 
-  card.append(heading);
+  setFormMessage(message, visibleMessage, visibleMessageType);
+  card.append(heading, message);
 
   if (hasListItems) {
     const list = createElement("ol", {
@@ -2670,10 +2820,17 @@ function createMatchesCard(
 
       for (const match of matches) {
         list.append(
-          createMatchListItem(contest, match, state, onResultSaved, {
-            showPredictions,
-            showResults,
-          }),
+          createMatchListItem(
+            contest,
+            match,
+            state,
+            onResultSaved,
+            onMatchDeletionStateChange,
+            {
+              showPredictions,
+              showResults,
+            },
+          ),
         );
       }
     }
@@ -2682,11 +2839,11 @@ function createMatchesCard(
   }
 
   if (matches.length === 0) {
-    for (const message of emptyMessages) {
+    for (const emptyMessage of emptyMessages) {
       card.append(
         createElement("p", {
           className: "subtitle",
-          text: message,
+          text: emptyMessage,
         }),
       );
     }
@@ -3028,6 +3185,13 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
             resultMessageType: resultState.type,
           });
         },
+        (deletionState) => {
+          void openContest(bootstrap, contest.id, {
+            ...state,
+            activeTab: "matches",
+            ...deletionState,
+          });
+        },
         {
           title: "Матчи",
           emptyMessages: isActive
@@ -3067,6 +3231,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
         contest,
         matches,
         state,
+        null,
         null,
         {
           title: "Прогнозы",

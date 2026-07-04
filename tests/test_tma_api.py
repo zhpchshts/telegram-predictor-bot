@@ -1561,3 +1561,144 @@ def test_delete_contest_rejects_completed_contest(
 
     assert contest_row is not None
     assert contest_row["is_active"] == 0
+
+
+def test_delete_match_returns_no_content_and_removes_match(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+
+    contest = create_tma_contest(
+        client,
+        idempotency_key="create-contest-for-match-deletion",
+    )
+
+    create_match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(
+            idempotency_key="create-match-for-deletion",
+        ),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Франция",
+            "starts_at_utc": "2030-07-19T18:00:00Z",
+        },
+    )
+
+    assert create_match_response.status_code == 201
+
+    match_id = create_match_response.json()["match"]["id"]
+
+    delete_response = client.delete(
+        f"/api/tma/contests/{contest['id']}/matches/{match_id}",
+        headers=build_tma_headers(),
+    )
+
+    assert delete_response.status_code == 204
+    assert delete_response.content == b""
+
+    contest_response = client.get(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert contest_response.status_code == 200
+    assert contest_response.json()["contest"]["matches"] == []
+
+
+def test_delete_match_rejects_unknown_match(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+
+    contest = create_tma_contest(
+        client,
+        idempotency_key="create-contest-for-unknown-match-deletion",
+    )
+
+    delete_response = client.delete(
+        f"/api/tma/contests/{contest['id']}/matches/999",
+        headers=build_tma_headers(),
+    )
+
+    assert delete_response.status_code == 404
+    assert delete_response.json() == {
+        "detail": "Матч не найден.",
+    }
+
+
+def test_delete_match_rejects_completed_contest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+
+    contest = create_tma_contest(
+        client,
+        idempotency_key="create-completed-contest-for-match-deletion",
+    )
+
+    create_match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(
+            idempotency_key="create-match-in-completed-contest",
+        ),
+        json={
+            "home_team_name": "Испания",
+            "away_team_name": "Англия",
+            "starts_at_utc": "2020-07-19T18:00:00Z",
+        },
+    )
+
+    assert create_match_response.status_code == 201
+
+    match = create_match_response.json()["match"]
+
+    save_result_response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match['id']}/result",
+        headers=build_tma_headers(),
+        json={
+            "home_score": 2,
+            "away_score": 1,
+            "advancing_team_id": match["home_team_id"],
+        },
+    )
+
+    assert save_result_response.status_code == 201
+
+    complete_contest_response = client.post(
+        f"/api/tma/contests/{contest['id']}/complete",
+        headers=build_tma_headers(),
+    )
+
+    assert complete_contest_response.status_code == 200
+
+    delete_response = client.delete(
+        f"/api/tma/contests/{contest['id']}/matches/{match['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert delete_response.status_code == 409
+    assert delete_response.json() == {
+        "detail": "Конкурс завершён. Изменения в нём больше недоступны.",
+    }

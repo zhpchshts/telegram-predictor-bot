@@ -561,12 +561,23 @@ summary:focus-visible {
 }
 
 .match-prediction-section,
-.match-result-section {
+.match-result-section,
+.match-deletion-section {
   display: grid;
   gap: 10px;
   margin-top: 2px;
   padding-top: 12px;
   border-top: 1px solid var(--border);
+}
+
+.match-deletion-section .form-actions {
+  margin-top: 0;
+}
+
+.match-deletion-confirmation {
+  margin-top: 0;
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
 }
 
 .match-prediction-heading {

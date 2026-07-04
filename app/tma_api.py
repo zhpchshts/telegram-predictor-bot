@@ -21,6 +21,7 @@ from app.contest_service import (
     create_match,
     create_world_cup_2026_contest,
     delete_contest,
+    delete_match,
     get_active_contests,
     get_completed_contests,
     get_contest_details,
@@ -163,6 +164,53 @@ async def create_tma_contest(
             "was_created": result.was_created,
         },
     )
+
+
+@router.delete(
+    "/contests/{contest_id}/matches/{match_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_tma_match(
+    contest_id: int,
+    match_id: int,
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> Response:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+
+    try:
+        delete_match(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            match_id=match_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except MatchNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except ContestCompletedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/contests/{contest_id}")

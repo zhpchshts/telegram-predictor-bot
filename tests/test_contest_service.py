@@ -10,9 +10,11 @@ from app.contest_service import (
     ContestCreationConflictError,
     ContestNotFoundError,
     MatchCreationConflictError,
+    MatchNotFoundError,
     MatchResultUnavailableError,
     PredictionUnavailableError,
     create_match,
+    delete_match,
     create_world_cup_2026_contest,
     delete_contest,
     get_active_contests,
@@ -71,6 +73,24 @@ def create_test_match(
         away_team_name=away_team_name,
         starts_at_utc=starts_at_utc,
         idempotency_key=idempotency_key,
+    )
+
+
+def delete_test_match(
+    *,
+    database_path: Path,
+    contest_id: int,
+    match_id: int,
+) -> None:
+    delete_match(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest_id,
+        match_id=match_id,
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
     )
 
 
@@ -1761,3 +1781,183 @@ def test_delete_contest_rejects_contest_from_other_chat(
         database_path=database_path,
         telegram_chat_id=TELEGRAM_CHAT_ID,
     ) == (contest,)
+
+
+def test_delete_match_removes_linked_data_and_writes_event(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+
+    save_test_prediction(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+    )
+    save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+    )
+
+    with create_connection(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM matches").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM ties").fetchone()[0] == 1
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM match_creation_requests"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            connection.execute("SELECT COUNT(*) FROM match_predictions").fetchone()[0]
+            == 1
+        )
+        assert (
+            connection.execute("SELECT COUNT(*) FROM tie_predictions").fetchone()[0]
+            == 1
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM match_prediction_scores"
+            ).fetchone()[0]
+            > 0
+        )
+        assert (
+            connection.execute("SELECT COUNT(*) FROM tie_prediction_scores").fetchone()[
+                0
+            ]
+            > 0
+        )
+
+    delete_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+    )
+
+    with create_connection(database_path) as connection:
+        deleted_event = connection.execute(
+            """
+            SELECT entity_id, payload_json
+            FROM event_log
+            WHERE event_type = 'match.deleted'
+            """
+        ).fetchone()
+
+        assert connection.execute("SELECT COUNT(*) FROM matches").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM ties").fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM match_creation_requests"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute("SELECT COUNT(*) FROM match_predictions").fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute("SELECT COUNT(*) FROM tie_predictions").fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM match_prediction_scores"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute("SELECT COUNT(*) FROM tie_prediction_scores").fetchone()[
+                0
+            ]
+            == 0
+        )
+        assert connection.execute("SELECT COUNT(*) FROM teams").fetchone()[0] == 2
+
+    assert deleted_event is not None
+    assert deleted_event["entity_id"] == match.id
+
+    deleted_payload = json.loads(deleted_event["payload_json"])
+
+    assert deleted_payload["home_team"] == {
+        "id": match.home_team_id,
+        "name": match.home_team_name,
+    }
+    assert deleted_payload["away_team"] == {
+        "id": match.away_team_id,
+        "name": match.away_team_name,
+    }
+    assert deleted_payload["starts_at_utc"] == match.starts_at_utc
+    assert deleted_payload["status"] == "finished"
+    assert deleted_payload["tie_id"] == match.tie_id
+
+
+def test_delete_match_rejects_unknown_match(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+
+    with pytest.raises(MatchNotFoundError, match="Матч не найден"):
+        delete_test_match(
+            database_path=database_path,
+            contest_id=contest.id,
+            match_id=999,
+        )
+
+    with create_connection(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM event_log WHERE event_type = 'match.deleted'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_delete_match_rejects_completed_contest(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+
+    save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+    )
+    complete_test_contest(
+        database_path=database_path,
+        contest_id=contest.id,
+    )
+
+    with pytest.raises(
+        ContestCompletedError,
+        match="Конкурс завершён. Изменения в нём больше недоступны.",
+    ):
+        delete_test_match(
+            database_path=database_path,
+            contest_id=contest.id,
+            match_id=match.id,
+        )
+
+    with create_connection(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM matches").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM ties").fetchone()[0] == 1
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM event_log WHERE event_type = 'match.deleted'"
+            ).fetchone()[0]
+            == 0
+        )

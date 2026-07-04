@@ -798,6 +798,136 @@ def create_match(
     )
 
 
+def delete_match(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    match_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+) -> None:
+    with database_connection(database_path) as connection:
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+
+        match_row = connection.execute(
+            """
+            SELECT
+                matches.id,
+                matches.tie_id,
+                matches.starts_at_utc,
+                matches.status,
+                home_team.id AS home_team_id,
+                home_team.name AS home_team_name,
+                away_team.id AS away_team_id,
+                away_team.name AS away_team_name
+            FROM matches
+            JOIN stages
+            ON stages.id = matches.stage_id
+            JOIN competitions
+            ON competitions.id = stages.competition_id
+            JOIN teams AS home_team
+            ON home_team.id = matches.home_team_id
+            JOIN teams AS away_team
+            ON away_team.id = matches.away_team_id
+            WHERE competitions.contest_id = ?
+            AND matches.id = ?
+            """,
+            (contest_id, match_id),
+        ).fetchone()
+
+        if match_row is None:
+            raise MatchNotFoundError("Матч не найден.")
+
+        tie_id = int(match_row["tie_id"]) if match_row["tie_id"] is not None else None
+
+        actor_user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+
+        deleted_match = connection.execute(
+            """
+            DELETE FROM matches
+            WHERE id = ?
+            """,
+            (match_id,),
+        )
+
+        if deleted_match.rowcount != 1:
+            raise MatchNotFoundError("Матч не найден.")
+
+        if tie_id is not None:
+            remaining_match = connection.execute(
+                """
+                SELECT 1
+                FROM matches
+                WHERE tie_id = ?
+                LIMIT 1
+                """,
+                (tie_id,),
+            ).fetchone()
+
+            if remaining_match is None:
+                connection.execute(
+                    """
+                    DELETE FROM ties
+                    WHERE id = ?
+                    """,
+                    (tie_id,),
+                )
+
+        event_payload = json.dumps(
+            {
+                "away_team": {
+                    "id": int(match_row["away_team_id"]),
+                    "name": str(match_row["away_team_name"]),
+                },
+                "home_team": {
+                    "id": int(match_row["home_team_id"]),
+                    "name": str(match_row["home_team_name"]),
+                },
+                "starts_at_utc": str(match_row["starts_at_utc"]),
+                "status": str(match_row["status"]),
+                "tie_id": tie_id,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+        connection.execute(
+            """
+            INSERT INTO event_log (
+                contest_id,
+                actor_user_id,
+                event_type,
+                entity_type,
+                entity_id,
+                payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                contest_id,
+                actor_user_id,
+                "match.deleted",
+                "match",
+                match_id,
+                event_payload,
+            ),
+        )
+
+
 def save_match_prediction(
     *,
     database_path: Path,
