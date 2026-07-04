@@ -9,15 +9,19 @@ from pydantic import BaseModel
 from app.config import load_settings
 from app.contest_service import (
     ChampionUnavailableError,
+    ContestCompletedError,
+    ContestCompletionUnavailableError,
     ContestCreationConflictError,
     ContestNotFoundError,
     MatchCreationConflictError,
     MatchNotFoundError,
     MatchResultUnavailableError,
     PredictionUnavailableError,
+    complete_contest,
     create_match,
     create_world_cup_2026_contest,
     get_active_contests,
+    get_completed_contests,
     get_contest_details,
     save_champion_prediction,
     save_champion_prediction_settings,
@@ -88,10 +92,17 @@ async def get_tma_bootstrap(
         database_path=settings.database_path,
         telegram_chat_id=context.chat.telegram_chat_id,
     )
+    completed_contests = get_completed_contests(
+        database_path=settings.database_path,
+        telegram_chat_id=context.chat.telegram_chat_id,
+    )
     return {
         "context": _serialize_context(context),
         "active_contests": [
             _serialize_active_contest(contest) for contest in active_contests
+        ],
+        "completed_contests": [
+            _serialize_active_contest(contest) for contest in completed_contests
         ],
     }
 
@@ -181,6 +192,56 @@ async def get_tma_contest(
     return {"contest": _serialize_contest_details(contest)}
 
 
+@router.post("/contests/{contest_id}/complete")
+async def complete_tma_contest(
+    contest_id: int,
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> JSONResponse:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+
+    settings = load_settings()
+
+    try:
+        complete_contest(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+        )
+
+        contest = get_contest_details(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (
+        ContestCompletedError,
+        ContestCompletionUnavailableError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        content={"contest": _serialize_contest_details(contest)},
+    )
+
+
 @router.post("/contests/{contest_id}/matches")
 async def create_tma_match(
     contest_id: int,
@@ -223,7 +284,7 @@ async def create_tma_match(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except MatchCreationConflictError as error:
+    except (ContestCompletedError, MatchCreationConflictError) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -284,7 +345,7 @@ async def save_tma_match_prediction(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except PredictionUnavailableError as error:
+    except (ContestCompletedError, PredictionUnavailableError) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -345,7 +406,7 @@ async def save_tma_match_result(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except MatchResultUnavailableError as error:
+    except (ContestCompletedError, MatchResultUnavailableError) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -405,6 +466,11 @@ async def save_tma_champion_prediction_settings(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
+    except ContestCompletedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
     except ValueError as error:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -449,7 +515,7 @@ async def save_tma_champion_prediction(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except PredictionUnavailableError as error:
+    except (ContestCompletedError, PredictionUnavailableError) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -494,7 +560,7 @@ async def save_tma_contest_champion(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except ChampionUnavailableError as error:
+    except (ChampionUnavailableError, ContestCompletedError) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -564,6 +630,7 @@ def _serialize_contest_details(contest) -> dict[str, object]:
         "name": contest.name,
         "slug": contest.slug,
         "created_at": contest.created_at,
+        "is_active": contest.is_active,
         "champion_prediction": _serialize_champion_prediction(
             contest.champion_prediction
         ),

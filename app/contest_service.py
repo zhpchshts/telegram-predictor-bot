@@ -32,6 +32,14 @@ class ContestNotFoundError(ValueError):
     """Raised when a contest is unavailable in the current Telegram chat."""
 
 
+class ContestCompletedError(ValueError):
+    """Raised when a write is attempted for a completed contest."""
+
+
+class ContestCompletionUnavailableError(ValueError):
+    """Raised when a contest cannot be completed yet."""
+
+
 class MatchCreationConflictError(ValueError):
     """Raised when an idempotency key is reused with different request data."""
 
@@ -139,6 +147,7 @@ class ContestDetails:
     name: str
     slug: str
     created_at: str
+    is_active: bool
     champion_prediction: ChampionPredictionDetails
     leaderboard: tuple[ContestLeaderboardEntry, ...]
     matches: tuple[MatchSummary, ...]
@@ -187,6 +196,31 @@ def get_active_contests(
     return tuple(_active_contest_summary_from_row(row) for row in rows)
 
 
+def get_completed_contests(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+) -> tuple[ActiveContestSummary, ...]:
+    with database_connection(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                contests.id,
+                contests.name,
+                contests.slug,
+                contests.created_at
+            FROM contests
+            JOIN chats ON chats.id = contests.chat_id
+            WHERE chats.telegram_chat_id = ?
+              AND contests.is_active = 0
+            ORDER BY contests.created_at DESC, contests.id DESC
+            """,
+            (telegram_chat_id,),
+        ).fetchall()
+
+    return tuple(_active_contest_summary_from_row(row) for row in rows)
+
+
 def get_contest_details(
     *,
     database_path: Path,
@@ -195,7 +229,7 @@ def get_contest_details(
     telegram_user_id: int | None = None,
 ) -> ContestDetails:
     with database_connection(database_path) as connection:
-        contest_row = _get_active_contest_row(
+        contest_row = _get_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
@@ -373,9 +407,112 @@ def get_contest_details(
             name=str(contest_row["name"]),
             slug=str(contest_row["slug"]),
             created_at=str(contest_row["created_at"]),
+            is_active=bool(contest_row["is_active"]),
             champion_prediction=champion_prediction,
             leaderboard=_contest_leaderboard_from_rows(leaderboard_rows),
             matches=tuple(_match_summary_from_row(row) for row in match_rows),
+        )
+
+
+def complete_contest(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+) -> None:
+    with database_connection(database_path) as connection:
+        contest_row = _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+
+        incomplete_match = connection.execute(
+            """
+            SELECT matches.id
+            FROM matches
+            JOIN ties ON ties.id = matches.tie_id
+            JOIN stages ON stages.id = matches.stage_id
+            JOIN competitions ON competitions.id = stages.competition_id
+            WHERE competitions.contest_id = ?
+              AND (
+                  matches.status != 'finished'
+                  OR matches.home_score_final IS NULL
+                  OR matches.away_score_final IS NULL
+                  OR ties.advancing_team_id IS NULL
+              )
+            LIMIT 1
+            """,
+            (contest_id,),
+        ).fetchone()
+
+        if incomplete_match is not None:
+            raise ContestCompletionUnavailableError(
+                "Сначала внесите финальные результаты всех матчей."
+            )
+
+        if (
+            bool(contest_row["champion_prediction_enabled"])
+            and contest_row["champion_team_id"] is None
+        ):
+            raise ContestCompletionUnavailableError(
+                "Сначала укажите фактического чемпиона."
+            )
+
+        actor_user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+
+        completion_update = connection.execute(
+            """
+            UPDATE contests
+            SET is_active = 0
+            WHERE id = ?
+              AND is_active = 1
+            """,
+            (contest_id,),
+        )
+
+        if completion_update.rowcount != 1:
+            raise ContestCompletedError(
+                "Конкурс завершён. Изменения в нём больше недоступны."
+            )
+
+        event_payload = json.dumps(
+            {"is_active": False},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+        connection.execute(
+            """
+            INSERT INTO event_log (
+                contest_id,
+                actor_user_id,
+                event_type,
+                entity_type,
+                entity_id,
+                payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                contest_id,
+                actor_user_id,
+                "contest.completed",
+                "contest",
+                contest_id,
+                event_payload,
+            ),
         )
 
 
@@ -1486,26 +1623,56 @@ def _upsert_user(
     return int(row["id"])
 
 
+def _get_contest_row(
+    connection,
+    *,
+    telegram_chat_id: int,
+    contest_id: int,
+):
+    contest_row = connection.execute(
+        """
+        SELECT
+            contests.id,
+            contests.name,
+            contests.slug,
+            contests.created_at,
+            contests.is_active,
+            contests.champion_prediction_enabled,
+            contests.champion_prediction_deadline_at,
+            contests.champion_prediction_points,
+            contests.champion_team_id
+        FROM contests
+        JOIN chats ON chats.id = contests.chat_id
+        WHERE chats.telegram_chat_id = ?
+          AND contests.id = ?
+        """,
+        (telegram_chat_id, contest_id),
+    ).fetchone()
+
+    if contest_row is None:
+        raise ContestNotFoundError("Конкурс не найден.")
+
+    return contest_row
+
+
 def _get_active_contest_row(
     connection,
     *,
     telegram_chat_id: int,
     contest_id: int,
 ):
-    row = connection.execute(
-        """
-        SELECT contests.id, contests.name, contests.slug, contests.created_at
-        FROM contests
-        JOIN chats ON chats.id = contests.chat_id
-        WHERE contests.id = ?
-          AND chats.telegram_chat_id = ?
-          AND contests.is_active = 1
-        """,
-        (contest_id, telegram_chat_id),
-    ).fetchone()
-    if row is None:
-        raise ContestNotFoundError("Конкурс не найден.")
-    return row
+    contest_row = _get_contest_row(
+        connection,
+        telegram_chat_id=telegram_chat_id,
+        contest_id=contest_id,
+    )
+
+    if not bool(contest_row["is_active"]):
+        raise ContestCompletedError(
+            "Конкурс завершён. Изменения в нём больше недоступны."
+        )
+
+    return contest_row
 
 
 def _get_match_row(

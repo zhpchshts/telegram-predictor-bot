@@ -295,6 +295,43 @@ summary:focus-visible {
   text-align: left;
 }
 
+.contest-lists {
+  display: grid;
+  gap: 14px;
+}
+
+.completed-contest-list-card {
+  border-color: color-mix(in srgb, var(--text) 16%, var(--border));
+  background: color-mix(in srgb, var(--surface) 88%, var(--background));
+}
+
+.danger-action-button {
+  border-color: color-mix(in srgb, var(--danger) 42%, transparent);
+  background: color-mix(in srgb, var(--danger) 17%, var(--surface));
+  color: var(--text);
+}
+
+.contest-status {
+  width: fit-content;
+  margin: 0;
+  font-size: 0.81rem;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.contest-status--completed {
+  color: var(--muted);
+}
+
+.contest-completion-card {
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
+}
+
+.contest-completion-confirmation {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+}
+
 .contest-overview {
   display: grid;
   gap: 7px;

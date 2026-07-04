@@ -191,28 +191,39 @@ function renderLoading() {
   );
 }
 
-function createContestsCard(contests, onOpenContest) {
-  if (contests.length === 0) {
-    return createInfoCard(
-      "В этом чате пока нет конкурсов",
-      [
-        "Создай первый конкурс прогнозов на Чемпионат мира 2026.",
-        "Позже здесь можно будет вести несколько параллельных конкурсов.",
-      ],
-      "contest-list-card",
-    );
-  }
-
+function createContestListCard(
+  title,
+  description,
+  contests,
+  onOpenContest,
+  emptyMessage,
+  className = "",
+) {
   const card = createElement("section", {
-    className: "info-card contest-list-card",
+    className: ["info-card", "contest-list-card", className]
+      .filter(Boolean)
+      .join(" "),
   });
   const heading = createElement("h2", {
-    text: "Активные конкурсы",
+    text: title,
   });
-  const description = createElement("p", {
+  const descriptionElement = createElement("p", {
     className: "subtitle",
-    text: "Открой конкурс, чтобы делать прогнозы, смотреть рейтинг и управлять матчами.",
+    text: description,
   });
+
+  card.append(heading, descriptionElement);
+
+  if (contests.length === 0) {
+    card.append(
+      createElement("p", {
+        className: "subtitle",
+        text: emptyMessage,
+      }),
+    );
+    return card;
+  }
+
   const list = createElement("ol", {
     className: "contest-list",
   });
@@ -234,8 +245,69 @@ function createContestsCard(contests, onOpenContest) {
     list.append(item);
   }
 
-  card.append(heading, description, list);
+  card.append(list);
   return card;
+}
+
+function createContestsCard(
+  activeContests,
+  completedContests,
+  onOpenContest,
+) {
+  const normalizedActiveContests = Array.isArray(activeContests)
+    ? activeContests
+    : [];
+  const normalizedCompletedContests = Array.isArray(completedContests)
+    ? completedContests
+    : [];
+
+  if (
+    normalizedActiveContests.length === 0 &&
+    normalizedCompletedContests.length === 0
+  ) {
+    return createInfoCard(
+      "В этом чате пока нет конкурсов",
+      [
+        "Создай первый конкурс прогнозов на Чемпионат мира 2026.",
+        "Позже здесь можно будет вести несколько параллельных конкурсов.",
+      ],
+      "contest-list-card",
+    );
+  }
+
+  const container = createElement("div", {
+    className: "contest-lists",
+  });
+
+  container.append(
+    createContestListCard(
+      "Активные конкурсы",
+      normalizedActiveContests.length > 0
+        ? (
+          "Открой конкурс, чтобы делать прогнозы, смотреть рейтинг "
+          + "и управлять матчами."
+        )
+        : "Здесь будут конкурсы, в которых ещё можно участвовать.",
+      normalizedActiveContests,
+      onOpenContest,
+      "Сейчас нет активных конкурсов.",
+    ),
+  );
+
+  if (normalizedCompletedContests.length > 0) {
+    container.append(
+      createContestListCard(
+        "Завершённые конкурсы",
+        "Результаты, рейтинг и прогнозы сохранены и доступны для просмотра.",
+        normalizedCompletedContests,
+        onOpenContest,
+        "Сейчас нет завершённых конкурсов.",
+        "completed-contest-list-card",
+      ),
+    );
+  }
+
+  return container;
 }
 
 function createContestFormCard(bootstrap, state) {
@@ -453,8 +525,166 @@ function createContestDetailsCard(contest, onBack) {
   });
 
   backButton.addEventListener("click", onBack);
-
   card.append(backButton, heading);
+
+  if (contest.is_active === false) {
+    card.append(
+      createElement("p", {
+        className: "contest-status contest-status--completed",
+        text: "Завершён · доступен только просмотр",
+      }),
+    );
+  }
+
+  return card;
+}
+
+function createContestCompletionCard(bootstrap, contest, state) {
+  const card = createElement("section", {
+    className: "info-card contest-completion-card",
+  });
+  const heading = createElement("h2", {
+    text: "Завершить конкурс",
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const isConfirming = state.completionMode === "confirm";
+
+  setFormMessage(
+    message,
+    state.completionMessage || "",
+    state.completionMessageType || "",
+  );
+
+  if (!isConfirming) {
+    const description = createElement("p", {
+      className: "subtitle",
+      text: (
+        "После завершения конкурс исчезнет из активных и будет доступен "
+        + "в разделе «Завершённые» только для просмотра."
+      ),
+    });
+    const continueButton = createActionButton(
+      "Завершить конкурс",
+      "danger-action-button",
+    );
+
+    continueButton.addEventListener("click", () => {
+      renderContestDetailsScreen(bootstrap, contest, {
+        ...state,
+        activeTab: "matches",
+        completionMode: "confirm",
+        completionMessage: "",
+        completionMessageType: "",
+      });
+    });
+
+    actions.append(continueButton);
+    card.append(heading, description, message, actions);
+    return card;
+  }
+
+  const panel = createElement("div", {
+    className: "confirmation-panel contest-completion-confirmation",
+  });
+  const summary = createElement("p");
+  const contestName = createElement("strong", {
+    text: contest.name,
+  });
+  const details = createElement("p", {
+    className: "form-hint",
+    text: (
+      "Матчи, результаты, прогнозы, рейтинг и начисленные баллы сохранятся. "
+      + "Изменять конкурс после завершения будет нельзя."
+    ),
+  });
+  const cancelButton = createActionButton(
+    "Отмена",
+    "secondary-action-button",
+  );
+  const completeButton = createActionButton(
+    "Да, завершить конкурс",
+    "danger-action-button",
+  );
+
+  summary.append("Завершить конкурс «", contestName, "»?");
+  panel.append(summary, details);
+  actions.append(cancelButton, completeButton);
+  card.append(heading, panel, message, actions);
+
+  cancelButton.addEventListener("click", () => {
+    renderContestDetailsScreen(bootstrap, contest, {
+      ...state,
+      activeTab: "matches",
+      completionMode: "",
+      completionMessage: "",
+      completionMessageType: "",
+    });
+  });
+
+  completeButton.addEventListener("click", async () => {
+    completeButton.disabled = true;
+    cancelButton.disabled = true;
+    completeButton.textContent = "Завершаем…";
+
+    try {
+      const result = await apiRequest(
+        `/api/tma/contests/${contest.id}/complete`,
+        {
+          method: "POST",
+        },
+      );
+
+      if (!result || !result.contest) {
+        throw new Error(
+          "Сервер вернул некорректный ответ при завершении конкурса.",
+        );
+      }
+
+      const activeContests = Array.isArray(bootstrap.active_contests)
+        ? bootstrap.active_contests
+        : [];
+      const completedContests = Array.isArray(bootstrap.completed_contests)
+        ? bootstrap.completed_contests
+        : [];
+      const nextBootstrap = {
+        ...bootstrap,
+        active_contests: activeContests.filter(
+          (activeContest) => activeContest.id !== result.contest.id,
+        ),
+        completed_contests: [
+          result.contest,
+          ...completedContests.filter(
+            (completedContest) =>
+              completedContest.id !== result.contest.id,
+          ),
+        ],
+      };
+
+      renderContestScreen(nextBootstrap, {
+        mode: "form",
+        formMessage: `Конкурс «${result.contest.name}» завершён.`,
+        formMessageType: "success",
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error
+        ? error.message
+        : "Не удалось завершить конкурс.";
+
+      renderContestDetailsScreen(bootstrap, contest, {
+        ...state,
+        activeTab: "matches",
+        completionMode: "confirm",
+        completionMessage: errorMessage,
+        completionMessageType: "error",
+      });
+    }
+  });
+
   return card;
 }
 
@@ -895,6 +1125,22 @@ function createMatchResultSection(contest, match, state, onResultSaved) {
     text: "Результат матча",
   });
 
+  if (contest.is_active === false) {
+    const readOnlyMessage = createElement("p", {
+      className: "match-prediction-closed",
+      text: result
+        ? (
+          `Итоговый счёт: ${result.home_score} : ${result.away_score}. `
+          + `Победитель противостояния: `
+          + `${getTeamNameById(match, result.advancing_team_id)}.`
+        )
+        : "Конкурс завершён. Результаты доступны только для просмотра.",
+    });
+
+    section.append(heading, readOnlyMessage);
+    return section;
+  }
+
   if (match.status === "cancelled") {
     const unavailableMessage = createElement("p", {
       className: "match-prediction-closed",
@@ -1142,7 +1388,7 @@ function createMatchPredictionSection(contest, match) {
     text: "Ваш прогноз",
   });
 
-  if (!isMatchPredictionOpen(match)) {
+  if (contest.is_active === false || !isMatchPredictionOpen(match)) {
     const closedMessage = createElement("p", {
       className: "match-prediction-closed",
       text: prediction
@@ -1151,7 +1397,9 @@ function createMatchPredictionSection(contest, match) {
           `${prediction.away_score}. Победитель противостояния: ` +
           `${getTeamNameById(match, prediction.advancing_team_id)}.`
         )
-        : "Прогнозы на этот матч закрыты.",
+        : contest.is_active === false
+          ? "Конкурс завершён. Прогноз не был сохранён."
+          : "Прогнозы на этот матч закрыты.",
     });
 
     if (prediction && match.prediction_score) {
@@ -1726,10 +1974,12 @@ function createChampionPredictionChoiceSection(
     return section;
   }
 
-  if (!championPrediction.is_open) {
+  if (contest.is_active === false || !championPrediction.is_open) {
     const text = championPrediction.prediction
       ? `Ваш прогноз: ${championPrediction.prediction.name}.`
-      : "Вы не выбрали чемпиона до закрытия прогноза.";
+      : contest.is_active === false
+        ? "Конкурс завершён. Прогноз на чемпиона не был сохранён."
+        : "Вы не выбрали чемпиона до закрытия прогноза.";
 
     section.append(
       createElement("p", {
@@ -2608,6 +2858,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
     ? contest.leaderboard
     : [];
   const activeTab = getActiveContestTab(state.activeTab);
+  const isActive = contest.is_active !== false;
   const cards = [
     createContestDetailsCard(contest, () => {
       renderContestScreen(bootstrap);
@@ -2643,47 +2894,65 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
         },
         {
           title: "Матчи",
-          emptyMessages: ["Матчей пока нет.", "Добавьте первый матч ниже."],
+          emptyMessages: isActive
+            ? ["Матчей пока нет.", "Добавьте первый матч ниже."]
+            : ["Матчей нет."],
           showPredictions: false,
           showResults: true,
-          leadingItems: [
-            createChampionAdministrationCard(
-              contest,
-              state,
-              () => {
-                void openContest(bootstrap, contest.id, {
-                  ...state,
-                  activeTab: "matches",
-                });
-              },
-            ),
-          ],
+          leadingItems: isActive
+            ? [
+              createChampionAdministrationCard(
+                contest,
+                state,
+                () => {
+                  void openContest(bootstrap, contest.id, {
+                    ...state,
+                    activeTab: "matches",
+                  });
+                },
+              ),
+            ]
+            : [],
         },
       ),
-      createMatchFormCard(bootstrap, contest, state),
     );
+
+    if (isActive) {
+      cards.push(
+        createMatchFormCard(bootstrap, contest, state),
+        createContestCompletionCard(bootstrap, contest, state),
+      );
+    }
   } else {
     cards.push(
       createContestRulesCard(contest.champion_prediction),
-      createMatchesCard(contest, matches, state, null, {
-        title: "Прогнозы",
-        emptyMessages: [
-          "Матчей пока нет.",
-          "Когда кто-то добавит матч, здесь можно будет сохранить прогноз.",
-        ],
-        showPredictions: true,
-        showResults: false,
-        listItems: createPredictionListItems(
-          contest,
-          matches,
-          () => {
-            void openContest(bootstrap, contest.id, {
-              ...state,
-              activeTab: "predictions",
-            });
-          },
-        ),
-      }),
+      createMatchesCard(
+        contest,
+        matches,
+        state,
+        null,
+        {
+          title: "Прогнозы",
+          emptyMessages: isActive
+            ? [
+              "Матчей пока нет.",
+              "Когда кто-то добавит матч, здесь можно будет сохранить прогноз.",
+            ]
+            : ["Матчей нет."],
+          showPredictions: true,
+          showResults: false,
+          listItems: createPredictionListItems(
+            contest,
+            matches,
+            () => {
+              void openContest(bootstrap, contest.id, {
+                ...state,
+                activeTab: "predictions",
+              });
+            },
+          ),
+        },
+      ),
     );
   }
 
@@ -2717,12 +2986,19 @@ function renderContestScreen(bootstrap, state = {}) {
   const activeContests = Array.isArray(bootstrap.active_contests)
     ? bootstrap.active_contests
     : [];
+  const completedContests = Array.isArray(bootstrap.completed_contests)
+    ? bootstrap.completed_contests
+    : [];
 
   chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
 
-  const contestCard = createContestsCard(activeContests, (contestId) => {
-    void openContest(bootstrap, contestId);
-  });
+  const contestCard = createContestsCard(
+    activeContests,
+    completedContests,
+    (contestId) => {
+      void openContest(bootstrap, contestId);
+    },
+  );
   const creationCard = state.mode === "confirm"
     ? createContestConfirmationCard(bootstrap, state)
     : createContestFormCard(bootstrap, state);

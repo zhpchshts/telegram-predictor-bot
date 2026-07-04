@@ -147,10 +147,11 @@ def test_bootstrap_returns_verified_context_and_empty_active_contests(
             },
         },
         "active_contests": [],
+        "completed_contests": [],
     }
 
 
-def test_bootstrap_returns_all_active_contests_for_context_chat(
+def test_bootstrap_returns_active_and_completed_contests_for_context_chat(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -205,7 +206,7 @@ def test_bootstrap_returns_all_active_contests_for_context_chat(
             INSERT INTO contests (chat_id, name, slug, is_active)
             VALUES (?, ?, ?, ?)
             """,
-            (chat_id, "Архивный конкурс", "archived-contest", 0),
+            (chat_id, "Завершённый конкурс", "completed-contest", 0),
         )
         connection.execute(
             """
@@ -245,6 +246,18 @@ def test_bootstrap_returns_all_active_contests_for_context_chat(
         {
             "name": "Чемпионат мира 2026",
             "slug": "world-cup-2026",
+        },
+    ]
+    assert [
+        {
+            "name": contest["name"],
+            "slug": contest["slug"],
+        }
+        for contest in response_data["completed_contests"]
+    ] == [
+        {
+            "name": "Завершённый конкурс",
+            "slug": "completed-contest",
         },
     ]
     assert all(contest["created_at"] for contest in response_data["active_contests"])
@@ -560,6 +573,7 @@ def test_get_contest_returns_details_with_empty_matches(
             "name": "ЧМ-2026: прогнозы",
             "slug": contest["slug"],
             "created_at": contest["created_at"],
+            "is_active": True,
             "champion_prediction": {
                 "is_enabled": False,
                 "deadline_at": None,
@@ -1273,4 +1287,131 @@ def test_save_match_result_rejects_cancelled_match(
     assert response.status_code == 409
     assert response.json() == {
         "detail": "Для отменённого матча нельзя сохранить результат.",
+    }
+
+
+def test_complete_contest_rejects_unfinished_match(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="unfinished-match"),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2020-06-11T18:00:00Z",
+        },
+    )
+
+    assert match_response.status_code == 201
+
+    response = client.post(
+        f"/api/tma/contests/{contest['id']}/complete",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Сначала внесите финальные результаты всех матчей.",
+    }
+
+
+def test_complete_contest_moves_it_to_completed_and_blocks_new_match(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="completed-match"),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2020-06-11T18:00:00Z",
+        },
+    )
+
+    assert match_response.status_code == 201
+
+    match = match_response.json()["match"]
+
+    result_response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match['id']}/result",
+        headers=build_tma_headers(),
+        json={
+            "home_score": 2,
+            "away_score": 1,
+            "advancing_team_id": match["home_team_id"],
+        },
+    )
+
+    assert result_response.status_code == 201
+
+    completion_response = client.post(
+        f"/api/tma/contests/{contest['id']}/complete",
+        headers=build_tma_headers(),
+    )
+
+    assert completion_response.status_code == 200
+    assert completion_response.json()["contest"]["id"] == contest["id"]
+    assert completion_response.json()["contest"]["is_active"] is False
+
+    bootstrap_response = client.get(
+        "/api/tma/bootstrap",
+        headers=build_tma_headers(),
+    )
+
+    assert bootstrap_response.status_code == 200
+    assert bootstrap_response.json()["active_contests"] == []
+    assert [
+        completed_contest["id"]
+        for completed_contest in bootstrap_response.json()["completed_contests"]
+    ] == [contest["id"]]
+
+    contest_response = client.get(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert contest_response.status_code == 200
+    assert contest_response.json()["contest"]["is_active"] is False
+    assert contest_response.json()["contest"]["matches"][0]["result"] == {
+        "home_score": 2,
+        "away_score": 1,
+        "advancing_team_id": match["home_team_id"],
+    }
+
+    blocked_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="match-after-completion"),
+        json={
+            "home_team_name": "Франция",
+            "away_team_name": "Испания",
+            "starts_at_utc": "2030-06-11T18:00:00Z",
+        },
+    )
+
+    assert blocked_response.status_code == 409
+    assert blocked_response.json() == {
+        "detail": "Конкурс завершён. Изменения в нём больше недоступны.",
     }

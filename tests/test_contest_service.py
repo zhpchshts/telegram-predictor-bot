@@ -18,6 +18,10 @@ from app.contest_service import (
     get_contest_details,
     save_match_prediction,
     save_match_result,
+    ContestCompletedError,
+    ContestCompletionUnavailableError,
+    complete_contest,
+    get_completed_contests,
 )
 from app.database import create_connection, initialize_database
 
@@ -128,6 +132,22 @@ def save_test_result(
     )
 
 
+def complete_test_contest(
+    *,
+    database_path: Path,
+    contest_id: int,
+) -> None:
+    complete_contest(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+    )
+
+
 def test_get_active_contests_returns_empty_tuple_without_contests(
     tmp_path: Path,
 ) -> None:
@@ -147,7 +167,7 @@ def test_get_active_contests_returns_empty_tuple_without_contests(
     assert chats_count == 0
 
 
-def test_get_active_contests_returns_all_active_contests_and_excludes_archived(
+def test_get_active_contests_returns_all_active_contests_and_excludes_completed(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "predictor.db"
@@ -183,7 +203,7 @@ def test_get_active_contests_returns_all_active_contests_and_excludes_archived(
             INSERT INTO contests (chat_id, name, slug, is_active)
             VALUES (?, ?, ?, ?)
             """,
-            (chat_id, "Архивный конкурс", "archived-contest", 0),
+            (chat_id, "Завершённый конкурс", "completed-contest", 0),
         )
 
     contests = get_active_contests(
@@ -1480,3 +1500,134 @@ def test_get_contest_details_returns_leaderboard_with_competition_places(
         (2, "Bob", 3),
         (4, "Carol", 0),
     ]
+
+
+def test_complete_contest_rejects_unfinished_match(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+
+    contest = create_contest(database_path=database_path).contest
+    create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    )
+
+    with pytest.raises(
+        ContestCompletionUnavailableError,
+        match="Сначала внесите финальные результаты всех матчей.",
+    ):
+        complete_test_contest(
+            database_path=database_path,
+            contest_id=contest.id,
+        )
+
+
+def test_complete_contest_requires_actual_champion_when_enabled(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+
+    contest = create_contest(database_path=database_path).contest
+
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE contests
+            SET champion_prediction_enabled = 1
+            WHERE id = ?
+            """,
+            (contest.id,),
+        )
+
+    with pytest.raises(
+        ContestCompletionUnavailableError,
+        match="Сначала укажите фактического чемпиона.",
+    ):
+        complete_test_contest(
+            database_path=database_path,
+            contest_id=contest.id,
+        )
+
+
+def test_complete_contest_moves_it_to_completed_and_preserves_history(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+    save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+    )
+
+    complete_test_contest(
+        database_path=database_path,
+        contest_id=contest.id,
+    )
+
+    active_contests = get_active_contests(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+    )
+    completed_contests = get_completed_contests(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+    )
+    contest_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+    )
+
+    assert active_contests == ()
+    assert [completed_contest.id for completed_contest in completed_contests] == [
+        contest.id
+    ]
+    assert contest_details.is_active is False
+    assert len(contest_details.matches) == 1
+    assert contest_details.matches[0].result is not None
+    assert contest_details.matches[0].result.home_score == 2
+    assert contest_details.matches[0].result.away_score == 1
+
+    with create_connection(database_path) as connection:
+        completion_event = connection.execute(
+            """
+            SELECT
+                contest_id,
+                event_type,
+                entity_type,
+                entity_id,
+                payload_json
+            FROM event_log
+            WHERE event_type = 'contest.completed'
+            """
+        ).fetchone()
+
+    assert completion_event is not None
+    assert dict(completion_event) == {
+        "contest_id": contest.id,
+        "event_type": "contest.completed",
+        "entity_type": "contest",
+        "entity_id": contest.id,
+        "payload_json": '{"is_active":false}',
+    }
+
+    with pytest.raises(
+        ContestCompletedError,
+        match="Конкурс завершён. Изменения в нём больше недоступны.",
+    ):
+        create_test_match(
+            database_path=database_path,
+            contest_id=contest.id,
+            idempotency_key="create-match-after-completion",
+        )
