@@ -516,6 +516,45 @@ def complete_contest(
         )
 
 
+def delete_contest(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+) -> None:
+    with database_connection(database_path) as connection:
+        contest_row = connection.execute(
+            """
+            SELECT contests.id, contests.is_active
+            FROM contests
+            JOIN chats ON chats.id = contests.chat_id
+            WHERE chats.telegram_chat_id = ?
+            AND contests.id = ?
+            """,
+            (telegram_chat_id, contest_id),
+        ).fetchone()
+
+        if contest_row is None:
+            raise ContestNotFoundError("Конкурс не найден.")
+
+        if not bool(contest_row["is_active"]):
+            raise ContestCompletedError("Завершённый конкурс удалить нельзя.")
+
+        deletion = connection.execute(
+            """
+            DELETE FROM contests
+            WHERE id = ?
+            AND is_active = 1
+            """,
+            (contest_id,),
+        )
+
+        if deletion.rowcount != 1:
+            raise ContestCompletedError(
+                "Конкурс завершён. Изменения в нём больше недоступны."
+            )
+
+
 def create_match(
     *,
     database_path: Path,

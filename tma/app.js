@@ -573,15 +573,18 @@ function createContestCompletionCard(bootstrap, contest, state) {
       "danger-action-button",
     );
 
-    continueButton.addEventListener("click", () => {
-      renderContestDetailsScreen(bootstrap, contest, {
-        ...state,
-        activeTab: "matches",
-        completionMode: "confirm",
-        completionMessage: "",
-        completionMessageType: "",
-      });
-    });
+	continueButton.addEventListener("click", () => {
+	  renderContestDetailsScreen(bootstrap, contest, {
+		...state,
+		activeTab: "matches",
+		completionMode: "confirm",
+		completionMessage: "",
+		completionMessageType: "",
+		deletionMode: "",
+		deletionMessage: "",
+		deletionMessageType: "",
+	  });
+	});
 
     actions.append(continueButton);
     card.append(heading, description, message, actions);
@@ -681,6 +684,139 @@ function createContestCompletionCard(bootstrap, contest, state) {
         completionMode: "confirm",
         completionMessage: errorMessage,
         completionMessageType: "error",
+      });
+    }
+  });
+
+  return card;
+}
+
+function createContestDeletionCard(bootstrap, contest, state) {
+  const card = createElement("section", {
+    className: "info-card contest-completion-card",
+  });
+  const heading = createElement("h2", {
+    text: "Удалить конкурс",
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const isConfirming = state.deletionMode === "confirm";
+
+  setFormMessage(
+    message,
+    state.deletionMessage || "",
+    state.deletionMessageType || "",
+  );
+
+  if (!isConfirming) {
+    const description = createElement("p", {
+      className: "subtitle",
+      text: (
+        "Удаление необратимо: вместе с конкурсом будут удалены матчи, "
+        + "результаты, прогнозы, рейтинг и начисленные баллы."
+      ),
+    });
+    const continueButton = createActionButton(
+      "Удалить конкурс",
+      "danger-action-button",
+    );
+
+	continueButton.addEventListener("click", () => {
+	  renderContestDetailsScreen(bootstrap, contest, {
+		...state,
+		activeTab: "matches",
+		completionMode: "",
+		completionMessage: "",
+		completionMessageType: "",
+		deletionMode: "confirm",
+		deletionMessage: "",
+		deletionMessageType: "",
+	  });
+	});
+
+    actions.append(continueButton);
+    card.append(heading, description, message, actions);
+
+    return card;
+  }
+
+  const panel = createElement("div", {
+    className: "confirmation-panel contest-completion-confirmation",
+  });
+  const summary = createElement("p");
+  const contestName = createElement("strong", {
+    text: contest.name,
+  });
+  const details = createElement("p", {
+    className: "form-hint",
+    text: (
+      "Восстановить конкурс или его данные после удаления будет нельзя."
+    ),
+  });
+  const cancelButton = createActionButton(
+    "Отмена",
+    "secondary-action-button",
+  );
+  const deleteButton = createActionButton(
+    "Да, удалить конкурс",
+    "danger-action-button",
+  );
+
+  summary.append("Удалить конкурс «", contestName, "»?");
+  panel.append(summary, details);
+  actions.append(cancelButton, deleteButton);
+  card.append(heading, panel, message, actions);
+
+  cancelButton.addEventListener("click", () => {
+    renderContestDetailsScreen(bootstrap, contest, {
+      ...state,
+      activeTab: "matches",
+      deletionMode: "",
+      deletionMessage: "",
+      deletionMessageType: "",
+    });
+  });
+
+  deleteButton.addEventListener("click", async () => {
+    deleteButton.disabled = true;
+    cancelButton.disabled = true;
+    deleteButton.textContent = "Удаляем…";
+
+    try {
+      await apiRequest(`/api/tma/contests/${contest.id}`, {
+        method: "DELETE",
+      });
+
+      const activeContests = Array.isArray(bootstrap.active_contests)
+        ? bootstrap.active_contests
+        : [];
+      const nextBootstrap = {
+        ...bootstrap,
+        active_contests: activeContests.filter(
+          (activeContest) => activeContest.id !== contest.id,
+        ),
+      };
+
+      renderContestScreen(nextBootstrap, {
+        mode: "form",
+        formMessage: `Конкурс «${contest.name}» удалён.`,
+        formMessageType: "success",
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error
+        ? error.message
+        : "Не удалось удалить конкурс.";
+
+      renderContestDetailsScreen(bootstrap, contest, {
+        ...state,
+        activeTab: "matches",
+        deletionMode: "confirm",
+        deletionMessage: errorMessage,
+        deletionMessageType: "error",
       });
     }
   });
@@ -2917,12 +3053,13 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
       ),
     );
 
-    if (isActive) {
-      cards.push(
-        createMatchFormCard(bootstrap, contest, state),
-        createContestCompletionCard(bootstrap, contest, state),
-      );
-    }
+	if (isActive) {
+	  cards.push(
+		createMatchFormCard(bootstrap, contest, state),
+		createContestCompletionCard(bootstrap, contest, state),
+		createContestDeletionCard(bootstrap, contest, state),
+	  );
+	}
   } else {
     cards.push(
       createContestRulesCard(contest.champion_prediction),

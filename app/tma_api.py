@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from app.config import load_settings
@@ -20,6 +20,7 @@ from app.contest_service import (
     complete_contest,
     create_match,
     create_world_cup_2026_contest,
+    delete_contest,
     get_active_contests,
     get_completed_contests,
     get_contest_details,
@@ -240,6 +241,42 @@ async def complete_tma_contest(
     return JSONResponse(
         content={"contest": _serialize_contest_details(contest)},
     )
+
+
+@router.delete(
+    "/contests/{contest_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_tma_contest(
+    contest_id: int,
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> Response:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+
+    try:
+        delete_contest(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except ContestCompletedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/contests/{contest_id}/matches")

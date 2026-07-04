@@ -1415,3 +1415,149 @@ def test_complete_contest_moves_it_to_completed_and_blocks_new_match(
     assert blocked_response.json() == {
         "detail": "Конкурс завершён. Изменения в нём больше недоступны.",
     }
+
+
+def test_delete_contest_deletes_active_contest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    response = client.delete(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+    contest_response = client.get(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert contest_response.status_code == 404
+    assert contest_response.json() == {"detail": "Конкурс не найден."}
+
+    bootstrap_response = client.get(
+        "/api/tma/bootstrap",
+        headers=build_tma_headers(),
+    )
+
+    assert bootstrap_response.status_code == 200
+    assert bootstrap_response.json()["active_contests"] == []
+
+
+def test_delete_contest_rejects_contest_from_other_chat(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+
+    with create_connection(database_path) as connection:
+        other_chat_id = int(
+            connection.execute(
+                """
+                INSERT INTO chats (telegram_chat_id, title)
+                VALUES (?, ?)
+                """,
+                (-1009876543210, "Другой чат"),
+            ).lastrowid
+        )
+        contest_id = int(
+            connection.execute(
+                """
+                INSERT INTO contests (chat_id, name, slug, is_active)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    other_chat_id,
+                    "Чужой конкурс",
+                    "other-contest",
+                    1,
+                ),
+            ).lastrowid
+        )
+
+    client = TestClient(create_app())
+
+    response = client.delete(
+        f"/api/tma/contests/{contest_id}",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Конкурс не найден."}
+
+    with create_connection(database_path) as connection:
+        contest_row = connection.execute(
+            """
+            SELECT id
+            FROM contests
+            WHERE id = ?
+            """,
+            (contest_id,),
+        ).fetchone()
+
+    assert contest_row is not None
+
+
+def test_delete_contest_rejects_completed_contest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE contests
+            SET is_active = 0
+            WHERE id = ?
+            """,
+            (contest["id"],),
+        )
+
+    response = client.delete(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Завершённый конкурс удалить нельзя.",
+    }
+
+    with create_connection(database_path) as connection:
+        contest_row = connection.execute(
+            """
+            SELECT is_active
+            FROM contests
+            WHERE id = ?
+            """,
+            (contest["id"],),
+        ).fetchone()
+
+    assert contest_row is not None
+    assert contest_row["is_active"] == 0

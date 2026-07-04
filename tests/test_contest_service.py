@@ -14,6 +14,7 @@ from app.contest_service import (
     PredictionUnavailableError,
     create_match,
     create_world_cup_2026_contest,
+    delete_contest,
     get_active_contests,
     get_contest_details,
     save_match_prediction,
@@ -1631,3 +1632,132 @@ def test_complete_contest_moves_it_to_completed_and_preserves_history(
             contest_id=contest.id,
             idempotency_key="create-match-after-completion",
         )
+
+
+def test_delete_contest_deletes_active_contest_and_all_dependent_data(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+    save_test_prediction(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+    )
+
+    delete_contest(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+    )
+
+    assert (
+        get_active_contests(
+            database_path=database_path,
+            telegram_chat_id=TELEGRAM_CHAT_ID,
+        )
+        == ()
+    )
+
+    with create_connection(database_path) as connection:
+        for table_name in (
+            "contests",
+            "contest_creation_requests",
+            "competitions",
+            "scoring_rule_sets",
+            "stages",
+            "ties",
+            "matches",
+            "match_creation_requests",
+            "match_predictions",
+            "tie_predictions",
+            "match_prediction_scores",
+            "tie_prediction_scores",
+            "champion_predictions",
+            "event_log",
+        ):
+            count = connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[
+                0
+            ]
+
+            assert count == 0, table_name
+
+        chats_count = connection.execute("SELECT COUNT(*) FROM chats").fetchone()[0]
+        users_count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        teams_count = connection.execute("SELECT COUNT(*) FROM teams").fetchone()[0]
+
+    assert chats_count == 1
+    assert users_count == 1
+    assert teams_count == 2
+
+
+def test_delete_contest_rejects_completed_contest(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+    save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+    )
+    complete_test_contest(
+        database_path=database_path,
+        contest_id=contest.id,
+    )
+
+    with pytest.raises(
+        ContestCompletedError,
+        match="Завершённый конкурс удалить нельзя",
+    ):
+        delete_contest(
+            database_path=database_path,
+            telegram_chat_id=TELEGRAM_CHAT_ID,
+            contest_id=contest.id,
+        )
+
+    with create_connection(database_path) as connection:
+        contest_row = connection.execute(
+            """
+            SELECT is_active
+            FROM contests
+            WHERE id = ?
+            """,
+            (contest.id,),
+        ).fetchone()
+
+    assert contest_row is not None
+    assert contest_row["is_active"] == 0
+
+
+def test_delete_contest_rejects_contest_from_other_chat(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+
+    contest = create_contest(database_path=database_path).contest
+
+    with pytest.raises(ContestNotFoundError, match="Конкурс не найден"):
+        delete_contest(
+            database_path=database_path,
+            telegram_chat_id=TELEGRAM_CHAT_ID - 1,
+            contest_id=contest.id,
+        )
+
+    assert get_active_contests(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+    ) == (contest,)
