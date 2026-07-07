@@ -608,10 +608,7 @@ def test_match_prediction_publication_settings_can_be_enabled(
     contest = create_tma_contest(client)
 
     response = client.put(
-        (
-            f"/api/tma/contests/{contest['id']}/"
-            "match-prediction-publication/settings"
-        ),
+        (f"/api/tma/contests/{contest['id']}/match-prediction-publication/settings"),
         headers=build_tma_headers(),
         json={"enabled": True},
     )

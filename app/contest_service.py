@@ -314,11 +314,9 @@ def get_contest_details(
             contest_id=contest_id,
             telegram_user_id=telegram_user_id,
         )
-        match_prediction_publication = (
-            _get_match_prediction_publication_settings(
-                connection,
-                contest_id=contest_id,
-            )
+        match_prediction_publication = _get_match_prediction_publication_settings(
+            connection,
+            contest_id=contest_id,
         )
 
         leaderboard_rows = connection.execute(

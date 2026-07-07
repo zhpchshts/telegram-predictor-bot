@@ -155,7 +155,10 @@ def test_due_match_publication_shows_predictions_and_is_not_repeated(
     assert "⚽ <b>Парагвай — Франция</b>" in published_text
     assert "• Анна Иванова — 1:1, проходит Франция" in published_text
     assert "• Борис — 2:0" in published_text
-    assert "• Илья &lt;&amp;&gt; Тест — 0:0, проходит Парагвай &amp; Франция" in published_text
+    assert (
+        "• Илья &lt;&amp;&gt; Тест — 0:0, проходит Парагвай &amp; Франция"
+        in published_text
+    )
     assert "Без Прогноза" not in published_text
 
     with database_connection(database_path) as connection:
@@ -177,10 +180,9 @@ def test_due_match_publication_shows_predictions_and_is_not_repeated(
             (match_id,),
         ).fetchall()
     assert completed_row is not None
-    assert [
-        (row["part_number"], row["telegram_message_id"])
-        for row in sent_rows
-    ] == [(0, 1001)]
+    assert [(row["part_number"], row["telegram_message_id"]) for row in sent_rows] == [
+        (0, 1001)
+    ]
 
 
 def test_retry_continues_from_the_first_unsent_message_part(tmp_path: Path) -> None:
