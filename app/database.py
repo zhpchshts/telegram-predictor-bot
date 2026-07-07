@@ -207,6 +207,24 @@ CREATE TABLE IF NOT EXISTS tie_prediction_scores (
     UNIQUE (tie_prediction_id)
 );
 
+CREATE TABLE IF NOT EXISTS match_prediction_publication_settings (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    activated_at_utc TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS match_prediction_publications (
+    match_id INTEGER PRIMARY KEY REFERENCES matches(id) ON DELETE CASCADE,
+    completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS match_prediction_publication_messages (
+    match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+    part_number INTEGER NOT NULL CHECK (part_number >= 0),
+    telegram_message_id INTEGER NOT NULL,
+    sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (match_id, part_number)
+);
+
 CREATE TABLE IF NOT EXISTS event_log (
     id INTEGER PRIMARY KEY,
     contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,

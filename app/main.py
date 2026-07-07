@@ -13,6 +13,9 @@ from fastapi.staticfiles import StaticFiles
 from app.bot import create_dispatcher
 from app.config import load_settings
 from app.database import initialize_database
+from app.match_prediction_publications import (
+    run_match_prediction_publication_worker,
+)
 from app.tma_api import router as tma_api_router
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -34,11 +37,21 @@ def create_app() -> FastAPI:
                 allowed_updates=dispatcher.resolve_used_update_types(),
             )
         )
+        publication_task = asyncio.create_task(
+            run_match_prediction_publication_worker(
+                bot=bot,
+                database_path=settings.database_path,
+            )
+        )
 
         try:
             yield
         finally:
+            publication_task.cancel()
             polling_task.cancel()
+
+            with suppress(asyncio.CancelledError):
+                await publication_task
 
             with suppress(asyncio.CancelledError):
                 await polling_task
