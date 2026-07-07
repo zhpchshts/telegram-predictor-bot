@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 
 from fastapi.testclient import TestClient
 
-from app.database import initialize_database
+from app.database import create_connection, initialize_database
 from app.main import create_app
 from app.tma_auth import calculate_init_data_hash
 from app.tma_launch import create_tma_launch_token
@@ -221,8 +221,97 @@ def test_champion_prediction_api_configures_selects_and_records_champion(
             "champion_prediction_count": 1,
             "total_matches_count": 1,
             "prediction_history": [],
+            "champion_prediction_history": None,
         }
     ]
+
+
+def test_get_contest_exposes_closed_champion_prediction_in_leaderboard(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+    match = create_tma_match(
+        client,
+        contest_id=contest["id"],
+        idempotency_key="create-match",
+    )
+
+    settings_response = client.put(
+        f"/api/tma/contests/{contest['id']}/champion-prediction/settings",
+        headers=build_tma_headers(),
+        json={
+            "enabled": True,
+            "deadline_at": FUTURE_DEADLINE,
+            "points": 5,
+        },
+    )
+
+    assert settings_response.status_code == 200
+
+    prediction_response = client.put(
+        f"/api/tma/contests/{contest['id']}/champion-prediction",
+        headers=build_tma_headers(),
+        json={"predicted_team_id": match["away_team_id"]},
+    )
+
+    assert prediction_response.status_code == 200
+
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE contests
+            SET champion_prediction_deadline_at = ?
+            WHERE id = ?
+            """,
+            (PAST_DEADLINE, contest["id"]),
+        )
+
+    result_response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match['id']}/result",
+        headers=build_tma_headers(),
+        json={
+            "home_score": 2,
+            "away_score": 1,
+            "advancing_team_id": match["home_team_id"],
+        },
+    )
+
+    assert result_response.status_code == 201
+
+    champion_response = client.put(
+        f"/api/tma/contests/{contest['id']}/champion",
+        headers=build_tma_headers(),
+        json={"champion_team_id": match["home_team_id"]},
+    )
+
+    assert champion_response.status_code == 200
+
+    contest_response = client.get(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert contest_response.status_code == 200
+    leaderboard_entry = contest_response.json()["contest"]["leaderboard"][0]
+    assert leaderboard_entry["champion_prediction_history"] == {
+        "prediction": {
+            "id": match["away_team_id"],
+            "name": "Бразилия",
+        },
+        "actual_champion": {
+            "id": match["home_team_id"],
+            "name": "Аргентина",
+        },
+        "awarded_points": 0,
+    }
 
 
 def test_champion_prediction_api_rejects_a_prediction_after_deadline(

@@ -768,6 +768,25 @@ def _serialize_leaderboard_entry(entry) -> dict[str, object]:
         "prediction_history": [
             _serialize_match(match) for match in entry.prediction_history
         ],
+        "champion_prediction_history": (
+            _serialize_leaderboard_champion_prediction_history(
+                entry.champion_prediction_history,
+            )
+            if entry.champion_prediction_history is not None
+            else None
+        ),
+    }
+
+
+def _serialize_leaderboard_champion_prediction_history(history) -> dict[str, object]:
+    return {
+        "prediction": _serialize_team_summary(history.prediction),
+        "actual_champion": (
+            _serialize_team_summary(history.actual_champion)
+            if history.actual_champion is not None
+            else None
+        ),
+        "awarded_points": history.awarded_points,
     }
 
 

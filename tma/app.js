@@ -878,6 +878,13 @@ function createLeaderboardCard(leaderboard, championPrediction) {
     const predictionHistory = Array.isArray(entry?.prediction_history)
       ? entry.prediction_history
       : [];
+    const championPredictionHistory =
+      entry?.champion_prediction_history &&
+      typeof entry.champion_prediction_history === "object"
+        ? entry.champion_prediction_history
+        : null;
+    const hasPredictionHistory =
+      predictionHistory.length > 0 || championPredictionHistory !== null;
 
     const item = createElement("li", {
       className: "leaderboard-list-item",
@@ -892,13 +899,16 @@ function createLeaderboardCard(leaderboard, championPrediction) {
       totalPoints,
     );
 
-    if (predictionHistory.length === 0) {
+    if (!hasPredictionHistory) {
       row.classList.add("leaderboard-summary--static");
       item.append(row);
     } else {
       const disclosure = document.createElement("details");
       const summary = document.createElement("summary");
-      const history = createLeaderboardPredictionHistory(predictionHistory);
+      const history = createLeaderboardPredictionHistory(
+        predictionHistory,
+        championPredictionHistory,
+      );
 
       disclosure.className = "leaderboard-disclosure";
       summary.className = "leaderboard-summary";
@@ -970,7 +980,10 @@ function createLeaderboardRow(
   return row;
 }
 
-function createLeaderboardPredictionHistory(predictionHistory) {
+function createLeaderboardPredictionHistory(
+  predictionHistory,
+  championPredictionHistory,
+) {
   const list = createElement("ol", {
     className: "leaderboard-history",
   });
@@ -1021,6 +1034,12 @@ function createLeaderboardPredictionHistory(predictionHistory) {
     header.append(title, points);
     item.append(header, predictionRow, resultRow);
     list.append(item);
+  }
+
+  if (championPredictionHistory !== null) {
+    list.append(
+      createLeaderboardChampionPredictionHistory(championPredictionHistory),
+    );
   }
 
   return list;
@@ -1079,6 +1098,54 @@ function getLeaderboardTeamName(match, teamId) {
   }
 
   return null;
+}
+
+function createLeaderboardChampionPredictionHistory(championPrediction) {
+  const predictionTeamName = getLeaderboardTeamSummaryName(
+    championPrediction?.prediction,
+  );
+  const actualChampionName = getLeaderboardTeamSummaryName(
+    championPrediction?.actual_champion,
+  );
+  const item = createElement("li", {
+    className: "leaderboard-history-match",
+  });
+  const header = createElement("div", {
+    className: "leaderboard-history-header",
+  });
+  const title = createElement("span", {
+    className: "leaderboard-history-title",
+    text: "Чемпион турнира",
+  });
+  const points = createElement("span", {
+    className: "leaderboard-history-points",
+    text: getLeaderboardChampionPredictionPoints(championPrediction),
+  });
+  const predictionRow = createLeaderboardHistoryRow(
+    "Прогноз",
+    predictionTeamName ?? "—",
+  );
+  const resultRow = createLeaderboardHistoryRow(
+    "Факт",
+    actualChampionName ?? "Ожидает результата",
+  );
+
+  header.append(title, points);
+  item.append(header, predictionRow, resultRow);
+  return item;
+}
+
+function getLeaderboardTeamSummaryName(team) {
+  return typeof team?.name === "string" && team.name ? team.name : null;
+}
+
+function getLeaderboardChampionPredictionPoints(championPrediction) {
+  const awardedPoints = championPrediction?.awarded_points;
+  if (!Number.isSafeInteger(awardedPoints)) {
+    return "—";
+  }
+
+  return awardedPoints > 0 ? `+${awardedPoints}` : "0";
 }
 
 function getLeaderboardMatchPoints(match) {

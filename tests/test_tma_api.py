@@ -1151,6 +1151,7 @@ def test_get_contest_returns_prediction_score_after_result(
             "champion_prediction_count": 0,
             "total_matches_count": 1,
             "prediction_history": [saved_match],
+            "champion_prediction_history": None,
         }
     ]
 
@@ -1770,5 +1771,6 @@ def test_get_contest_returns_leaderboard_completeness_with_champion_prediction(
             "champion_prediction_count": 1,
             "total_matches_count": 1,
             "prediction_history": [],
+            "champion_prediction_history": None,
         }
     ]

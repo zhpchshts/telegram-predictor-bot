@@ -120,6 +120,13 @@ class ChampionPredictionDetails:
 
 
 @dataclass(frozen=True, slots=True)
+class ChampionPredictionHistory:
+    prediction: TeamSummary
+    actual_champion: TeamSummary | None
+    awarded_points: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class ContestLeaderboardEntry:
     place: int
     participant_name: str
@@ -128,6 +135,7 @@ class ContestLeaderboardEntry:
     champion_prediction_count: int
     total_matches_count: int
     prediction_history: tuple[MatchSummary, ...] = ()
+    champion_prediction_history: ChampionPredictionHistory | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -496,6 +504,34 @@ def get_contest_details(
             (contest_id,),
         ).fetchall()
 
+        leaderboard_champion_prediction_rows = connection.execute(
+            """
+            SELECT
+                champion_predictions.user_id,
+                predicted_team.id AS predicted_team_id,
+                predicted_team.name AS predicted_team_name,
+                actual_champion.id AS actual_champion_id,
+                actual_champion.name AS actual_champion_name,
+                CASE
+                    WHEN contests.champion_team_id IS NULL THEN NULL
+                    WHEN champion_predictions.predicted_team_id =
+                        contests.champion_team_id
+                    THEN contests.champion_prediction_points
+                    ELSE 0
+                END AS awarded_points
+            FROM champion_predictions
+            JOIN contests
+            ON contests.id = champion_predictions.contest_id
+            JOIN teams AS predicted_team
+            ON predicted_team.id = champion_predictions.predicted_team_id
+            LEFT JOIN teams AS actual_champion
+            ON actual_champion.id = contests.champion_team_id
+            WHERE champion_predictions.contest_id = ?
+            AND contests.champion_prediction_enabled = 1
+            """,
+            (contest_id,),
+        ).fetchall()
+
         return ContestDetails(
             id=int(contest_row["id"]),
             name=str(contest_row["name"]),
@@ -508,6 +544,13 @@ def get_contest_details(
                 prediction_history_by_user=_leaderboard_prediction_history_by_user(
                     leaderboard_prediction_rows,
                     now_utc=_resolve_now_utc(None),
+                ),
+                champion_prediction_history_by_user=(
+                    _leaderboard_champion_prediction_history_by_user(
+                        leaderboard_champion_prediction_rows,
+                    )
+                    if not champion_prediction.is_open
+                    else {}
                 ),
             ),
             matches=tuple(_match_summary_from_row(row) for row in match_rows),
@@ -2593,12 +2636,45 @@ def _leaderboard_prediction_history_by_user(
     }
 
 
+def _leaderboard_champion_prediction_history_by_user(
+    rows,
+) -> dict[int, ChampionPredictionHistory]:
+    history_by_user: dict[int, ChampionPredictionHistory] = {}
+
+    for row in rows:
+        actual_champion = (
+            TeamSummary(
+                id=int(row["actual_champion_id"]),
+                name=str(row["actual_champion_name"]),
+            )
+            if row["actual_champion_id"] is not None
+            else None
+        )
+        awarded_points = (
+            int(row["awarded_points"]) if row["awarded_points"] is not None else None
+        )
+        history_by_user[int(row["user_id"])] = ChampionPredictionHistory(
+            prediction=TeamSummary(
+                id=int(row["predicted_team_id"]),
+                name=str(row["predicted_team_name"]),
+            ),
+            actual_champion=actual_champion,
+            awarded_points=awarded_points,
+        )
+
+    return history_by_user
+
+
 def _contest_leaderboard_from_rows(
     rows,
     *,
     prediction_history_by_user: dict[int, tuple[MatchSummary, ...]] | None = None,
+    champion_prediction_history_by_user: (
+        dict[int, ChampionPredictionHistory] | None
+    ) = None,
 ) -> tuple[ContestLeaderboardEntry, ...]:
     history_by_user = prediction_history_by_user or {}
+    champion_history_by_user = champion_prediction_history_by_user or {}
     leaderboard: list[ContestLeaderboardEntry] = []
     previous_total_points: int | None = None
     place = 0
@@ -2624,6 +2700,9 @@ def _contest_leaderboard_from_rows(
                 champion_prediction_count=int(row["champion_prediction_count"]),
                 total_matches_count=int(row["total_matches_count"]),
                 prediction_history=history_by_user.get(int(row["user_id"]), ()),
+                champion_prediction_history=champion_history_by_user.get(
+                    int(row["user_id"]),
+                ),
             )
         )
 
