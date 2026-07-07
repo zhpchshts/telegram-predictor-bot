@@ -21,6 +21,7 @@ from app.contest_service import (
     get_contest_details,
     save_match_prediction,
     save_match_result,
+    save_match_prediction_publication_settings,
     ContestCompletedError,
     ContestCompletionUnavailableError,
     complete_contest,
@@ -2048,3 +2049,107 @@ def test_contest_details_leaderboard_history_shows_only_closed_predictions(
     assert participant.prediction_history[1].result is not None
     assert participant.prediction_history[1].prediction_score is not None
     assert participant.prediction_history[1].prediction_score.total_points == 4
+
+
+def test_match_prediction_publication_settings_are_disabled_by_default_and_update(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+
+    initial_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+    )
+
+    assert initial_details.match_prediction_publication.is_enabled is False
+
+    enabled_at = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+    save_match_prediction_publication_settings(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        enabled=True,
+        now_utc=enabled_at,
+    )
+
+    enabled_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+    )
+    assert enabled_details.match_prediction_publication.is_enabled is True
+
+    with create_connection(database_path) as connection:
+        enabled_row = connection.execute(
+            """
+            SELECT
+                match_prediction_publication_enabled,
+                match_prediction_publication_enabled_at
+            FROM contests
+            WHERE id = ?
+            """,
+            (contest.id,),
+        ).fetchone()
+        enabled_event = connection.execute(
+            """
+            SELECT payload_json
+            FROM event_log
+            WHERE event_type =
+                'contest.match_prediction_publication_settings_updated'
+            """
+        ).fetchone()
+
+    assert dict(enabled_row) == {
+        "match_prediction_publication_enabled": 1,
+        "match_prediction_publication_enabled_at": "2026-06-10T12:00:00Z",
+    }
+    assert json.loads(enabled_event["payload_json"]) == {
+        "enabled": True,
+        "previous_enabled": False,
+    }
+
+    save_match_prediction_publication_settings(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        enabled=False,
+        now_utc=enabled_at,
+    )
+
+    disabled_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+    )
+    assert disabled_details.match_prediction_publication.is_enabled is False
+
+    with create_connection(database_path) as connection:
+        disabled_row = connection.execute(
+            """
+            SELECT
+                match_prediction_publication_enabled,
+                match_prediction_publication_enabled_at
+            FROM contests
+            WHERE id = ?
+            """,
+            (contest.id,),
+        ).fetchone()
+
+    assert dict(disabled_row) == {
+        "match_prediction_publication_enabled": 0,
+        "match_prediction_publication_enabled_at": None,
+    }

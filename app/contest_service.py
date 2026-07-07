@@ -120,6 +120,11 @@ class ChampionPredictionDetails:
 
 
 @dataclass(frozen=True, slots=True)
+class MatchPredictionPublicationSettings:
+    is_enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ChampionPredictionHistory:
     prediction: TeamSummary
     actual_champion: TeamSummary | None
@@ -160,6 +165,7 @@ class ContestDetails:
     slug: str
     created_at: str
     is_active: bool
+    match_prediction_publication: MatchPredictionPublicationSettings
     champion_prediction: ChampionPredictionDetails
     leaderboard: tuple[ContestLeaderboardEntry, ...]
     matches: tuple[MatchSummary, ...]
@@ -307,6 +313,12 @@ def get_contest_details(
             connection,
             contest_id=contest_id,
             telegram_user_id=telegram_user_id,
+        )
+        match_prediction_publication = (
+            _get_match_prediction_publication_settings(
+                connection,
+                contest_id=contest_id,
+            )
         )
 
         leaderboard_rows = connection.execute(
@@ -538,6 +550,7 @@ def get_contest_details(
             slug=str(contest_row["slug"]),
             created_at=str(contest_row["created_at"]),
             is_active=bool(contest_row["is_active"]),
+            match_prediction_publication=match_prediction_publication,
             champion_prediction=champion_prediction,
             leaderboard=_contest_leaderboard_from_rows(
                 leaderboard_rows,
@@ -1382,6 +1395,80 @@ def save_match_result(
         )
 
 
+def save_match_prediction_publication_settings(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    enabled: bool,
+    now_utc: datetime | None = None,
+) -> None:
+    if not isinstance(enabled, bool):
+        raise ValueError(
+            "Настройка публикации прогнозов должна быть включена или выключена."
+        )
+
+    resolved_now_utc = _resolve_now_utc(now_utc)
+
+    with database_connection(database_path) as connection:
+        contest_row = _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        actor_user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+        was_enabled = bool(contest_row["match_prediction_publication_enabled"])
+        if enabled == was_enabled:
+            return
+
+        enabled_at_utc = (
+            _serialize_datetime_utc(resolved_now_utc)
+            if enabled and not was_enabled
+            else None
+        )
+
+        connection.execute(
+            """
+            UPDATE contests
+            SET
+                match_prediction_publication_enabled = ?,
+                match_prediction_publication_enabled_at = CASE
+                    WHEN ? = 1
+                        AND match_prediction_publication_enabled = 0
+                    THEN ?
+                    WHEN ? = 0 THEN NULL
+                    ELSE match_prediction_publication_enabled_at
+                END
+            WHERE id = ?
+            """,
+            (
+                int(enabled),
+                int(enabled),
+                enabled_at_utc,
+                int(enabled),
+                contest_id,
+            ),
+        )
+
+        _write_match_prediction_publication_event(
+            connection,
+            contest_id=contest_id,
+            actor_user_id=actor_user_id,
+            enabled=enabled,
+            previous_enabled=was_enabled,
+        )
+
+
 def save_champion_prediction_settings(
     *,
     database_path: Path,
@@ -1952,7 +2039,9 @@ def _get_contest_row(
             contests.champion_prediction_enabled,
             contests.champion_prediction_deadline_at,
             contests.champion_prediction_points,
-            contests.champion_team_id
+            contests.champion_team_id,
+            contests.match_prediction_publication_enabled,
+            contests.match_prediction_publication_enabled_at
         FROM contests
         JOIN chats ON chats.id = contests.chat_id
         WHERE chats.telegram_chat_id = ?
@@ -2114,6 +2203,27 @@ def _get_champion_prediction_details(
             contest_id=contest_id,
         ),
         awarded_points=awarded_points,
+    )
+
+
+def _get_match_prediction_publication_settings(
+    connection,
+    *,
+    contest_id: int,
+) -> MatchPredictionPublicationSettings:
+    row = connection.execute(
+        """
+        SELECT match_prediction_publication_enabled
+        FROM contests
+        WHERE id = ?
+        """,
+        (contest_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Не удалось найти настройки публикации прогнозов.")
+
+    return MatchPredictionPublicationSettings(
+        is_enabled=bool(row["match_prediction_publication_enabled"]),
     )
 
 
@@ -2324,6 +2434,46 @@ def _team_summary_from_row(row) -> TeamSummary:
     return TeamSummary(
         id=int(row["id"]),
         name=str(row["name"]),
+    )
+
+
+def _write_match_prediction_publication_event(
+    connection,
+    *,
+    contest_id: int,
+    actor_user_id: int,
+    enabled: bool,
+    previous_enabled: bool,
+) -> None:
+    event_payload = json.dumps(
+        {
+            "enabled": enabled,
+            "previous_enabled": previous_enabled,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    connection.execute(
+        """
+        INSERT INTO event_log (
+            contest_id,
+            actor_user_id,
+            event_type,
+            entity_type,
+            entity_id,
+            payload_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            contest_id,
+            actor_user_id,
+            "contest.match_prediction_publication_settings_updated",
+            "contest",
+            contest_id,
+            event_payload,
+        ),
     )
 
 
@@ -2780,6 +2930,10 @@ def _resolve_now_utc(now_utc: datetime | None) -> datetime:
         raise ValueError("Текущее время должно содержать часовой пояс.")
 
     return now_utc.astimezone(timezone.utc)
+
+
+def _serialize_datetime_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _is_prediction_open(

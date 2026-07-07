@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS contests (
   champion_prediction_points INTEGER NOT NULL DEFAULT 5
     CHECK (champion_prediction_points >= 0),
   champion_team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
+  match_prediction_publication_enabled INTEGER NOT NULL DEFAULT 0
+    CHECK (match_prediction_publication_enabled IN (0, 1)),
+  match_prediction_publication_enabled_at TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS contest_creation_requests (
@@ -207,11 +210,6 @@ CREATE TABLE IF NOT EXISTS tie_prediction_scores (
     UNIQUE (tie_prediction_id)
 );
 
-CREATE TABLE IF NOT EXISTS match_prediction_publication_settings (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    activated_at_utc TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS match_prediction_publications (
     match_id INTEGER PRIMARY KEY REFERENCES matches(id) ON DELETE CASCADE,
     completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -330,6 +328,23 @@ def _migrate_contests_for_champion_predictions(
             ALTER TABLE contests
             ADD COLUMN champion_team_id INTEGER
             REFERENCES teams(id) ON DELETE SET NULL
+            """
+        )
+
+    if "match_prediction_publication_enabled" not in contest_columns:
+        connection.execute(
+            """
+            ALTER TABLE contests
+            ADD COLUMN match_prediction_publication_enabled INTEGER NOT NULL DEFAULT 0
+            CHECK (match_prediction_publication_enabled IN (0, 1))
+            """
+        )
+
+    if "match_prediction_publication_enabled_at" not in contest_columns:
+        connection.execute(
+            """
+            ALTER TABLE contests
+            ADD COLUMN match_prediction_publication_enabled_at TEXT
             """
         )
 

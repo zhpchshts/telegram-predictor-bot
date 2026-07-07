@@ -65,13 +65,8 @@ async def publish_due_match_predictions(
     max_message_length: int = MATCH_PREDICTION_PUBLICATION_MAX_MESSAGE_LENGTH,
 ) -> None:
     resolved_now_utc = _resolve_now_utc(now_utc)
-    activated_at_utc = _get_or_create_activation_time(
-        database_path=database_path,
-        now_utc=resolved_now_utc,
-    )
     pending_publications = _get_pending_publications(
         database_path=database_path,
-        activated_at_utc=activated_at_utc,
         now_utc=resolved_now_utc,
     )
 
@@ -90,39 +85,9 @@ async def publish_due_match_predictions(
             )
 
 
-def _get_or_create_activation_time(
-    *,
-    database_path: Path,
-    now_utc: datetime,
-) -> datetime:
-    with database_connection(database_path) as connection:
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO match_prediction_publication_settings (
-                singleton,
-                activated_at_utc
-            )
-            VALUES (1, ?)
-            """,
-            (_serialize_datetime_utc(now_utc),),
-        )
-        row = connection.execute(
-            """
-            SELECT activated_at_utc
-            FROM match_prediction_publication_settings
-            WHERE singleton = 1
-            """
-        ).fetchone()
-
-    if row is None:
-        raise RuntimeError("Could not initialize prediction publication settings.")
-    return _parse_datetime_utc(str(row["activated_at_utc"]))
-
-
 def _get_pending_publications(
     *,
     database_path: Path,
-    activated_at_utc: datetime,
     now_utc: datetime,
 ) -> tuple[PendingMatchPredictionPublication, ...]:
     with database_connection(database_path) as connection:
@@ -132,6 +97,7 @@ def _get_pending_publications(
                 matches.id AS match_id,
                 chats.telegram_chat_id,
                 contests.name AS contest_name,
+                contests.match_prediction_publication_enabled_at,
                 home_team.name AS home_team_name,
                 away_team.name AS away_team_name,
                 matches.starts_at_utc
@@ -145,6 +111,7 @@ def _get_pending_publications(
             LEFT JOIN match_prediction_publications
                 ON match_prediction_publications.match_id = matches.id
             WHERE contests.is_active = 1
+              AND contests.match_prediction_publication_enabled = 1
               AND matches.status IN ('scheduled', 'started')
               AND match_prediction_publications.match_id IS NULL
             """
@@ -152,8 +119,13 @@ def _get_pending_publications(
 
     publications: list[PendingMatchPredictionPublication] = []
     for row in rows:
+        enabled_at_value = row["match_prediction_publication_enabled_at"]
+        if enabled_at_value is None:
+            continue
+
         starts_at_utc = _parse_datetime_utc(str(row["starts_at_utc"]))
-        if starts_at_utc < activated_at_utc or starts_at_utc > now_utc:
+        enabled_at_utc = _parse_datetime_utc(str(enabled_at_value))
+        if starts_at_utc <= enabled_at_utc or starts_at_utc > now_utc:
             continue
         publications.append(
             PendingMatchPredictionPublication(
@@ -301,7 +273,10 @@ def _build_messages(
         "Матч начался. Прогнозы участников:"
     )
     continuation_header = f"{title}\nПродолжение прогнозов участников:"
-    if len(header) > max_message_length or len(continuation_header) > max_message_length:
+    if (
+        len(header) > max_message_length
+        or len(continuation_header) > max_message_length
+    ):
         raise ValueError("Maximum Telegram message length is too small for the header.")
 
     prediction_lines = tuple(
@@ -363,7 +338,3 @@ def _parse_datetime_utc(value: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
-
-
-def _serialize_datetime_utc(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat()

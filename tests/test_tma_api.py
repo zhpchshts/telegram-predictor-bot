@@ -574,6 +574,9 @@ def test_get_contest_returns_details_with_empty_matches(
             "slug": contest["slug"],
             "created_at": contest["created_at"],
             "is_active": True,
+            "match_prediction_publication": {
+                "is_enabled": False,
+            },
             "champion_prediction": {
                 "is_enabled": False,
                 "deadline_at": None,
@@ -588,6 +591,46 @@ def test_get_contest_returns_details_with_empty_matches(
             "leaderboard": [],
             "matches": [],
         }
+    }
+
+
+def test_match_prediction_publication_settings_can_be_enabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    response = client.put(
+        (
+            f"/api/tma/contests/{contest['id']}/"
+            "match-prediction-publication/settings"
+        ),
+        headers=build_tma_headers(),
+        json={"enabled": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "match_prediction_publication": {
+            "is_enabled": True,
+        },
+    }
+
+    contest_response = client.get(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert contest_response.status_code == 200
+    assert contest_response.json()["contest"]["match_prediction_publication"] == {
+        "is_enabled": True,
     }
 
 

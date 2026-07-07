@@ -39,9 +39,7 @@ class RecordingBot:
         return SentMessage(message_id=1000 + call_number)
 
 
-def test_first_run_does_not_publish_matches_that_started_before_activation(
-    tmp_path: Path,
-) -> None:
+def test_disabled_contest_does_not_publish_predictions(tmp_path: Path) -> None:
     database_path = tmp_path / "predictor.db"
     now_utc = _datetime(12, 0)
     _seed_match(
@@ -60,15 +58,54 @@ def test_first_run_does_not_publish_matches_that_started_before_activation(
     )
 
     assert bot.calls == []
-    with database_connection(database_path) as connection:
-        activation_row = connection.execute(
-            """
-            SELECT activated_at_utc
-            FROM match_prediction_publication_settings
-            WHERE singleton = 1
-            """
-        ).fetchone()
-    assert activation_row is not None
+
+
+def test_enabled_contest_does_not_publish_matches_started_before_enabling(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    activation_time = _datetime(12, 0)
+    _seed_match(
+        database_path=database_path,
+        starts_at_utc=activation_time - timedelta(minutes=1),
+        publication_enabled_at=activation_time,
+        participants=(("Анна", "Иванова", 1, 1, "Франция"),),
+    )
+    bot = RecordingBot()
+
+    asyncio.run(
+        publish_due_match_predictions(
+            bot=bot,
+            database_path=database_path,
+            now_utc=activation_time,
+        )
+    )
+
+    assert bot.calls == []
+
+
+def test_enabled_contest_does_not_publish_match_starting_at_enabling_time(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    activation_time = _datetime(12, 0)
+    _seed_match(
+        database_path=database_path,
+        starts_at_utc=activation_time,
+        publication_enabled_at=activation_time,
+        participants=(("Анна", "Иванова", 1, 1, "Франция"),),
+    )
+    bot = RecordingBot()
+
+    asyncio.run(
+        publish_due_match_predictions(
+            bot=bot,
+            database_path=database_path,
+            now_utc=activation_time,
+        )
+    )
+
+    assert bot.calls == []
 
 
 def test_due_match_publication_shows_predictions_and_is_not_repeated(
@@ -79,6 +116,7 @@ def test_due_match_publication_shows_predictions_and_is_not_repeated(
     match_id = _seed_match(
         database_path=database_path,
         starts_at_utc=_datetime(12, 1),
+        publication_enabled_at=activation_time,
         participants=(
             ("Анна", "Иванова", 1, 1, "Франция"),
             ("Борис", None, 2, 0, "Франция"),
@@ -151,6 +189,7 @@ def test_retry_continues_from_the_first_unsent_message_part(tmp_path: Path) -> N
     match_id = _seed_match(
         database_path=database_path,
         starts_at_utc=_datetime(12, 1),
+        publication_enabled_at=activation_time,
         participants=tuple(
             (
                 f"Участник{number:02d}" * 4,
@@ -244,6 +283,7 @@ def _seed_match(
     database_path: Path,
     starts_at_utc: datetime,
     participants: tuple[tuple[str, str | None, int, int, str], ...],
+    publication_enabled_at: datetime | None = None,
     user_without_prediction: tuple[str, str | None] | None = None,
 ) -> int:
     initialize_database(database_path)
@@ -274,6 +314,17 @@ def _seed_match(
             """,
             (chat_id, "ЧМ-2026", "world-cup-2026"),
         ).lastrowid
+        if publication_enabled_at is not None:
+            connection.execute(
+                """
+                UPDATE contests
+                SET
+                    match_prediction_publication_enabled = 1,
+                    match_prediction_publication_enabled_at = ?
+                WHERE id = ?
+                """,
+                (publication_enabled_at.isoformat(), contest_id),
+            )
         competition_id = connection.execute(
             """
             INSERT INTO competitions (contest_id, name, season, competition_type)

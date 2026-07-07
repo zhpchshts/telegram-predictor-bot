@@ -29,6 +29,7 @@ from app.contest_service import (
     save_champion_prediction_settings,
     save_contest_champion,
     save_match_prediction,
+    save_match_prediction_publication_settings,
     save_match_result,
 )
 from app.tma_context import TmaContext, TmaContextError, build_tma_context
@@ -69,6 +70,10 @@ class SaveChampionPredictionSettingsRequest(BaseModel):
     enabled: bool
     deadline_at: str | None = None
     points: int
+
+
+class SaveMatchPredictionPublicationSettingsRequest(BaseModel):
+    enabled: bool
 
 
 class SaveChampionPredictionRequest(BaseModel):
@@ -514,6 +519,63 @@ async def save_tma_match_result(
     )
 
 
+@router.put("/contests/{contest_id}/match-prediction-publication/settings")
+async def save_tma_match_prediction_publication_settings(
+    contest_id: int,
+    payload: SaveMatchPredictionPublicationSettingsRequest,
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> JSONResponse:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+    try:
+        save_match_prediction_publication_settings(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            enabled=payload.enabled,
+        )
+        contest = get_contest_details(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except ContestCompletedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        content={
+            "match_prediction_publication": (
+                _serialize_match_prediction_publication(
+                    contest.match_prediction_publication
+                )
+            ),
+        },
+    )
+
+
 @router.put("/contests/{contest_id}/champion-prediction/settings")
 async def save_tma_champion_prediction_settings(
     contest_id: int,
@@ -716,6 +778,9 @@ def _serialize_contest_details(contest) -> dict[str, object]:
         "slug": contest.slug,
         "created_at": contest.created_at,
         "is_active": contest.is_active,
+        "match_prediction_publication": _serialize_match_prediction_publication(
+            contest.match_prediction_publication
+        ),
         "champion_prediction": _serialize_champion_prediction(
             contest.champion_prediction
         ),
@@ -723,6 +788,14 @@ def _serialize_contest_details(contest) -> dict[str, object]:
             _serialize_leaderboard_entry(entry) for entry in contest.leaderboard
         ],
         "matches": [_serialize_match(match) for match in contest.matches],
+    }
+
+
+def _serialize_match_prediction_publication(
+    match_prediction_publication,
+) -> dict[str, object]:
+    return {
+        "is_enabled": match_prediction_publication.is_enabled,
     }
 
 

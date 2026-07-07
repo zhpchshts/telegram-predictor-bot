@@ -2223,6 +2223,14 @@ function getChampionPrediction(contest) {
   };
 }
 
+function getMatchPredictionPublication(contest) {
+  const publication = contest?.match_prediction_publication;
+
+  return {
+    is_enabled: publication?.is_enabled === true,
+  };
+}
+
 function formatDateTimeLocalValue(utcValue) {
   if (typeof utcValue !== "string") {
     return "";
@@ -2838,6 +2846,185 @@ function createChampionPredictionMeta(championPrediction) {
   );
 
   return meta;
+}
+
+function createMatchPredictionPublicationStatus(publication) {
+  const status = createElement("span", {
+    className: "champion-card-status match-prediction-publication-status",
+    text: publication.is_enabled ? "Включена" : "Выключена",
+  });
+
+  status.classList.add(
+    publication.is_enabled
+      ? "champion-card-status--open"
+      : "champion-card-status--disabled",
+  );
+  return status;
+}
+
+function createMatchPredictionPublicationSettingsDisclosure(
+  contest,
+  publication,
+  onUpdated,
+) {
+  const disclosure = document.createElement("details");
+  const summary = document.createElement("summary");
+  const summaryContent = createElement("div", {
+    className: "match-form-summary-content",
+  });
+  const title = createElement("span", {
+    className: "match-form-title",
+    text: publication.is_enabled
+      ? "Настройки публикации прогнозов"
+      : "Настроить публикацию прогнозов",
+  });
+  const overview = createElement("span", {
+    className: "match-form-overview",
+    text: publication.is_enabled ? "Публикуется в чат" : "Выключена",
+  });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: (
+      "После начала матча бот отправит в чат сохранённые к этому моменту "
+      + "прогнозы участников."
+    ),
+  });
+  const form = createElement("form", {
+    className: "form-fields",
+  });
+  const enabledField = createElement("label", {
+    className: "champion-enable-option",
+  });
+  const enabledInput = createElement("input");
+  const enabledText = createElement("span", {
+    text: "Публиковать прогнозы в чате при начале матча",
+  });
+  const hint = createElement("p", {
+    className: "form-hint",
+    text: (
+      "После включения будут опубликованы только прогнозы матчей, "
+      + "которые начнутся позднее. Уже начавшиеся матчи не публикуются."
+    ),
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const submitButton = createActionButton(
+    publication.is_enabled ? "Выключить публикацию" : "Включить публикацию",
+    "primary-action-button",
+    "submit",
+  );
+
+  disclosure.className = (
+    "match-form-disclosure match-prediction-publication-settings-disclosure"
+  );
+  summaryContent.append(title, overview);
+  summary.append(summaryContent);
+
+  enabledInput.id = `contest-${contest.id}-match-prediction-publication-enabled`;
+  enabledInput.name = (
+    `contest-${contest.id}-match-prediction-publication-enabled`
+  );
+  enabledInput.type = "checkbox";
+  enabledInput.checked = publication.is_enabled;
+  enabledField.append(enabledInput, enabledText);
+
+  function syncEnabledState() {
+    if (enabledInput.checked === publication.is_enabled) {
+      submitButton.textContent = "Сохранить настройки";
+      return;
+    }
+
+    submitButton.textContent = enabledInput.checked
+      ? "Включить публикацию"
+      : "Выключить публикацию";
+  }
+
+  syncEnabledState();
+  enabledInput.addEventListener("change", syncEnabledState);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    submitButton.disabled = true;
+    submitButton.textContent = "Сохраняем…";
+
+    try {
+      const result = await apiRequest(
+        `/api/tma/contests/${contest.id}/match-prediction-publication/settings`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            enabled: enabledInput.checked,
+          }),
+        },
+      );
+
+      if (!result || !result.match_prediction_publication) {
+        throw new Error(
+          "Сервер вернул некорректный ответ при сохранении настройки.",
+        );
+      }
+
+      onUpdated();
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : "Не удалось сохранить настройку публикации прогнозов.";
+
+      setFormMessage(message, errorMessage, "error");
+      syncEnabledState();
+      submitButton.disabled = false;
+    }
+  });
+
+  actions.append(submitButton);
+  form.append(enabledField, hint, message, actions);
+  disclosure.append(summary, description, form);
+
+  return disclosure;
+}
+
+function createMatchPredictionPublicationAdministrationCard(contest, onUpdated) {
+  const publication = getMatchPredictionPublication(contest);
+  const item = createElement("li", {
+    className: "match-list-item match-prediction-publication-card",
+  });
+  const header = createElement("div", {
+    className: "match-card-header",
+  });
+  const title = createElement("strong", {
+    className: "match-teams",
+    text: "Публикация прогнозов в чате",
+  });
+
+  header.append(title, createMatchPredictionPublicationStatus(publication));
+  item.append(
+    header,
+    createElement("p", {
+      className: "match-prediction-closed",
+      text: publication.is_enabled
+        ? (
+          "При начале матча бот раскроет в чате все сохранённые "
+          + "прогнозы участников."
+        )
+        : "Публикация прогнозов при начале матча выключена.",
+    }),
+    createMatchPredictionPublicationSettingsDisclosure(
+      contest,
+      publication,
+      onUpdated,
+    ),
+  );
+
+  return item;
 }
 
 function createChampionAdministrationCard(contest, state, onUpdated) {
@@ -3636,6 +3823,15 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
           showResults: true,
           leadingItems: isActive
             ? [
+              createMatchPredictionPublicationAdministrationCard(
+                contest,
+                () => {
+                  void openContest(bootstrap, contest.id, {
+                    ...state,
+                    activeTab: "matches",
+                  });
+                },
+              ),
               createChampionAdministrationCard(
                 contest,
                 state,
