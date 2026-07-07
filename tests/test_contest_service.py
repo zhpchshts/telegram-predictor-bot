@@ -1961,3 +1961,90 @@ def test_delete_match_rejects_completed_contest(
             ).fetchone()[0]
             == 0
         )
+
+
+def test_contest_details_leaderboard_history_shows_only_closed_predictions(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+
+    past_match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        starts_at_utc="2026-06-10T18:00:00Z",
+        idempotency_key="create-past-match",
+    ).match
+    current_match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        starts_at_utc="2026-06-11T18:00:00Z",
+        idempotency_key="create-current-match",
+    ).match
+    future_match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        starts_at_utc="2099-06-12T18:00:00Z",
+        idempotency_key="create-future-match",
+    ).match
+
+    save_test_prediction(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=past_match.id,
+        predicted_home_score=2,
+        predicted_away_score=1,
+        predicted_advancing_team_id=1,
+        now_utc=datetime(2026, 6, 9, 12, 0, tzinfo=timezone.utc),
+    )
+    save_test_prediction(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=current_match.id,
+        predicted_home_score=1,
+        predicted_away_score=1,
+        predicted_advancing_team_id=2,
+        now_utc=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+    )
+    save_test_prediction(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=future_match.id,
+        predicted_home_score=0,
+        predicted_away_score=2,
+        predicted_advancing_team_id=2,
+        now_utc=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+    )
+    save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=past_match.id,
+        home_score=2,
+        away_score=1,
+        advancing_team_id=1,
+        now_utc=datetime(2026, 6, 10, 18, 0, tzinfo=timezone.utc),
+    )
+
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+    )
+
+    participant = next(
+        entry
+        for entry in details.leaderboard
+        if entry.participant_name == "Eugene Sabir"
+    )
+
+    assert [match.id for match in participant.prediction_history] == [
+        current_match.id,
+        past_match.id,
+    ]
+    assert participant.prediction_history[0].result is None
+    assert participant.prediction_history[0].prediction_score is None
+    assert participant.prediction_history[1].result is not None
+    assert participant.prediction_history[1].prediction_score is not None
+    assert participant.prediction_history[1].prediction_score.total_points == 4

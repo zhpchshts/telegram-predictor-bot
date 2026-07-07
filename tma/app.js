@@ -848,6 +848,7 @@ function createLeaderboardCard(leaderboard, championPrediction) {
   const list = createElement("ul", {
     className: "leaderboard-list",
   });
+  const disclosures = [];
 
   for (const entry of entries) {
     const place = Number.isSafeInteger(entry?.place) ? entry.place : 0;
@@ -874,42 +875,219 @@ function createLeaderboardCard(leaderboard, championPrediction) {
     )
       ? entry.total_matches_count
       : 0;
+    const predictionHistory = Array.isArray(entry?.prediction_history)
+      ? entry.prediction_history
+      : [];
 
     const item = createElement("li", {
       className: "leaderboard-list-item",
     });
-    const placeElement = createElement("span", {
-      className: "leaderboard-place",
-      text: `${place}.`,
-    });
-    const participantElement = createElement("div", {
-      className: "leaderboard-participant",
-    });
-    const nameElement = createElement("span", {
-      className: "leaderboard-participant-name",
-      text: participantName,
-    });
-    const predictionsElement = createElement("span", {
-      className: "leaderboard-predictions",
-      text: (
-        `Прогнозов: ${matchPredictionsCount}+` +
-        `${championPredictionCount} из ` +
-        `${totalMatchesCount + championPredictionSlotsCount}`
-      ),
-    });
-    const pointsElement = createElement("span", {
-      className: "leaderboard-points",
-      text: `${totalPoints} ${getPointsLabel(totalPoints)}`,
-    });
+    const row = createLeaderboardRow(
+      place,
+      participantName,
+      matchPredictionsCount,
+      championPredictionCount,
+      totalMatchesCount,
+      championPredictionSlotsCount,
+      totalPoints,
+    );
 
-    participantElement.append(nameElement, predictionsElement);
-    item.append(placeElement, participantElement, pointsElement);
+    if (predictionHistory.length === 0) {
+      row.classList.add("leaderboard-summary--static");
+      item.append(row);
+    } else {
+      const disclosure = document.createElement("details");
+      const summary = document.createElement("summary");
+      const history = createLeaderboardPredictionHistory(predictionHistory);
+
+      disclosure.className = "leaderboard-disclosure";
+      summary.className = "leaderboard-summary";
+      summary.append(row);
+      disclosure.append(summary, history);
+      item.append(disclosure);
+      disclosures.push(disclosure);
+    }
+
     list.append(item);
   }
 
-  card.append(heading, list);
+  for (const disclosure of disclosures) {
+    disclosure.addEventListener("toggle", () => {
+      if (!disclosure.open) {
+        return;
+      }
 
+      for (const otherDisclosure of disclosures) {
+        if (otherDisclosure !== disclosure) {
+          otherDisclosure.open = false;
+        }
+      }
+    });
+  }
+
+  card.append(heading, list);
   return card;
+}
+
+function createLeaderboardRow(
+  place,
+  participantName,
+  matchPredictionsCount,
+  championPredictionCount,
+  totalMatchesCount,
+  championPredictionSlotsCount,
+  totalPoints,
+) {
+  const row = createElement("div", {
+    className: "leaderboard-row",
+  });
+  const placeElement = createElement("span", {
+    className: "leaderboard-place",
+    text: `${place}.`,
+  });
+  const participantElement = createElement("div", {
+    className: "leaderboard-participant",
+  });
+  const nameElement = createElement("span", {
+    className: "leaderboard-participant-name",
+    text: participantName,
+  });
+  const predictionsElement = createElement("span", {
+    className: "leaderboard-predictions",
+    text: (
+      `Прогнозов: ${matchPredictionsCount}+` +
+      `${championPredictionCount} из ` +
+      `${totalMatchesCount + championPredictionSlotsCount}`
+    ),
+  });
+  const pointsElement = createElement("span", {
+    className: "leaderboard-points",
+    text: `${totalPoints} ${getPointsLabel(totalPoints)}`,
+  });
+
+  participantElement.append(nameElement, predictionsElement);
+  row.append(placeElement, participantElement, pointsElement);
+  return row;
+}
+
+function createLeaderboardPredictionHistory(predictionHistory) {
+  const list = createElement("ol", {
+    className: "leaderboard-history",
+  });
+
+  for (const match of predictionHistory) {
+    const prediction = match?.prediction;
+    if (
+      !Number.isSafeInteger(prediction?.home_score) ||
+      !Number.isSafeInteger(prediction?.away_score)
+    ) {
+      continue;
+    }
+
+    const homeTeamName =
+      typeof match?.home_team_name === "string" && match.home_team_name
+        ? match.home_team_name
+        : "Первая команда";
+    const awayTeamName =
+      typeof match?.away_team_name === "string" && match.away_team_name
+        ? match.away_team_name
+        : "Вторая команда";
+    const result = match?.result;
+    const item = createElement("li", {
+      className: "leaderboard-history-match",
+    });
+    const header = createElement("div", {
+      className: "leaderboard-history-header",
+    });
+    const title = createElement("span", {
+      className: "leaderboard-history-title",
+      text: `${homeTeamName} — ${awayTeamName}`,
+    });
+    const points = createElement("span", {
+      className: "leaderboard-history-points",
+      text: getLeaderboardMatchPoints(match),
+    });
+    const predictionRow = createLeaderboardHistoryRow(
+      "Прогноз",
+      formatLeaderboardMatchScore(match, prediction),
+    );
+    const resultRow = createLeaderboardHistoryRow(
+      "Факт",
+      result === null || result === undefined
+        ? "Ожидает результата"
+        : formatLeaderboardMatchScore(match, result),
+    );
+
+    header.append(title, points);
+    item.append(header, predictionRow, resultRow);
+    list.append(item);
+  }
+
+  return list;
+}
+
+function createLeaderboardHistoryRow(label, value) {
+  const row = createElement("div", {
+    className: "leaderboard-history-row",
+  });
+  const labelElement = createElement("span", {
+    className: "leaderboard-history-label",
+    text: label,
+  });
+  const valueElement = createElement("span", {
+    className: "leaderboard-history-value",
+    text: value,
+  });
+
+  row.append(labelElement, valueElement);
+  return row;
+}
+
+function formatLeaderboardMatchScore(match, score) {
+  if (
+    !Number.isSafeInteger(score?.home_score) ||
+    !Number.isSafeInteger(score?.away_score)
+  ) {
+    return "—";
+  }
+
+  const scoreText = `${score.home_score}:${score.away_score}`;
+  if (score.home_score !== score.away_score) {
+    return scoreText;
+  }
+
+  const advancingTeamName = getLeaderboardTeamName(
+    match,
+    score?.advancing_team_id,
+  );
+  return advancingTeamName
+    ? `${scoreText} · проходит ${advancingTeamName}`
+    : scoreText;
+}
+
+function getLeaderboardTeamName(match, teamId) {
+  if (!Number.isSafeInteger(teamId)) {
+    return null;
+  }
+
+  if (teamId === match?.home_team_id) {
+    return match.home_team_name;
+  }
+
+  if (teamId === match?.away_team_id) {
+    return match.away_team_name;
+  }
+
+  return null;
+}
+
+function getLeaderboardMatchPoints(match) {
+  const totalPoints = match?.prediction_score?.total_points;
+  if (!Number.isSafeInteger(totalPoints)) {
+    return "—";
+  }
+
+  return totalPoints > 0 ? `+${totalPoints}` : "0";
 }
 
 function createContestRulesCard(championPrediction) {

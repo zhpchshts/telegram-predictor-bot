@@ -127,6 +127,7 @@ class ContestLeaderboardEntry:
     match_predictions_count: int
     champion_prediction_count: int
     total_matches_count: int
+    prediction_history: tuple[MatchSummary, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,6 +445,57 @@ def get_contest_details(
             ),
         ).fetchall()
 
+        leaderboard_prediction_rows = connection.execute(
+            """
+            SELECT
+                match_predictions.user_id,
+                matches.id,
+                matches.tie_id,
+                home_team.id AS home_team_id,
+                home_team.name AS home_team_name,
+                away_team.id AS away_team_id,
+                away_team.name AS away_team_name,
+                matches.starts_at_utc,
+                matches.status,
+                matches.home_score_final,
+                matches.away_score_final,
+                ties.advancing_team_id,
+                match_predictions.predicted_home_score,
+                match_predictions.predicted_away_score,
+                tie_predictions.predicted_advancing_team_id,
+                match_prediction_scores.score_type AS match_score_type,
+                match_prediction_scores.points AS match_score_points,
+                tie_prediction_scores.points AS advancing_team_points
+            FROM match_predictions
+            JOIN matches
+            ON matches.id = match_predictions.match_id
+            JOIN ties
+            ON ties.id = matches.tie_id
+            JOIN stages
+            ON stages.id = matches.stage_id
+            JOIN competitions
+            ON competitions.id = stages.competition_id
+            JOIN teams AS home_team
+            ON home_team.id = matches.home_team_id
+            JOIN teams AS away_team
+            ON away_team.id = matches.away_team_id
+            LEFT JOIN tie_predictions
+            ON tie_predictions.tie_id = matches.tie_id
+            AND tie_predictions.user_id = match_predictions.user_id
+            LEFT JOIN match_prediction_scores
+            ON match_prediction_scores.match_prediction_id = match_predictions.id
+            LEFT JOIN tie_prediction_scores
+            ON tie_prediction_scores.tie_prediction_id = tie_predictions.id
+            WHERE competitions.contest_id = ?
+            AND matches.status != 'cancelled'
+            ORDER BY
+                match_predictions.user_id ASC,
+                matches.starts_at_utc DESC,
+                matches.id DESC
+            """,
+            (contest_id,),
+        ).fetchall()
+
         return ContestDetails(
             id=int(contest_row["id"]),
             name=str(contest_row["name"]),
@@ -451,7 +503,13 @@ def get_contest_details(
             created_at=str(contest_row["created_at"]),
             is_active=bool(contest_row["is_active"]),
             champion_prediction=champion_prediction,
-            leaderboard=_contest_leaderboard_from_rows(leaderboard_rows),
+            leaderboard=_contest_leaderboard_from_rows(
+                leaderboard_rows,
+                prediction_history_by_user=_leaderboard_prediction_history_by_user(
+                    leaderboard_prediction_rows,
+                    now_utc=_resolve_now_utc(None),
+                ),
+            ),
             matches=tuple(_match_summary_from_row(row) for row in match_rows),
         )
 
@@ -2511,20 +2569,46 @@ def _match_prediction_score_from_row(
     )
 
 
+def _leaderboard_prediction_history_by_user(
+    rows,
+    *,
+    now_utc: datetime,
+) -> dict[int, tuple[MatchSummary, ...]]:
+    prediction_history_by_user: dict[int, list[MatchSummary]] = {}
+
+    for row in rows:
+        if _is_prediction_open(row, now_utc=now_utc):
+            continue
+
+        match = _match_summary_from_row(row)
+        if match.prediction is None:
+            continue
+
+        user_id = int(row["user_id"])
+        prediction_history_by_user.setdefault(user_id, []).append(match)
+
+    return {
+        user_id: tuple(prediction_history)
+        for user_id, prediction_history in prediction_history_by_user.items()
+    }
+
+
 def _contest_leaderboard_from_rows(
     rows,
+    *,
+    prediction_history_by_user: dict[int, tuple[MatchSummary, ...]] | None = None,
 ) -> tuple[ContestLeaderboardEntry, ...]:
+    history_by_user = prediction_history_by_user or {}
     leaderboard: list[ContestLeaderboardEntry] = []
     previous_total_points: int | None = None
     place = 0
 
     for position, row in enumerate(rows, start=1):
         total_points = int(row["total_points"])
-
         if total_points != previous_total_points:
             place = position
-
         previous_total_points = total_points
+
         participant_name = (
             " ".join(
                 str(value) for value in (row["first_name"], row["last_name"]) if value
@@ -2539,6 +2623,7 @@ def _contest_leaderboard_from_rows(
                 match_predictions_count=int(row["match_predictions_count"]),
                 champion_prediction_count=int(row["champion_prediction_count"]),
                 total_matches_count=int(row["total_matches_count"]),
+                prediction_history=history_by_user.get(int(row["user_id"]), ()),
             )
         )
 

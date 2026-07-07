@@ -765,6 +765,9 @@ def _serialize_leaderboard_entry(entry) -> dict[str, object]:
         "match_predictions_count": entry.match_predictions_count,
         "champion_prediction_count": entry.champion_prediction_count,
         "total_matches_count": entry.total_matches_count,
+        "prediction_history": [
+            _serialize_match(match) for match in entry.prediction_history
+        ],
     }
 
 

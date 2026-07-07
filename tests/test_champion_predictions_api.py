@@ -220,6 +220,7 @@ def test_champion_prediction_api_configures_selects_and_records_champion(
             "match_predictions_count": 0,
             "champion_prediction_count": 1,
             "total_matches_count": 1,
+            "prediction_history": [],
         }
     ]
 
