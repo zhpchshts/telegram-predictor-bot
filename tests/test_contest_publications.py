@@ -173,6 +173,8 @@ def test_match_result_publication_is_sent_and_corrected(tmp_path: Path) -> None:
     assert rich_message.skip_entity_detection is True
     assert "2:1" in str(bot.sent[0]["text"])
     assert "<table bordered striped>" in str(bot.sent[0]["text"])
+    assert '<th colspan="4" align="left">Участник</th>' in str(bot.sent[0]["text"])
+    assert '<th colspan="3" align="center">Прогноз</th>' in str(bot.sent[0]["text"])
     assert '<th align="right">Очки</th>' in str(bot.sent[0]["text"])
     assert '<td align="right"><b>+4</b></td>' in str(bot.sent[0]["text"])
     assert "Анна &lt;&amp;&gt; Иванова" in str(bot.sent[0]["text"])
@@ -479,6 +481,8 @@ def test_final_actions_are_published_in_domain_order(tmp_path: Path) -> None:
     assert len(bot.sent) == 3
     assert "Прогнозов на этот матч не было" in str(bot.sent[0]["text"])
     assert "Чемпион турнира" in str(bot.sent[1]["text"])
+    assert '<th colspan="3" align="left">Участник</th>' in str(bot.sent[1]["text"])
+    assert '<th colspan="3" align="center">Прогноз</th>' in str(bot.sent[1]["text"])
     assert "Итоговый рейтинг" in str(bot.sent[2]["text"])
 
 
@@ -544,6 +548,9 @@ def test_completion_publication_names_exactly_one_winner_for_tied_points(
     assert "Победитель определён жребием." in completion_text
     assert "🥇" in completion_text
     assert "🥈" in completion_text
+    assert '<th align="center">Место</th>' in completion_text
+    assert '<th colspan="5" align="left">Участник</th>' in completion_text
+    assert '<th align="right">Очки</th>' in completion_text
 
 
 @pytest.mark.parametrize(

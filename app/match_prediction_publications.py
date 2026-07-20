@@ -24,6 +24,7 @@ LOGGER = logging.getLogger(__name__)
 MATCH_PREDICTION_PUBLICATION_POLL_INTERVAL_SECONDS = 15.0
 MATCH_PREDICTION_PUBLICATION_MAX_MESSAGE_LENGTH = RICH_MESSAGE_MAX_LENGTH
 MATCH_PREDICTION_PUBLICATION_MAX_TABLE_ROWS = RICH_MESSAGE_MAX_TABLE_ROWS
+MATCH_PREDICTION_COLUMN_SPANS = (3, 2)
 
 
 class SentTelegramMessage(Protocol):
@@ -302,6 +303,7 @@ def _build_messages(
         continuation_caption="Прогнозы участников · продолжение",
         column_names=("Участник", "Прогноз"),
         alignments=("left", "center"),
+        column_spans=MATCH_PREDICTION_COLUMN_SPANS,
         rows=prediction_rows,
         max_message_length=max_message_length,
         max_table_rows=max_table_rows,
@@ -329,6 +331,7 @@ def _format_prediction_row(prediction) -> str:
     return table_row(
         (escape_rich_text(participant_name), result),
         alignments=("left", "center"),
+        column_spans=MATCH_PREDICTION_COLUMN_SPANS,
     )
 
 

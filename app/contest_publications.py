@@ -26,6 +26,9 @@ from app.rich_publications import (
 
 PUBLICATION_MAX_MESSAGE_LENGTH = RICH_MESSAGE_MAX_LENGTH
 PUBLICATION_MAX_TABLE_ROWS = RICH_MESSAGE_MAX_TABLE_ROWS
+MATCH_RESULT_COLUMN_SPANS = (4, 3, 1)
+CHAMPION_RESULT_COLUMN_SPANS = (3, 3, 1)
+LEADERBOARD_COLUMN_SPANS = (1, 5, 1)
 
 
 def render_publication_messages(
@@ -197,6 +200,7 @@ def _render_match_result(
         continuation_caption="Очки за матч · продолжение",
         column_names=("Участник", "Прогноз", "Очки"),
         alignments=("left", "center", "right"),
+        column_spans=MATCH_RESULT_COLUMN_SPANS,
         rows=rows,
         max_message_length=max_message_length,
         max_table_rows=max_table_rows,
@@ -281,6 +285,7 @@ def _render_champion_result(
         continuation_caption="Очки за прогноз · продолжение",
         column_names=("Участник", "Прогноз", "Очки"),
         alignments=("left", "center", "right"),
+        column_spans=CHAMPION_RESULT_COLUMN_SPANS,
         rows=rows,
         max_message_length=max_message_length,
         max_table_rows=max_table_rows,
@@ -363,6 +368,7 @@ def _render_contest_completed(
         continuation_caption="Итоговый рейтинг · продолжение",
         column_names=("Место", "Участник", "Очки"),
         alignments=("center", "left", "right"),
+        column_spans=LEADERBOARD_COLUMN_SPANS,
         rows=rows,
         max_message_length=max_message_length,
         max_table_rows=max_table_rows,
@@ -382,6 +388,7 @@ def _format_match_prediction_row(row) -> str:
     return table_row(
         (escape_rich_text(_participant_name(row)), prediction, points_text),
         alignments=("left", "center", "right"),
+        column_spans=MATCH_RESULT_COLUMN_SPANS,
     )
 
 
@@ -397,6 +404,7 @@ def _format_champion_prediction_row(row) -> str:
             points_text,
         ),
         alignments=("left", "center", "right"),
+        column_spans=CHAMPION_RESULT_COLUMN_SPANS,
     )
 
 
@@ -410,6 +418,7 @@ def _format_leaderboard_row(entry) -> str:
     return table_row(
         (place, participant, points),
         alignments=("center", "left", "right"),
+        column_spans=LEADERBOARD_COLUMN_SPANS,
     )
 
 

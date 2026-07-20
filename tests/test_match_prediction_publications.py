@@ -158,15 +158,16 @@ def test_due_match_publication_shows_predictions_and_is_not_repeated(
     assert "<p><b>⚽ Парагвай — Франция</b></p>" in published_text
     assert "<table bordered striped>" in published_text
     assert "<caption>Прогнозы участников · 3</caption>" in published_text
-    assert '<th align="left">Участник</th>' in published_text
-    assert '<th align="center">Прогноз</th>' in published_text
-    assert '<td align="left">Анна Иванова</td>' in published_text
-    assert '<td align="center">1:1 → Франция</td>' in published_text
-    assert '<td align="left">Борис</td>' in published_text
-    assert '<td align="center">2:0</td>' in published_text
+    assert '<th colspan="3" align="left">Участник</th>' in published_text
+    assert '<th colspan="2" align="center">Прогноз</th>' in published_text
+    assert '<td colspan="3" align="left">Анна Иванова</td>' in published_text
+    assert '<td colspan="2" align="center">1:1 → Франция</td>' in published_text
+    assert '<td colspan="3" align="left">Борис</td>' in published_text
+    assert '<td colspan="2" align="center">2:0</td>' in published_text
     assert (
-        '<td align="left">Илья &lt;&amp;&gt; Тест</td>'
-        '<td align="center">0:0 → Парагвай &amp; Франция</td>' in published_text
+        '<td colspan="3" align="left">Илья &lt;&amp;&gt; Тест</td>'
+        '<td colspan="2" align="center">0:0 → Парагвай &amp; Франция</td>'
+        in published_text
     )
     assert "Без Прогноза" not in published_text
     assert published_text.index("Анна Иванова") < published_text.index("Борис")

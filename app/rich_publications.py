@@ -8,6 +8,7 @@ from aiogram.types import InputRichMessage
 
 RICH_MESSAGE_MAX_LENGTH = 30_000
 RICH_MESSAGE_MAX_TABLE_ROWS = 450
+RICH_MESSAGE_MAX_TABLE_COLUMNS = 20
 
 
 def rich_message(html: str) -> InputRichMessage:
@@ -26,14 +27,32 @@ def table_row(
     cells: Sequence[str],
     *,
     alignments: Sequence[str],
+    column_spans: Sequence[int],
     header: bool = False,
 ) -> str:
-    if len(cells) != len(alignments):
-        raise ValueError("Table cells and alignments must have equal lengths.")
+    if not (len(cells) == len(alignments) == len(column_spans)):
+        raise ValueError(
+            "Table cells, alignments, and column spans must have equal lengths."
+        )
+    if any(
+        not isinstance(span, int) or isinstance(span, bool) or span <= 0
+        for span in column_spans
+    ):
+        raise ValueError("Table column spans must be positive integers.")
+    if sum(column_spans) > RICH_MESSAGE_MAX_TABLE_COLUMNS:
+        raise ValueError(
+            f"A Rich Message table cannot exceed "
+            f"{RICH_MESSAGE_MAX_TABLE_COLUMNS} columns."
+        )
     tag = "th" if header else "td"
     rendered_cells = "".join(
-        f'<{tag} align="{alignment}">{cell}</{tag}>'
-        for cell, alignment in zip(cells, alignments, strict=True)
+        f'<{tag}{_column_span_attribute(span)} align="{alignment}">{cell}</{tag}>'
+        for cell, alignment, span in zip(
+            cells,
+            alignments,
+            column_spans,
+            strict=True,
+        )
     )
     return f"<tr>{rendered_cells}</tr>"
 
@@ -43,11 +62,13 @@ def rich_table(
     caption: str,
     column_names: Sequence[str],
     alignments: Sequence[str],
+    column_spans: Sequence[int],
     rows: Sequence[str],
 ) -> str:
     header_row = table_row(
         tuple(escape_rich_text(name) for name in column_names),
         alignments=alignments,
+        column_spans=column_spans,
         header=True,
     )
     return (
@@ -66,6 +87,7 @@ def split_rich_table_messages(
     continuation_caption: str,
     column_names: Sequence[str],
     alignments: Sequence[str],
+    column_spans: Sequence[int],
     rows: Sequence[str],
     max_message_length: int = RICH_MESSAGE_MAX_LENGTH,
     max_table_rows: int = RICH_MESSAGE_MAX_TABLE_ROWS,
@@ -87,6 +109,7 @@ def split_rich_table_messages(
             caption=caption,
             column_names=column_names,
             alignments=alignments,
+            column_spans=column_spans,
             rows=candidate_rows,
         )
 
@@ -111,3 +134,7 @@ def split_rich_table_messages(
 
     messages.append(render_part(current_rows, continuation=bool(messages)))
     return tuple(messages)
+
+
+def _column_span_attribute(span: int) -> str:
+    return f' colspan="{span}"' if span > 1 else ""
