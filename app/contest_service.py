@@ -405,12 +405,117 @@ def get_contest_details(
                     AND contests.champion_team_id IS NOT NULL
                     AND champion_predictions.predicted_team_id =
                     contests.champion_team_id
+            ),
+            score_totals AS (
+                SELECT
+                    score_points.user_id,
+                    SUM(score_points.points) AS total_points
+                FROM score_points
+                GROUP BY score_points.user_id
+            ),
+            match_score_tiebreaks AS (
+                SELECT
+                    match_predictions.user_id,
+                    SUM(
+                        CASE
+                            WHEN match_prediction_scores.score_type =
+                                'exact_score'
+                            THEN 1
+                            ELSE 0
+                        END
+                    ) AS exact_score_count,
+                    SUM(
+                        CASE
+                            WHEN match_prediction_scores.score_type =
+                                'goal_difference'
+                            THEN 1
+                            ELSE 0
+                        END
+                    ) AS goal_difference_count,
+                    SUM(
+                        CASE
+                            WHEN match_prediction_scores.score_type = 'outcome'
+                            THEN 1
+                            ELSE 0
+                        END
+                    ) AS outcome_count
+                FROM match_prediction_scores
+                JOIN match_predictions
+                    ON match_predictions.id =
+                    match_prediction_scores.match_prediction_id
+                JOIN matches
+                    ON matches.id = match_predictions.match_id
+                JOIN stages
+                    ON stages.id = matches.stage_id
+                JOIN competitions
+                    ON competitions.id = stages.competition_id
+                WHERE competitions.contest_id = ?
+                GROUP BY match_predictions.user_id
+            ),
+            drawn_advancing_team_tiebreaks AS (
+                SELECT
+                    tie_predictions.user_id,
+                    COUNT(*) AS drawn_advancing_team_count
+                FROM tie_prediction_scores
+                JOIN tie_predictions
+                    ON tie_predictions.id =
+                    tie_prediction_scores.tie_prediction_id
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM matches
+                    JOIN stages
+                        ON stages.id = matches.stage_id
+                    JOIN competitions
+                        ON competitions.id = stages.competition_id
+                    JOIN match_predictions
+                        ON match_predictions.match_id = matches.id
+                        AND match_predictions.user_id = tie_predictions.user_id
+                    WHERE matches.tie_id = tie_predictions.tie_id
+                        AND competitions.contest_id = ?
+                        AND match_predictions.predicted_home_score =
+                            match_predictions.predicted_away_score
+                )
+                GROUP BY tie_predictions.user_id
+            ),
+            champion_tiebreaks AS (
+                SELECT
+                    champion_predictions.user_id,
+                    1 AS correct_champion_count
+                FROM champion_predictions
+                JOIN contests
+                    ON contests.id = champion_predictions.contest_id
+                WHERE champion_predictions.contest_id = ?
+                    AND contests.champion_prediction_enabled = 1
+                    AND contests.champion_team_id IS NOT NULL
+                    AND champion_predictions.predicted_team_id =
+                    contests.champion_team_id
             )
             SELECT
                 users.id AS user_id,
+                users.telegram_user_id,
                 users.first_name,
                 users.last_name,
-                COALESCE(SUM(score_points.points), 0) AS total_points,
+                COALESCE(score_totals.total_points, 0) AS total_points,
+                COALESCE(
+                    match_score_tiebreaks.exact_score_count,
+                    0
+                ) AS exact_score_count,
+                COALESCE(
+                    match_score_tiebreaks.goal_difference_count,
+                    0
+                ) AS goal_difference_count,
+                COALESCE(
+                    match_score_tiebreaks.outcome_count,
+                    0
+                ) AS outcome_count,
+                COALESCE(
+                    drawn_advancing_team_tiebreaks.drawn_advancing_team_count,
+                    0
+                ) AS drawn_advancing_team_count,
+                COALESCE(
+                    champion_tiebreaks.correct_champion_count,
+                    0
+                ) AS correct_champion_count,
                 (
                     SELECT COUNT(*)
                     FROM match_predictions
@@ -450,16 +555,21 @@ def get_contest_details(
             FROM contest_participants
             JOIN users
                 ON users.id = contest_participants.user_id
-            LEFT JOIN score_points
-                ON score_points.user_id = contest_participants.user_id
-            GROUP BY users.id, users.first_name, users.last_name
-            ORDER BY
-                total_points DESC,
-                users.first_name COLLATE NOCASE ASC,
-                COALESCE(users.last_name, '') COLLATE NOCASE ASC,
-                users.id ASC
+            LEFT JOIN score_totals
+                ON score_totals.user_id = contest_participants.user_id
+            LEFT JOIN match_score_tiebreaks
+                ON match_score_tiebreaks.user_id = contest_participants.user_id
+            LEFT JOIN drawn_advancing_team_tiebreaks
+                ON drawn_advancing_team_tiebreaks.user_id =
+                contest_participants.user_id
+            LEFT JOIN champion_tiebreaks
+                ON champion_tiebreaks.user_id = contest_participants.user_id
+            ORDER BY users.id ASC
             """,
             (
+                contest_id,
+                contest_id,
+                contest_id,
                 contest_id,
                 contest_id,
                 contest_id,
@@ -561,6 +671,7 @@ def get_contest_details(
             champion_prediction=champion_prediction,
             leaderboard=_contest_leaderboard_from_rows(
                 leaderboard_rows,
+                contest_slug=str(contest_row["slug"]),
                 prediction_history_by_user=_leaderboard_prediction_history_by_user(
                     leaderboard_prediction_rows,
                     now_utc=_resolve_now_utc(None),
@@ -2886,6 +2997,7 @@ def _leaderboard_champion_prediction_history_by_user(
 def _contest_leaderboard_from_rows(
     rows,
     *,
+    contest_slug: str,
     prediction_history_by_user: dict[int, tuple[MatchSummary, ...]] | None = None,
     champion_prediction_history_by_user: (
         dict[int, ChampionPredictionHistory] | None
@@ -2894,14 +3006,26 @@ def _contest_leaderboard_from_rows(
     history_by_user = prediction_history_by_user or {}
     champion_history_by_user = champion_prediction_history_by_user or {}
     leaderboard: list[ContestLeaderboardEntry] = []
-    previous_total_points: int | None = None
-    place = 0
 
-    for position, row in enumerate(rows, start=1):
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: (
+            -int(row["total_points"]),
+            -int(row["exact_score_count"]),
+            -int(row["goal_difference_count"]),
+            -int(row["outcome_count"]),
+            -int(row["drawn_advancing_team_count"]),
+            -int(row["correct_champion_count"]),
+            _leaderboard_tiebreak_digest(
+                contest_slug=contest_slug,
+                telegram_user_id=int(row["telegram_user_id"]),
+            ),
+            int(row["telegram_user_id"]),
+        ),
+    )
+
+    for place, row in enumerate(sorted_rows, start=1):
         total_points = int(row["total_points"])
-        if total_points != previous_total_points:
-            place = position
-        previous_total_points = total_points
 
         participant_name = (
             " ".join(
@@ -2925,6 +3049,17 @@ def _contest_leaderboard_from_rows(
         )
 
     return tuple(leaderboard)
+
+
+def _leaderboard_tiebreak_digest(
+    *,
+    contest_slug: str,
+    telegram_user_id: int,
+) -> bytes:
+    value = (f"leaderboard-tiebreak:v1:{contest_slug}:{telegram_user_id}").encode(
+        "utf-8"
+    )
+    return hashlib.sha256(value).digest()
 
 
 def _normalize_prediction_score(

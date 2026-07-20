@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from app import contest_service
 from app.contest_service import (
     ContestCreationConflictError,
     ContestNotFoundError,
@@ -1446,7 +1447,7 @@ def test_save_match_result_validates_scores_before_writes(
     assert events_count_after == events_count_before
 
 
-def test_get_contest_details_returns_leaderboard_with_competition_places(
+def test_get_contest_details_returns_leaderboard_with_unique_places(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "predictor.db"
@@ -1509,18 +1510,246 @@ def test_get_contest_details_returns_leaderboard_with_competition_places(
         telegram_user_id=TELEGRAM_USER_ID,
     )
 
-    assert [
+    leaderboard = [
         (
             entry.place,
             entry.participant_name,
             entry.total_points,
         )
         for entry in contest_details.leaderboard
+    ]
+
+    assert [entry[0] for entry in leaderboard] == [1, 2, 3, 4]
+    assert leaderboard[0] == (1, "Eugene Sabir", 4)
+    assert {entry[1:] for entry in leaderboard[1:3]} == {
+        ("Alice", 3),
+        ("Bob", 3),
+    }
+    assert leaderboard[3] == (4, "Carol", 0)
+
+
+def _leaderboard_sort_test_row(
+    *,
+    telegram_user_id: int,
+    first_name: str,
+    total_points: int = 0,
+    exact_score_count: int = 0,
+    goal_difference_count: int = 0,
+    outcome_count: int = 0,
+    drawn_advancing_team_count: int = 0,
+    correct_champion_count: int = 0,
+    match_predictions_count: int = 0,
+) -> dict[str, object]:
+    return {
+        "user_id": telegram_user_id,
+        "telegram_user_id": telegram_user_id,
+        "first_name": first_name,
+        "last_name": None,
+        "total_points": total_points,
+        "exact_score_count": exact_score_count,
+        "goal_difference_count": goal_difference_count,
+        "outcome_count": outcome_count,
+        "drawn_advancing_team_count": drawn_advancing_team_count,
+        "correct_champion_count": correct_champion_count,
+        "match_predictions_count": match_predictions_count,
+        "champion_prediction_count": 0,
+        "total_matches_count": 100,
+    }
+
+
+@pytest.mark.parametrize(
+    "criterion",
+    (
+        "total_points",
+        "exact_score_count",
+        "goal_difference_count",
+        "outcome_count",
+        "drawn_advancing_team_count",
+        "correct_champion_count",
+    ),
+)
+def test_leaderboard_uses_sporting_tiebreakers_in_strict_order(
+    criterion: str,
+) -> None:
+    criteria = (
+        "total_points",
+        "exact_score_count",
+        "goal_difference_count",
+        "outcome_count",
+        "drawn_advancing_team_count",
+        "correct_champion_count",
+    )
+    criterion_index = criteria.index(criterion)
+    higher_values = {criterion: 2}
+    lower_values = {criterion: 1}
+    lower_values.update(
+        {later_criterion: 99 for later_criterion in criteria[criterion_index + 1 :]}
+    )
+    rows = (
+        _leaderboard_sort_test_row(
+            telegram_user_id=200,
+            first_name="Alpha",
+            **lower_values,
+        ),
+        _leaderboard_sort_test_row(
+            telegram_user_id=100,
+            first_name="Zulu",
+            **higher_values,
+        ),
+    )
+
+    leaderboard = contest_service._contest_leaderboard_from_rows(
+        rows,
+        contest_slug="fixed-contest",
+    )
+
+    assert [entry.participant_name for entry in leaderboard] == ["Zulu", "Alpha"]
+    assert [entry.place for entry in leaderboard] == [1, 2]
+
+
+def test_leaderboard_draw_is_stable_and_ignores_names_and_completeness() -> None:
+    contest_slug = "fixed-contest"
+    telegram_user_ids = (100, 200)
+    first_user_id, second_user_id = sorted(
+        telegram_user_ids,
+        key=lambda telegram_user_id: contest_service._leaderboard_tiebreak_digest(
+            contest_slug=contest_slug,
+            telegram_user_id=telegram_user_id,
+        ),
+    )
+    rows = (
+        _leaderboard_sort_test_row(
+            telegram_user_id=second_user_id,
+            first_name="Alpha",
+            match_predictions_count=99,
+        ),
+        _leaderboard_sort_test_row(
+            telegram_user_id=first_user_id,
+            first_name="Zulu",
+            match_predictions_count=0,
+        ),
+    )
+
+    first_leaderboard = contest_service._contest_leaderboard_from_rows(
+        rows,
+        contest_slug=contest_slug,
+    )
+    second_leaderboard = contest_service._contest_leaderboard_from_rows(
+        tuple(reversed(rows)),
+        contest_slug=contest_slug,
+    )
+
+    assert [entry.participant_name for entry in first_leaderboard] == [
+        "Zulu",
+        "Alpha",
+    ]
+    assert second_leaderboard == first_leaderboard
+    assert [entry.place for entry in first_leaderboard] == [1, 2]
+    assert contest_service._leaderboard_tiebreak_digest(
+        contest_slug="first-contest",
+        telegram_user_id=first_user_id,
+    ) != contest_service._leaderboard_tiebreak_digest(
+        contest_slug="second-contest",
+        telegram_user_id=first_user_id,
+    )
+
+
+def test_leaderboard_draw_uses_telegram_user_id_as_digest_collision_fallback(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        contest_service,
+        "_leaderboard_tiebreak_digest",
+        lambda **_kwargs: b"same-digest",
+    )
+    rows = (
+        _leaderboard_sort_test_row(
+            telegram_user_id=200,
+            first_name="First row",
+        ),
+        _leaderboard_sort_test_row(
+            telegram_user_id=100,
+            first_name="Second row",
+        ),
+    )
+
+    leaderboard = contest_service._contest_leaderboard_from_rows(
+        rows,
+        contest_slug="fixed-contest",
+    )
+
+    assert [entry.participant_name for entry in leaderboard] == [
+        "Second row",
+        "First row",
+    ]
+    assert [entry.place for entry in leaderboard] == [1, 2]
+
+
+def test_leaderboard_advancing_team_tiebreaker_counts_only_draw_predictions(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+
+    for telegram_user_id, first_name, home_score, away_score in (
+        (456, "Draw prediction", 1, 1),
+        (789, "Non-draw prediction", 3, 0),
+    ):
+        save_match_prediction(
+            database_path=database_path,
+            telegram_chat_id=TELEGRAM_CHAT_ID,
+            contest_id=contest.id,
+            match_id=match.id,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=None,
+            username=None,
+            predicted_home_score=home_score,
+            predicted_away_score=away_score,
+            predicted_advancing_team_id=match.home_team_id,
+            now_utc=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        )
+
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE scoring_rule_sets
+            SET outcome_points = 0
+            WHERE competition_id = (
+                SELECT competitions.id
+                FROM competitions
+                WHERE competitions.contest_id = ?
+            )
+            """,
+            (contest.id,),
+        )
+
+    save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        home_score=2,
+        away_score=1,
+        advancing_team_id=match.home_team_id,
+    )
+
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+    )
+
+    assert [
+        (entry.place, entry.participant_name, entry.total_points)
+        for entry in details.leaderboard
     ] == [
-        (1, "Eugene Sabir", 4),
-        (2, "Alice", 3),
-        (2, "Bob", 3),
-        (4, "Carol", 0),
+        (1, "Draw prediction", 1),
+        (2, "Non-draw prediction", 1),
     ]
 
 

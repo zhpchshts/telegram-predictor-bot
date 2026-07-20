@@ -13,6 +13,7 @@ from app.contest_service import (
     create_match,
     create_world_cup_2026_contest,
     delete_match,
+    get_contest_details,
     save_champion_prediction,
     save_champion_prediction_settings,
     save_contest_champion,
@@ -443,6 +444,66 @@ def test_final_actions_are_published_in_domain_order(tmp_path: Path) -> None:
     assert "Результаты прогнозов" in str(bot.sent[0]["text"])
     assert "Чемпион турнира" in str(bot.sent[1]["text"])
     assert "Итоговый рейтинг" in str(bot.sent[2]["text"])
+
+
+def test_completion_publication_names_exactly_one_winner_for_tied_points(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, match = _create_contest_and_match(database_path)
+    _enable_publications(database_path, contest_id=contest_id)
+
+    for telegram_user_id, first_name, username in (
+        (USER_ID, "Анна", "anna"),
+        (USER_ID + 1, "Борис", "boris"),
+    ):
+        save_match_prediction(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            match_id=match.id,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=None,
+            username=username,
+            predicted_home_score=2,
+            predicted_away_score=1,
+            predicted_advancing_team_id=match.home_team_id,
+            now_utc=_datetime(10),
+        )
+
+    _save_result(database_path, contest_id=contest_id, match=match)
+    complete_contest(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name=None,
+        username="anna",
+    )
+
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+    )
+    winners = [
+        entry.participant_name for entry in details.leaderboard if entry.place == 1
+    ]
+    bot = RecordingBot()
+    asyncio.run(
+        process_due_contest_publications(
+            bot=bot,
+            database_path=database_path,
+        )
+    )
+    completion_text = str(bot.sent[-1]["text"])
+
+    assert len(winners) == 1
+    assert [entry.place for entry in details.leaderboard] == [1, 2]
+    assert f"Победитель — {winners[0]}!" in completion_text
+    assert "Победители" not in completion_text
 
 
 def test_two_workers_do_not_claim_the_same_publication(tmp_path: Path) -> None:

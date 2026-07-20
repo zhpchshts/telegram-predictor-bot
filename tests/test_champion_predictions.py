@@ -8,6 +8,7 @@ import pytest
 from app.contest_service import (
     ChampionUnavailableError,
     PredictionUnavailableError,
+    complete_contest,
     create_match,
     create_world_cup_2026_contest,
     get_contest_details,
@@ -384,3 +385,76 @@ def test_champion_recalculation_updates_leaderboard_after_correction(
         (entry.participant_name, entry.total_points)
         for entry in corrected_details.leaderboard
     ] == [("Боб", 5), ("Алиса", 0)]
+
+
+def test_correct_champion_breaks_tie_with_zero_points_in_completed_contest(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    _, spain_team_id, france_team_id, _ = _create_matches(
+        database_path,
+        contest_id=contest_id,
+    )
+    _configure_champion_prediction(
+        database_path,
+        contest_id=contest_id,
+        points=0,
+    )
+
+    for telegram_user_id, first_name, username, predicted_team_id in (
+        (ALICE_TELEGRAM_USER_ID, "Алиса", "alice", spain_team_id),
+        (BOB_TELEGRAM_USER_ID, "Боб", "bob", france_team_id),
+    ):
+        save_champion_prediction(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=None,
+            username=username,
+            predicted_team_id=predicted_team_id,
+            now_utc=OPEN_PREDICTION_TIME,
+        )
+
+    _mark_all_matches_finished(database_path, contest_id=contest_id)
+    save_contest_champion(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        champion_team_id=spain_team_id,
+    )
+
+    active_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+    )
+    complete_contest(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+    )
+    completed_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+    )
+
+    expected_leaderboard = [(1, "Алиса", 0), (2, "Боб", 0)]
+    assert [
+        (entry.place, entry.participant_name, entry.total_points)
+        for entry in active_details.leaderboard
+    ] == expected_leaderboard
+    assert [
+        (entry.place, entry.participant_name, entry.total_points)
+        for entry in completed_details.leaderboard
+    ] == expected_leaderboard
