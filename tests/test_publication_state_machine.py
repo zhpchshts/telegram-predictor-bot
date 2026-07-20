@@ -593,9 +593,11 @@ def test_retry_horizon_stays_pending_until_boundary(tmp_path: Path) -> None:
     ("enabled", "publication_type", "created"),
     [
         (False, "match_result", False),
+        (False, "champion_predictions", False),
         (False, "champion_result", False),
         (False, "contest_completed", False),
         (True, "match_result", True),
+        (True, "champion_predictions", True),
         (True, "champion_result", True),
         (True, "contest_completed", True),
     ],
@@ -632,6 +634,106 @@ def test_master_publication_switch_matrix(
             )
             is created
         )
+
+
+def test_completed_contest_final_dependencies_wait_for_retry_and_release_terminal(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "final-dependencies.db"
+    initialize_database(database_path)
+    now_value = serialize_service_time(NOW)
+    with database_connection(database_path) as connection:
+        chat_id = connection.execute(
+            "INSERT INTO chats (telegram_chat_id, title) VALUES (-1001, 'chat')"
+        ).lastrowid
+        contest_id = connection.execute(
+            """
+            INSERT INTO contests (
+                chat_id, name, slug, is_active,
+                match_prediction_publication_enabled
+            ) VALUES (?, 'contest', 'contest', 0, 1)
+            """,
+            (chat_id,),
+        ).lastrowid
+        assert contest_id is not None
+        for publication_type, first_event_id in (
+            ("champion_result", 1),
+            ("champion_predictions", 2),
+            ("contest_completed", 3),
+        ):
+            connection.execute(
+                """
+                INSERT INTO contest_publications (
+                    contest_id, publication_type, entity_id,
+                    first_event_id, latest_event_id, next_attempt_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    contest_id,
+                    publication_type,
+                    contest_id,
+                    first_event_id,
+                    first_event_id,
+                    now_value,
+                    now_value,
+                    now_value,
+                ),
+            )
+
+    champion_predictions = claim_next_publication(
+        database_path=database_path,
+        now_utc=NOW,
+    )
+    assert champion_predictions is not None
+    assert champion_predictions.publication_type == "champion_predictions"
+    assert finish_publication_failure(
+        database_path=database_path,
+        publication=champion_predictions,
+        error="temporary",
+        permanent=False,
+        retry_after_seconds=60,
+        now_utc=NOW,
+    )
+    assert (
+        claim_next_publication(
+            database_path=database_path,
+            now_utc=NOW + timedelta(seconds=30),
+        )
+        is None
+    )
+
+    retry = claim_next_publication(
+        database_path=database_path,
+        now_utc=NOW + timedelta(seconds=60),
+    )
+    assert retry is not None and retry.publication_type == "champion_predictions"
+    assert finish_publication_failure(
+        database_path=database_path,
+        publication=retry,
+        error="permanent",
+        permanent=True,
+        now_utc=NOW + timedelta(seconds=60),
+    )
+
+    champion_result = claim_next_publication(
+        database_path=database_path,
+        now_utc=NOW + timedelta(seconds=60),
+    )
+    assert champion_result is not None
+    assert champion_result.publication_type == "champion_result"
+    assert finish_publication_success(
+        database_path=database_path,
+        publication=champion_result,
+        status="published",
+        now_utc=NOW + timedelta(seconds=60),
+    )
+    contest_completed = claim_next_publication(
+        database_path=database_path,
+        now_utc=NOW + timedelta(seconds=60),
+    )
+    assert contest_completed is not None
+    assert contest_completed.publication_type == "contest_completed"
 
 
 def _seed_publications(database_path: Path, *, count: int = 1) -> int:

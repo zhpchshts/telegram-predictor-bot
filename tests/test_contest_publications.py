@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +34,7 @@ from app.publication_outbox import (
     claim_next_publication,
     finish_publication_failure,
     finish_publication_success,
+    prepare_scheduled_reconciliation,
     revise_existing_publication,
     serialize_service_time,
 )
@@ -122,6 +124,684 @@ def test_publication_schema_is_additive_idempotent_and_empty(tmp_path: Path) -> 
     assert "contest_publications" in tables
     assert "contest_publication_messages" in tables
     assert publication_count == 0
+
+
+def test_publication_schema_rebuild_preserves_rows_and_foreign_keys(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    with database_connection(database_path) as connection:
+        chat_id = connection.execute(
+            "INSERT INTO chats (telegram_chat_id, title) VALUES (-1001, 'chat')"
+        ).lastrowid
+        contest_id = connection.execute(
+            """
+            INSERT INTO contests (
+                chat_id, name, slug, match_prediction_publication_enabled
+            ) VALUES (?, 'contest', 'contest', 1)
+            """,
+            (chat_id,),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO contest_publications (
+                id, contest_id, publication_type, entity_id,
+                desired_revision, settled_revision, desired_action,
+                delivery_status, first_event_id, latest_event_id,
+                reconcile_at, claim_token, claim_expires_at, attempt_count,
+                next_attempt_at, last_error, created_at, updated_at
+            ) VALUES (
+                77, ?, 'champion_result', ?, 5, 3, 'publish', 'pending',
+                41, 42, '2026-07-21T10:00:00.000000Z', 'claim-77',
+                '2026-07-21T10:01:30.000000Z', 4,
+                '2026-07-21T10:02:00.000000Z', 'temporary failure',
+                '2026-07-21T09:00:00.000000Z',
+                '2026-07-21T09:30:00.000000Z'
+            )
+            """,
+            (contest_id, contest_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO contest_publication_messages (
+                publication_id, part_number, telegram_message_id,
+                content_hash, content_text, part_status, last_error,
+                sent_at, updated_at
+            ) VALUES (
+                77, 2, 9001, 'hash', '<p>saved content</p>', 'active', NULL,
+                '2026-07-21T09:05:00.000000Z',
+                '2026-07-21T09:06:00.000000Z'
+            )
+            """
+        )
+
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            CREATE TABLE contest_publications_old (
+                id INTEGER PRIMARY KEY,
+                contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+                publication_type TEXT NOT NULL CHECK (
+                    publication_type IN (
+                        'match_result', 'champion_result', 'contest_completed'
+                    )
+                ),
+                entity_id INTEGER NOT NULL,
+                desired_revision INTEGER NOT NULL DEFAULT 1 CHECK (
+                    desired_revision >= 1
+                ),
+                settled_revision INTEGER NOT NULL DEFAULT 0 CHECK (
+                    settled_revision >= 0 AND settled_revision <= desired_revision
+                ),
+                desired_action TEXT NOT NULL DEFAULT 'publish' CHECK (
+                    desired_action IN ('publish', 'withdraw')
+                ),
+                delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                    delivery_status IN (
+                        'pending', 'published', 'withdrawn', 'terminal_failed'
+                    )
+                ),
+                first_event_id INTEGER NOT NULL,
+                latest_event_id INTEGER NOT NULL,
+                reconcile_at TEXT,
+                claim_token TEXT,
+                claim_expires_at TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                next_attempt_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (contest_id, publication_type, entity_id),
+                CHECK (
+                    (claim_token IS NULL AND claim_expires_at IS NULL)
+                    OR (claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)
+                )
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO contest_publications_old
+            SELECT * FROM contest_publications
+            """
+        )
+        connection.execute("DROP TABLE contest_publications")
+        connection.execute(
+            "ALTER TABLE contest_publications_old RENAME TO contest_publications"
+        )
+        connection.execute("COMMIT")
+        connection.execute("PRAGMA foreign_keys = ON")
+    finally:
+        connection.close()
+
+    for _ in range(2):
+        initialize_database(database_path)
+        with database_connection(database_path) as connection:
+            publication = connection.execute(
+                "SELECT * FROM contest_publications WHERE id = 77"
+            ).fetchone()
+            message = connection.execute(
+                """
+                SELECT * FROM contest_publication_messages
+                WHERE publication_id = 77 AND part_number = 2
+                """
+            ).fetchone()
+            assert publication is not None
+            assert tuple(publication) == (
+                77,
+                contest_id,
+                "champion_result",
+                contest_id,
+                5,
+                3,
+                "publish",
+                "pending",
+                41,
+                42,
+                "2026-07-21T10:00:00.000000Z",
+                "claim-77",
+                "2026-07-21T10:01:30.000000Z",
+                4,
+                "2026-07-21T10:02:00.000000Z",
+                "temporary failure",
+                "2026-07-21T09:00:00.000000Z",
+                "2026-07-21T09:30:00.000000Z",
+            )
+            assert message is not None
+            assert int(message["publication_id"]) == 77
+            assert message["content_text"] == "<p>saved content</p>"
+            assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+            assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    with database_connection(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO contest_publications (
+                contest_id, publication_type, entity_id,
+                first_event_id, latest_event_id, created_at, updated_at
+            ) VALUES (
+                ?, 'champion_predictions', ?, 50, 50,
+                '2026-07-21T10:00:00.000000Z',
+                '2026-07-21T10:00:00.000000Z'
+            )
+            """,
+            (contest_id, contest_id),
+        )
+
+
+def test_champion_predictions_follow_deadline_and_render_current_sorted_list(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, match = _create_contest_and_match(database_path)
+    _enable_publications(database_path, contest_id=contest_id)
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна <&>",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at="2026-06-11T11:00:00Z",
+        points=7,
+        now_utc=_datetime(9),
+    )
+    for telegram_user_id, first_name, team_id in (
+        (USER_ID + 1, "Борис", match.home_team_id),
+        (USER_ID, "Анна <&>", match.home_team_id),
+        (USER_ID, "Анна <&>", match.away_team_id),
+    ):
+        save_champion_prediction(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name="Иванова",
+            username=f"user-{telegram_user_id}",
+            predicted_team_id=team_id,
+            now_utc=_datetime(10),
+        )
+
+    with database_connection(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT desired_revision, desired_action, reconcile_at
+            FROM contest_publications
+            WHERE contest_id = ? AND publication_type = 'champion_predictions'
+            """,
+            (contest_id,),
+        ).fetchone()
+    assert tuple(row) == (
+        1,
+        "withdraw",
+        "2026-06-11T11:00:00.000000Z",
+    )
+
+    before_deadline = claim_next_publication(
+        database_path=database_path,
+        now_utc=_datetime(10),
+    )
+    assert before_deadline is not None
+    assert before_deadline.publication_type == "champion_predictions"
+    prepared = prepare_scheduled_reconciliation(
+        database_path=database_path,
+        publication=before_deadline,
+        now_utc=_datetime(10),
+    )
+    assert prepared is not None and prepared.desired_action == "withdraw"
+    bot = RecordingBot()
+    asyncio.run(
+        deliver_publication(
+            bot=bot,
+            database_path=database_path,
+            publication=prepared,
+            desired_messages=(),
+        )
+    )
+    assert finish_publication_success(
+        database_path=database_path,
+        publication=prepared,
+        status="withdrawn",
+        now_utc=_datetime(10),
+    )
+    assert bot.sent == []
+
+    at_deadline = claim_next_publication(
+        database_path=database_path,
+        now_utc=_datetime(12),
+    )
+    assert at_deadline is not None
+    prepared = prepare_scheduled_reconciliation(
+        database_path=database_path,
+        publication=at_deadline,
+        now_utc=_datetime(12),
+    )
+    assert prepared is not None
+    assert prepared.desired_action == "publish"
+    messages = render_publication_messages(
+        database_path=database_path,
+        publication=prepared,
+        max_message_length=130,
+        now_utc=_datetime(12),
+    )
+    assert len(messages) == 2
+    text = "".join(messages)
+    assert "🏆 <b>Прогнозы на чемпиона</b>" in text
+    assert "Анна &lt;&amp;&gt; Иванова" in text
+    assert text.index("Анна") < text.index("Борис")
+    assert "Чемпион турнира" not in text
+    assert "Очки" not in text
+    with database_connection(database_path) as connection:
+        away_name = connection.execute(
+            "SELECT name FROM teams WHERE id = ?", (match.away_team_id,)
+        ).fetchone()[0]
+    assert str(away_name) in text
+
+
+def test_champion_predictions_renderer_has_empty_state(tmp_path: Path) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, _ = _create_contest_and_match(database_path)
+    _enable_publications(database_path, contest_id=contest_id)
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at="2026-06-11T11:00:00Z",
+        points=5,
+        now_utc=_datetime(12),
+    )
+    claim = claim_next_publication(
+        database_path=database_path,
+        now_utc=_datetime(12),
+    )
+    assert claim is not None and claim.publication_type == "champion_predictions"
+    assert render_publication_messages(
+        database_path=database_path,
+        publication=claim,
+        now_utc=_datetime(12),
+    ) == (
+        "<p>🏆 <b>Прогнозы на чемпиона</b></p>"
+        "<p>Конкурс: «ЧМ-2026»</p>"
+        "<p>Никто не сделал прогноз на чемпиона.</p>",
+    )
+
+
+def test_champion_predictions_future_deadline_move_does_not_add_revision(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, _ = _create_contest_and_match(database_path)
+    _enable_publications(database_path, contest_id=contest_id)
+    for deadline in (
+        "2099-01-01T00:00:00Z",
+        "2099-02-01T00:00:00Z",
+    ):
+        save_champion_prediction_settings(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=USER_ID,
+            first_name="Анна",
+            last_name="Иванова",
+            username="anna",
+            enabled=True,
+            deadline_at=deadline,
+            points=5,
+            now_utc=_datetime(9),
+        )
+    with database_connection(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT desired_revision, desired_action, reconcile_at
+            FROM contest_publications
+            WHERE contest_id = ? AND publication_type = 'champion_predictions'
+            """,
+            (contest_id,),
+        ).fetchone()
+    assert tuple(row) == (
+        1,
+        "withdraw",
+        "2099-02-01T00:00:00.000000Z",
+    )
+
+
+def test_master_switch_after_deadline_has_no_backfill_but_explicit_save_does(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, _ = _create_contest_and_match(database_path)
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at="2026-06-11T11:00:00Z",
+        points=5,
+        now_utc=_datetime(12),
+    )
+    save_match_prediction_publication_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        now_utc=_datetime(12),
+    )
+    with database_connection(database_path) as connection:
+        assert (
+            connection.execute(
+                """
+            SELECT COUNT(*) FROM contest_publications
+            WHERE publication_type = 'champion_predictions'
+            """
+            ).fetchone()[0]
+            == 0
+        )
+
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at="2026-06-11T11:00:00Z",
+        points=5,
+        now_utc=_datetime(12),
+    )
+    with database_connection(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT desired_action, reconcile_at
+            FROM contest_publications
+            WHERE publication_type = 'champion_predictions'
+            """
+        ).fetchone()
+    assert tuple(row) == ("publish", None)
+
+
+def test_master_switch_disable_and_reenable_restores_future_reconciliation(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, _ = _create_contest_and_match(database_path)
+    _enable_publications(database_path, contest_id=contest_id)
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at="2099-01-01T00:00:00Z",
+        points=5,
+        now_utc=_datetime(9),
+    )
+    _disable_publications(database_path, contest_id=contest_id)
+    with database_connection(database_path) as connection:
+        disabled = connection.execute(
+            """
+            SELECT desired_revision, settled_revision, reconcile_at
+            FROM contest_publications
+            WHERE publication_type = 'champion_predictions'
+            """
+        ).fetchone()
+    assert tuple(disabled) == (2, 2, None)
+
+    _enable_publications(database_path, contest_id=contest_id)
+    with database_connection(database_path) as connection:
+        enabled = connection.execute(
+            """
+            SELECT desired_revision, settled_revision, desired_action, reconcile_at
+            FROM contest_publications
+            WHERE publication_type = 'champion_predictions'
+            """
+        ).fetchone()
+    assert tuple(enabled) == (
+        2,
+        2,
+        "withdraw",
+        "2099-01-01T00:00:00.000000Z",
+    )
+
+
+def test_reopened_champion_predictions_are_withdrawn_and_republished(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, match = _create_contest_and_match(database_path)
+    _enable_publications(database_path, contest_id=contest_id)
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at="2026-06-11T11:00:00Z",
+        points=5,
+        now_utc=_datetime(9),
+    )
+    save_champion_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        predicted_team_id=match.home_team_id,
+        now_utc=_datetime(10),
+    )
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at="2026-06-11T11:00:00Z",
+        points=5,
+        now_utc=_datetime(12),
+    )
+    bot = RecordingBot()
+    claim = claim_next_publication(database_path=database_path, now_utc=_datetime(12))
+    assert claim is not None and claim.publication_type == "champion_predictions"
+    messages = render_publication_messages(
+        database_path=database_path,
+        publication=claim,
+        now_utc=_datetime(12),
+    )
+    asyncio.run(
+        deliver_publication(
+            bot=bot,
+            database_path=database_path,
+            publication=claim,
+            desired_messages=messages,
+        )
+    )
+    assert finish_publication_success(
+        database_path=database_path,
+        publication=claim,
+        status="published",
+        now_utc=_datetime(12),
+    )
+
+    future_deadline = "2099-01-01T00:00:00Z"
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at=future_deadline,
+        points=5,
+        now_utc=_datetime(12),
+    )
+    withdrawal = claim_next_publication(
+        database_path=database_path, now_utc=_datetime(12)
+    )
+    assert withdrawal is not None and withdrawal.desired_action == "withdraw"
+    asyncio.run(
+        deliver_publication(
+            bot=bot,
+            database_path=database_path,
+            publication=withdrawal,
+            desired_messages=(),
+        )
+    )
+    assert finish_publication_success(
+        database_path=database_path,
+        publication=withdrawal,
+        status="withdrawn",
+        now_utc=_datetime(12),
+    )
+    assert bot.deleted == [{"chat_id": CHAT_ID, "message_id": 1000}]
+
+    save_champion_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        predicted_team_id=match.away_team_id,
+        now_utc=datetime(2098, 12, 31, 12, tzinfo=timezone.utc),
+    )
+    due = claim_next_publication(
+        database_path=database_path,
+        now_utc=datetime(2099, 1, 1, 1, tzinfo=timezone.utc),
+    )
+    assert due is not None
+    republish = prepare_scheduled_reconciliation(
+        database_path=database_path,
+        publication=due,
+        now_utc=datetime(2099, 1, 1, 1, tzinfo=timezone.utc),
+    )
+    assert republish is not None and republish.desired_action == "publish"
+    republished_messages = render_publication_messages(
+        database_path=database_path,
+        publication=republish,
+        now_utc=datetime(2099, 1, 1, 1, tzinfo=timezone.utc),
+    )
+    with database_connection(database_path) as connection:
+        away_name = connection.execute(
+            "SELECT name FROM teams WHERE id = ?", (match.away_team_id,)
+        ).fetchone()[0]
+    assert str(away_name) in "".join(republished_messages)
+
+    assert finish_publication_success(
+        database_path=database_path,
+        publication=republish,
+        status="published",
+        now_utc=datetime(2099, 1, 1, 1, tzinfo=timezone.utc),
+    )
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=False,
+        deadline_at=None,
+        points=5,
+        now_utc=datetime(2099, 1, 1, 2, tzinfo=timezone.utc),
+    )
+    with database_connection(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT desired_action, reconcile_at
+            FROM contest_publications
+            WHERE publication_type = 'champion_predictions'
+            """
+        ).fetchone()
+    assert tuple(row) == ("withdraw", None)
+
+
+def test_recording_actual_champion_does_not_revise_champion_predictions(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, match = _create_contest_and_match(database_path)
+    _enable_publications(database_path, contest_id=contest_id)
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at="2026-06-11T11:00:00Z",
+        points=5,
+        now_utc=_datetime(12),
+    )
+    _save_result(database_path, contest_id=contest_id, match=match)
+    with database_connection(database_path) as connection:
+        before = tuple(
+            connection.execute(
+                """
+                SELECT desired_revision, latest_event_id, updated_at
+                FROM contest_publications
+                WHERE publication_type = 'champion_predictions'
+                """
+            ).fetchone()
+        )
+    save_contest_champion(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        champion_team_id=match.home_team_id,
+    )
+    with database_connection(database_path) as connection:
+        after = tuple(
+            connection.execute(
+                """
+                SELECT desired_revision, latest_event_id, updated_at
+                FROM contest_publications
+                WHERE publication_type = 'champion_predictions'
+                """
+            ).fetchone()
+        )
+    assert after == before
 
 
 def test_match_result_publication_is_sent_and_corrected(tmp_path: Path) -> None:
@@ -476,14 +1156,15 @@ def test_final_actions_are_published_in_domain_order(tmp_path: Path) -> None:
                 database_path=database_path,
             )
         )
-        == 3
+        == 4
     )
-    assert len(bot.sent) == 3
-    assert "Прогнозов на этот матч не было" in str(bot.sent[0]["text"])
-    assert "Чемпион турнира" in str(bot.sent[1]["text"])
-    assert '<th colspan="3" align="left">Участник</th>' in str(bot.sent[1]["text"])
-    assert '<th colspan="3" align="center">Прогноз</th>' in str(bot.sent[1]["text"])
-    assert "Итоговый рейтинг" in str(bot.sent[2]["text"])
+    assert len(bot.sent) == 4
+    assert "Прогнозы на чемпиона" in str(bot.sent[0]["text"])
+    assert "Прогнозов на этот матч не было" in str(bot.sent[1]["text"])
+    assert "Чемпион турнира" in str(bot.sent[2]["text"])
+    assert '<th colspan="3" align="left">Участник</th>' in str(bot.sent[2]["text"])
+    assert '<th colspan="3" align="center">Прогноз</th>' in str(bot.sent[2]["text"])
+    assert "Итоговый рейтинг" in str(bot.sent[3]["text"])
 
 
 def test_completion_publication_names_exactly_one_winner_for_tied_points(
@@ -1405,10 +2086,10 @@ def test_champion_renderer_rejects_open_deadline_for_active_contest(
             process_due_contest_publications(
                 bot=RecordingBot(),
                 database_path=database_path,
-                max_publications=1,
+                max_publications=2,
             )
         )
-        == 1
+        == 2
     )
     claim = claim_next_publication(database_path=database_path)
     assert claim is not None and claim.publication_type == "champion_result"
@@ -1477,7 +2158,7 @@ def test_master_switch_cancels_existing_champion_reconciliation(tmp_path: Path) 
     assert tuple(publication) == (2, 2, None)
 
 
-def test_champion_deadline_while_master_disabled_never_backfills(
+def test_master_switch_enabled_before_deadline_restores_future_publication(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "predictor.db"
@@ -1506,14 +2187,14 @@ def test_champion_deadline_while_master_disabled_never_backfills(
         now_utc=_datetime(10),
     )
     _enable_publications(database_path, contest_id=contest_id)
+    bot = RecordingBot()
     assert (
         asyncio.run(
-            process_due_contest_publications(
-                bot=RecordingBot(), database_path=database_path
-            )
+            process_due_contest_publications(bot=bot, database_path=database_path)
         )
-        == 0
+        == 1
     )
+    assert "Прогнозы на чемпиона" in str(bot.sent[0]["text"])
 
     _save_result(database_path, contest_id=contest_id, match=match)
     save_contest_champion(
@@ -1558,6 +2239,38 @@ def test_completion_while_master_disabled_sends_nothing(tmp_path: Path) -> None:
         == 0
     )
     assert bot.sent == []
+
+
+def test_completion_without_champion_prediction_creates_no_prediction_publication(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, match = _create_contest_and_match(database_path)
+    _enable_publications(database_path, contest_id=contest_id)
+    _save_result(database_path, contest_id=contest_id, match=match)
+
+    complete_contest(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+    )
+
+    with database_connection(database_path) as connection:
+        publication_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM contest_publications
+            WHERE contest_id = ?
+              AND publication_type = 'champion_predictions'
+            """,
+            (contest_id,),
+        ).fetchone()[0]
+
+    assert publication_count == 0
 
 
 def test_completion_creates_terminal_champion_after_master_reenabled(
@@ -1622,10 +2335,241 @@ def test_completion_creates_terminal_champion_after_master_reenabled(
         asyncio.run(
             process_due_contest_publications(bot=bot, database_path=database_path)
         )
+        == 3
+    )
+    assert "Прогнозы на чемпиона" in str(bot.sent[0]["text"])
+    assert "Чемпион турнира" in str(bot.sent[1]["text"])
+    assert "Итоговый рейтинг" in str(bot.sent[2]["text"])
+
+
+def test_completed_contest_final_dependencies_override_adverse_event_order(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, match = _create_contest_and_match(database_path)
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at="2026-06-11T11:00:00Z",
+        points=5,
+        now_utc=_datetime(10),
+    )
+    save_champion_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        predicted_team_id=match.home_team_id,
+        now_utc=_datetime(10),
+    )
+    _save_result(database_path, contest_id=contest_id, match=match)
+    save_match_prediction_publication_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        now_utc=_datetime(12),
+    )
+    save_contest_champion(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        champion_team_id=match.home_team_id,
+    )
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at="2026-06-11T11:00:00Z",
+        points=5,
+        now_utc=_datetime(12),
+    )
+    with database_connection(database_path) as connection:
+        first_events = {
+            str(row["publication_type"]): int(row["first_event_id"])
+            for row in connection.execute(
+                """
+                SELECT publication_type, first_event_id
+                FROM contest_publications
+                """
+            )
+        }
+    assert first_events["champion_result"] < first_events["champion_predictions"]
+
+    complete_contest(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+    )
+    bot = RecordingBot()
+    assert (
+        asyncio.run(
+            process_due_contest_publications(bot=bot, database_path=database_path)
+        )
+        == 3
+    )
+    assert "Прогнозы на чемпиона" in str(bot.sent[0]["text"])
+    assert "Чемпион турнира" in str(bot.sent[1]["text"])
+    assert "Итоговый рейтинг" in str(bot.sent[2]["text"])
+
+
+def test_completion_before_champion_deadline_publishes_all_final_messages_in_order(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, match = _create_contest_and_match(database_path)
+    _enable_publications(database_path, contest_id=contest_id)
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at="2099-01-01T00:00:00Z",
+        points=5,
+        now_utc=_datetime(9),
+    )
+    save_champion_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        predicted_team_id=match.home_team_id,
+        now_utc=_datetime(10),
+    )
+    _save_result(database_path, contest_id=contest_id, match=match)
+
+    active_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        now_utc=_datetime(13),
+    )
+    assert active_details.is_active is True
+    assert active_details.champion_prediction.is_tournament_completed is True
+    assert active_details.champion_prediction.is_open is True
+
+    result_bot = RecordingBot()
+    assert (
+        asyncio.run(
+            process_due_contest_publications(
+                bot=result_bot,
+                database_path=database_path,
+            )
+        )
         == 2
     )
-    assert "Чемпион турнира" in str(bot.sent[0]["text"])
-    assert "Итоговый рейтинг" in str(bot.sent[1]["text"])
+    assert len(result_bot.sent) == 1
+
+    save_contest_champion(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        champion_team_id=match.home_team_id,
+    )
+    champion_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        now_utc=_datetime(13),
+    )
+    assert champion_details.champion_prediction.actual_champion is not None
+    assert champion_details.champion_prediction.actual_champion.id == match.home_team_id
+    with database_connection(database_path) as connection:
+        revision_before_completion = int(
+            connection.execute(
+                """
+                SELECT desired_revision
+                FROM contest_publications
+                WHERE publication_type = 'champion_predictions'
+                """
+            ).fetchone()[0]
+        )
+
+    complete_contest(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+    )
+
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        now_utc=_datetime(13),
+    )
+    assert details.is_active is False
+    assert details.champion_prediction.is_open is False
+
+    with database_connection(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT desired_revision, desired_action, reconcile_at
+            FROM contest_publications
+            WHERE publication_type = 'champion_predictions'
+            """
+        ).fetchone()
+    assert row["desired_revision"] == revision_before_completion + 1
+    assert row["desired_action"] == "publish"
+    assert row["reconcile_at"] is None
+
+    final_bot = RecordingBot()
+    assert (
+        asyncio.run(
+            process_due_contest_publications(
+                bot=final_bot,
+                database_path=database_path,
+            )
+        )
+        == 3
+    )
+    assert len(final_bot.sent) == 3
+    assert "Прогнозы на чемпиона" in str(final_bot.sent[0]["text"])
+    assert "Чемпион турнира" in str(final_bot.sent[1]["text"])
+    assert "Итоговый рейтинг" in str(final_bot.sent[2]["text"])
 
 
 def _enable_publications(database_path: Path, *, contest_id: int) -> None:

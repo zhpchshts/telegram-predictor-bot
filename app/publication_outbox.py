@@ -12,6 +12,7 @@ from app.database import database_connection
 
 PublicationType = Literal[
     "match_result",
+    "champion_predictions",
     "champion_result",
     "contest_completed",
 ]
@@ -241,6 +242,87 @@ def create_or_revise_champion_publication(
     )
 
 
+def create_or_revise_champion_predictions_publication(
+    connection: sqlite3.Connection,
+    *,
+    contest_id: int,
+    event_id: int,
+    now_utc: datetime | None = None,
+) -> None:
+    now = resolve_service_time(now_utc)
+    desired_action, reconcile_at = _champion_predictions_desired_state(
+        connection,
+        contest_id=contest_id,
+        now_utc=now,
+    )
+    existing = connection.execute(
+        """
+        SELECT desired_action
+        FROM contest_publications
+        WHERE contest_id = ?
+          AND publication_type = 'champion_predictions'
+          AND entity_id = ?
+        """,
+        (contest_id, contest_id),
+    ).fetchone()
+    if existing is None:
+        if desired_action == "withdraw" and reconcile_at is None:
+            return
+        create_publication_if_enabled(
+            connection,
+            contest_id=contest_id,
+            publication_type="champion_predictions",
+            entity_id=contest_id,
+            event_id=event_id,
+            desired_action=desired_action,
+            reconcile_at=reconcile_at,
+            now_utc=now,
+        )
+        return
+
+    needs_revision = (
+        str(existing["desired_action"]) != desired_action or desired_action == "publish"
+    )
+    if needs_revision:
+        revise_existing_publication(
+            connection,
+            contest_id=contest_id,
+            publication_type="champion_predictions",
+            entity_id=contest_id,
+            event_id=event_id,
+            desired_action=desired_action,
+            reconcile_at=reconcile_at,
+            now_utc=now,
+        )
+        return
+
+    connection.execute(
+        """
+        UPDATE contest_publications
+        SET
+            latest_event_id = ?,
+            reconcile_at = ?,
+            updated_at = ?
+        WHERE contest_id = ?
+          AND publication_type = 'champion_predictions'
+          AND entity_id = ?
+          AND EXISTS (
+              SELECT 1 FROM contests
+              WHERE id = ?
+                AND match_prediction_publication_enabled = 1
+          )
+        """,
+        (
+            event_id,
+            reconcile_at,
+            serialize_service_time(now),
+            contest_id,
+            contest_id,
+            contest_id,
+        ),
+    )
+
+
 def revise_champion_publication_for_related_change(
     connection: sqlite3.Connection,
     *,
@@ -306,6 +388,18 @@ def transition_contest_publications_for_master_switch(
     now_utc: datetime | None = None,
 ) -> None:
     if enabled:
+        desired_action, reconcile_at = _champion_predictions_desired_state(
+            connection,
+            contest_id=contest_id,
+            now_utc=resolve_service_time(now_utc),
+        )
+        if desired_action == "withdraw" and reconcile_at is not None:
+            create_or_revise_champion_predictions_publication(
+                connection,
+                contest_id=contest_id,
+                event_id=event_id,
+                now_utc=now_utc,
+            )
         return
     now_value = serialize_service_time(resolve_service_time(now_utc))
     connection.execute(
@@ -348,6 +442,37 @@ def create_contest_completed_publication(
         publication_type="contest_completed",
         entity_id=contest_id,
         event_id=event_id,
+        now_utc=now_utc,
+    )
+
+
+def terminalize_champion_predictions_publication(
+    connection: sqlite3.Connection,
+    *,
+    contest_id: int,
+    event_id: int,
+    now_utc: datetime | None = None,
+) -> None:
+    created = create_publication_if_enabled(
+        connection,
+        contest_id=contest_id,
+        publication_type="champion_predictions",
+        entity_id=contest_id,
+        event_id=event_id,
+        desired_action="publish",
+        reconcile_at=None,
+        now_utc=now_utc,
+    )
+    if created:
+        return
+    revise_existing_publication(
+        connection,
+        contest_id=contest_id,
+        publication_type="champion_predictions",
+        entity_id=contest_id,
+        event_id=event_id,
+        desired_action="publish",
+        reconcile_at=None,
         now_utc=now_utc,
     )
 
@@ -511,6 +636,60 @@ def claim_next_publication(
                                 AND earlier.reconcile_at <= ?
                             )
                         )
+                        AND NOT (
+                            EXISTS (
+                                SELECT 1
+                                FROM contests AS completed_contest
+                                WHERE completed_contest.id = publication.contest_id
+                                  AND completed_contest.is_active = 0
+                            )
+                            AND publication.publication_type IN (
+                                'champion_predictions',
+                                'champion_result',
+                                'contest_completed'
+                            )
+                            AND earlier.publication_type IN (
+                                'champion_predictions',
+                                'champion_result',
+                                'contest_completed'
+                            )
+                            AND CASE earlier.publication_type
+                                WHEN 'champion_predictions' THEN 1
+                                WHEN 'champion_result' THEN 2
+                                ELSE 3
+                            END > CASE publication.publication_type
+                                WHEN 'champion_predictions' THEN 1
+                                WHEN 'champion_result' THEN 2
+                                ELSE 3
+                            END
+                        )
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM contests AS completed_contest
+                      JOIN contest_publications AS dependency
+                        ON dependency.contest_id = completed_contest.id
+                      WHERE completed_contest.id = publication.contest_id
+                        AND completed_contest.is_active = 0
+                        AND (
+                            dependency.desired_revision >
+                                dependency.settled_revision
+                            OR dependency.reconcile_at IS NOT NULL
+                        )
+                        AND (
+                            (
+                                publication.publication_type = 'champion_result'
+                                AND dependency.publication_type =
+                                    'champion_predictions'
+                            )
+                            OR (
+                                publication.publication_type = 'contest_completed'
+                                AND dependency.publication_type IN (
+                                    'champion_predictions',
+                                    'champion_result'
+                                )
+                            )
+                        )
                   )
                 ORDER BY publication.first_event_id ASC, publication.id ASC
                 LIMIT 1
@@ -596,7 +775,10 @@ def prepare_scheduled_reconciliation(
         reconcile_at = row["reconcile_at"]
         if reconcile_at is None or str(reconcile_at) > now_value:
             return publication
-        if publication.publication_type != "champion_result":
+        if publication.publication_type not in (
+            "champion_predictions",
+            "champion_result",
+        ):
             cleared = connection.execute(
                 """
                 UPDATE contest_publications
@@ -629,11 +811,18 @@ def prepare_scheduled_reconciliation(
                 else None
             )
 
-        desired_action, next_reconcile_at = _champion_desired_state(
-            connection,
-            contest_id=publication.contest_id,
-            now_utc=now,
-        )
+        if publication.publication_type == "champion_predictions":
+            desired_action, next_reconcile_at = _champion_predictions_desired_state(
+                connection,
+                contest_id=publication.contest_id,
+                now_utc=now,
+            )
+        else:
+            desired_action, next_reconcile_at = _champion_desired_state(
+                connection,
+                contest_id=publication.contest_id,
+                now_utc=now,
+            )
         needs_revision = desired_action != str(row["desired_action"])
         update = connection.execute(
             """
@@ -1023,6 +1212,42 @@ def _champion_desired_state(
     if not bool(row["is_active"]):
         return ("publish", None) if champion_exists else ("withdraw", None)
     return "withdraw", None
+
+
+def _champion_predictions_desired_state(
+    connection: sqlite3.Connection,
+    *,
+    contest_id: int,
+    now_utc: datetime,
+) -> tuple[PublicationAction, str | None]:
+    row = connection.execute(
+        """
+        SELECT
+            is_active,
+            champion_prediction_enabled,
+            champion_prediction_deadline_at
+        FROM contests
+        WHERE id = ?
+        """,
+        (contest_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(
+            "Contest was not found while reconciling champion predictions."
+        )
+    deadline_value = row["champion_prediction_deadline_at"]
+    if not bool(row["champion_prediction_enabled"]) or deadline_value is None:
+        return "withdraw", None
+    if not bool(row["is_active"]):
+        return "publish", None
+
+    deadline = datetime.fromisoformat(str(deadline_value).replace("Z", "+00:00"))
+    if deadline.tzinfo is None or deadline.utcoffset() is None:
+        raise RuntimeError("Champion prediction deadline does not include a timezone.")
+    deadline = deadline.astimezone(timezone.utc)
+    if deadline > now_utc:
+        return "withdraw", serialize_service_time(deadline)
+    return "publish", None
 
 
 def _claimed_publication_from_row(

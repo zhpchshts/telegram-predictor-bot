@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, status
@@ -37,6 +38,11 @@ from app.tma_context import TmaContext, TmaContextError, build_tma_context
 
 TMA_INIT_DATA_HEADER = "X-Telegram-Init-Data"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 router = APIRouter(
     prefix="/api/tma",
@@ -236,6 +242,7 @@ async def get_tma_contest(
             telegram_chat_id=context.chat.telegram_chat_id,
             contest_id=contest_id,
             telegram_user_id=context.user.telegram_user_id,
+            now_utc=_utc_now(),
         )
     except ContestNotFoundError as error:
         raise HTTPException(
@@ -276,6 +283,7 @@ async def complete_tma_contest(
             telegram_chat_id=context.chat.telegram_chat_id,
             contest_id=contest_id,
             telegram_user_id=context.user.telegram_user_id,
+            now_utc=_utc_now(),
         )
     except ContestNotFoundError as error:
         raise HTTPException(
@@ -355,6 +363,7 @@ async def create_tma_match(
         )
 
     settings = load_settings()
+    now_utc = _utc_now()
     try:
         result = create_match(
             database_path=settings.database_path,
@@ -368,6 +377,13 @@ async def create_tma_match(
             away_team_name=payload.away_team_name,
             starts_at_utc=payload.starts_at_utc,
             idempotency_key=idempotency_key,
+        )
+        contest = get_contest_details(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            now_utc=now_utc,
         )
     except ContestNotFoundError as error:
         raise HTTPException(
@@ -388,10 +404,15 @@ async def create_tma_match(
     response_status = (
         status.HTTP_201_CREATED if result.was_created else status.HTTP_200_OK
     )
+    match = next(
+        (match for match in contest.matches if match.id == result.match.id), None
+    )
+    if match is None:
+        raise RuntimeError("Не удалось повторно прочитать созданный матч.")
     return JSONResponse(
         status_code=response_status,
         content={
-            "match": _serialize_match(result.match),
+            "match": _serialize_match(match),
             "was_created": result.was_created,
         },
     )
@@ -548,6 +569,7 @@ async def save_tma_match_prediction_publication_settings(
             telegram_chat_id=context.chat.telegram_chat_id,
             contest_id=contest_id,
             telegram_user_id=context.user.telegram_user_id,
+            now_utc=_utc_now(),
         )
     except ContestNotFoundError as error:
         raise HTTPException(
@@ -607,6 +629,7 @@ async def save_tma_champion_prediction_settings(
             telegram_chat_id=context.chat.telegram_chat_id,
             contest_id=contest_id,
             telegram_user_id=context.user.telegram_user_id,
+            now_utc=_utc_now(),
         )
     except ContestNotFoundError as error:
         raise HTTPException(

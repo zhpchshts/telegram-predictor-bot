@@ -9,12 +9,15 @@ import secrets
 from typing import Literal
 
 from app.database import database_connection
+from app.match_lifecycle import start_due_matches
 from app.publication_outbox import (
     create_contest_completed_publication,
     create_or_revise_champion_publication,
+    create_or_revise_champion_predictions_publication,
     create_or_revise_match_result_publication,
     handle_match_publication_deletion,
     revise_champion_publication_for_related_change,
+    terminalize_champion_predictions_publication,
     terminalize_champion_publication,
     transition_contest_publications_for_master_switch,
 )
@@ -283,7 +286,24 @@ def get_contest_details(
     telegram_chat_id: int,
     contest_id: int,
     telegram_user_id: int | None = None,
+    now_utc: datetime | None = None,
 ) -> ContestDetails:
+    resolved_now_utc = _resolve_now_utc(now_utc)
+
+    with database_connection(database_path) as connection:
+        contest_row = _get_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+
+    if bool(contest_row["is_active"]):
+        start_due_matches(
+            database_path=database_path,
+            contest_id=contest_id,
+            now_utc=resolved_now_utc,
+        )
+
     with database_connection(database_path) as connection:
         contest_row = _get_contest_row(
             connection,
@@ -351,6 +371,7 @@ def get_contest_details(
             connection,
             contest_id=contest_id,
             telegram_user_id=telegram_user_id,
+            now_utc=resolved_now_utc,
         )
         match_prediction_publication = _get_match_prediction_publication_settings(
             connection,
@@ -703,7 +724,7 @@ def get_contest_details(
                 contest_slug=str(contest_row["slug"]),
                 prediction_history_by_user=_leaderboard_prediction_history_by_user(
                     leaderboard_prediction_rows,
-                    now_utc=_resolve_now_utc(None),
+                    now_utc=resolved_now_utc,
                 ),
                 champion_prediction_history_by_user=(
                     _leaderboard_champion_prediction_history_by_user(
@@ -820,6 +841,12 @@ def complete_contest(
         if completion_event.lastrowid is None:
             raise RuntimeError("Не удалось записать событие завершения конкурса.")
         completion_event_id = int(completion_event.lastrowid)
+        if bool(contest_row["champion_prediction_enabled"]):
+            terminalize_champion_predictions_publication(
+                connection,
+                contest_id=contest_id,
+                event_id=completion_event_id,
+            )
         if contest_row["champion_team_id"] is not None:
             terminalize_champion_publication(
                 connection,
@@ -1666,6 +1693,7 @@ def save_champion_prediction_settings(
     enabled: bool,
     deadline_at: str | None,
     points: int,
+    now_utc: datetime | None = None,
 ) -> None:
     normalized_enabled = _normalize_champion_prediction_enabled(enabled)
     normalized_points = _normalize_champion_prediction_points(points)
@@ -1677,6 +1705,8 @@ def save_champion_prediction_settings(
         normalized_deadline_at = _normalize_champion_prediction_deadline_at(deadline_at)
     else:
         normalized_deadline_at = None
+
+    resolved_now_utc = _resolve_now_utc(now_utc)
 
     with database_connection(database_path) as connection:
         _get_active_contest_row(
@@ -1739,7 +1769,15 @@ def save_champion_prediction_settings(
             connection,
             contest_id=contest_id,
             event_id=settings_event_id,
+            now_utc=resolved_now_utc,
         )
+        if bool(previous_row["match_prediction_publication_enabled"]):
+            create_or_revise_champion_predictions_publication(
+                connection,
+                contest_id=contest_id,
+                event_id=settings_event_id,
+                now_utc=resolved_now_utc,
+            )
 
 
 def save_champion_prediction(
@@ -1849,6 +1887,13 @@ def save_champion_prediction(
             event_id=prediction_event_id,
             now_utc=resolved_now_utc,
         )
+        if bool(configuration_row["match_prediction_publication_enabled"]):
+            create_or_revise_champion_predictions_publication(
+                connection,
+                contest_id=contest_id,
+                event_id=prediction_event_id,
+                now_utc=resolved_now_utc,
+            )
 
         return _team_summary_from_row(team_row)
 
@@ -2321,10 +2366,12 @@ def _get_champion_prediction_details(
     *,
     contest_id: int,
     telegram_user_id: int | None,
+    now_utc: datetime,
 ) -> ChampionPredictionDetails:
     configuration_row = connection.execute(
         """
         SELECT
+            contests.is_active,
             contests.champion_prediction_enabled,
             contests.champion_prediction_deadline_at,
             contests.champion_prediction_points,
@@ -2351,6 +2398,11 @@ def _get_champion_prediction_details(
         raise RuntimeError("Не удалось найти настройки прогноза чемпиона.")
 
     is_enabled = bool(configuration_row["champion_prediction_enabled"])
+    contest_is_active = bool(configuration_row["is_active"])
+    is_tournament_completed = _is_contest_completed(
+        connection,
+        contest_id=contest_id,
+    )
     deadline_at = configuration_row["champion_prediction_deadline_at"]
     deadline_at_value = str(deadline_at) if deadline_at is not None else None
 
@@ -2394,16 +2446,14 @@ def _get_champion_prediction_details(
         actual_champion=actual_champion,
         is_open=(
             is_enabled
+            and contest_is_active
             and deadline_at_value is not None
             and _is_champion_prediction_open(
                 deadline_at_value,
-                now_utc=_resolve_now_utc(None),
+                now_utc=now_utc,
             )
         ),
-        is_tournament_completed=_is_contest_completed(
-            connection,
-            contest_id=contest_id,
-        ),
+        is_tournament_completed=is_tournament_completed,
         awarded_points=awarded_points,
     )
 
@@ -2440,7 +2490,8 @@ def _get_champion_prediction_configuration_row(
             champion_prediction_enabled,
             champion_prediction_deadline_at,
             champion_prediction_points,
-            champion_team_id
+            champion_team_id,
+            match_prediction_publication_enabled
         FROM contests
         WHERE id = ?
         """,

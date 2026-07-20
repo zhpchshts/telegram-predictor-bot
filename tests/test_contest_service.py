@@ -549,6 +549,7 @@ def test_create_match_creates_teams_stage_event_and_request(
         database_path=database_path,
         telegram_chat_id=TELEGRAM_CHAT_ID,
         contest_id=contest.id,
+        now_utc=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
     )
     assert contest_details.id == contest.id
     assert contest_details.name == "ЧМ-2026: прогнозы"

@@ -240,6 +240,7 @@ CREATE TABLE IF NOT EXISTS contest_publications (
     publication_type TEXT NOT NULL CHECK (
         publication_type IN (
             'match_result',
+            'champion_predictions',
             'champion_result',
             'contest_completed'
         )
@@ -448,7 +449,178 @@ def _migrate_contest_publication_messages(connection: sqlite3.Connection) -> Non
         )
 
 
+def _migrate_contest_publications_for_champion_predictions(
+    database_path: Path,
+) -> None:
+    connection = create_connection(database_path)
+    try:
+        table_row = connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'contest_publications'
+            """
+        ).fetchone()
+        if table_row is None or table_row["sql"] is None:
+            return
+        if "champion_predictions" in str(table_row["sql"]):
+            return
+        if connection.in_transaction:
+            raise RuntimeError(
+                "Publication schema migration must start outside a transaction."
+            )
+
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                CREATE TABLE contest_publications_new (
+                    id INTEGER PRIMARY KEY,
+                    contest_id INTEGER NOT NULL
+                        REFERENCES contests(id) ON DELETE CASCADE,
+                    publication_type TEXT NOT NULL CHECK (
+                        publication_type IN (
+                            'match_result',
+                            'champion_predictions',
+                            'champion_result',
+                            'contest_completed'
+                        )
+                    ),
+                    entity_id INTEGER NOT NULL,
+                    desired_revision INTEGER NOT NULL DEFAULT 1 CHECK (
+                        desired_revision >= 1
+                    ),
+                    settled_revision INTEGER NOT NULL DEFAULT 0 CHECK (
+                        settled_revision >= 0
+                        AND settled_revision <= desired_revision
+                    ),
+                    desired_action TEXT NOT NULL DEFAULT 'publish' CHECK (
+                        desired_action IN ('publish', 'withdraw')
+                    ),
+                    delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                        delivery_status IN (
+                            'pending',
+                            'published',
+                            'withdrawn',
+                            'terminal_failed'
+                        )
+                    ),
+                    first_event_id INTEGER NOT NULL,
+                    latest_event_id INTEGER NOT NULL,
+                    reconcile_at TEXT,
+                    claim_token TEXT,
+                    claim_expires_at TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (
+                        attempt_count >= 0
+                    ),
+                    next_attempt_at TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (contest_id, publication_type, entity_id),
+                    CHECK (
+                        (claim_token IS NULL AND claim_expires_at IS NULL)
+                        OR
+                        (claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)
+                    )
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO contest_publications_new (
+                    id,
+                    contest_id,
+                    publication_type,
+                    entity_id,
+                    desired_revision,
+                    settled_revision,
+                    desired_action,
+                    delivery_status,
+                    first_event_id,
+                    latest_event_id,
+                    reconcile_at,
+                    claim_token,
+                    claim_expires_at,
+                    attempt_count,
+                    next_attempt_at,
+                    last_error,
+                    created_at,
+                    updated_at
+                )
+                SELECT
+                    id,
+                    contest_id,
+                    publication_type,
+                    entity_id,
+                    desired_revision,
+                    settled_revision,
+                    desired_action,
+                    delivery_status,
+                    first_event_id,
+                    latest_event_id,
+                    reconcile_at,
+                    claim_token,
+                    claim_expires_at,
+                    attempt_count,
+                    next_attempt_at,
+                    last_error,
+                    created_at,
+                    updated_at
+                FROM contest_publications
+                """
+            )
+            connection.execute("DROP TABLE contest_publications")
+            connection.execute(
+                "ALTER TABLE contest_publications_new RENAME TO contest_publications"
+            )
+            connection.execute(
+                """
+                CREATE INDEX idx_contest_publications_contest_order
+                ON contest_publications(contest_id, first_event_id, id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX idx_contest_publications_due_retry
+                ON contest_publications(next_attempt_at)
+                WHERE next_attempt_at IS NOT NULL
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX idx_contest_publications_due_reconcile
+                ON contest_publications(reconcile_at)
+                WHERE reconcile_at IS NOT NULL
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX idx_contest_publications_active_claim
+                ON contest_publications(claim_expires_at)
+                WHERE claim_token IS NOT NULL
+                """
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
+
+        foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_key_errors:
+            raise RuntimeError(
+                "Foreign key violations found after publication schema migration."
+            )
+    finally:
+        connection.close()
+
+
 def initialize_database(database_path: Path) -> None:
+    _migrate_contest_publications_for_champion_predictions(database_path)
     with create_connection(database_path) as connection:
         connection.executescript(SCHEMA)
         _migrate_contests_for_champion_predictions(connection)

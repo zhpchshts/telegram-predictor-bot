@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -687,6 +688,8 @@ def test_create_match_creates_match_and_returns_contest_details(
         monkeypatch=monkeypatch,
         database_path=database_path,
     )
+    fixed_now = datetime(2026, 6, 11, 18, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("app.tma_api._utc_now", lambda: fixed_now)
     client = TestClient(create_app())
     contest = create_tma_contest(client)
 
@@ -713,7 +716,7 @@ def test_create_match_creates_match_and_returns_contest_details(
         "away_team_id": 2,
         "away_team_name": "Бразилия",
         "starts_at_utc": "2026-06-11T18:00:00Z",
-        "status": "scheduled",
+        "status": "started",
         "result": None,
         "prediction": None,
         "prediction_score": None,
@@ -725,9 +728,7 @@ def test_create_match_creates_match_and_returns_contest_details(
     )
 
     assert contest_response.status_code == 200
-    assert contest_response.json()["contest"]["matches"] == [
-        response_data["match"],
-    ]
+    assert contest_response.json()["contest"]["matches"] == [response_data["match"]]
 
 
 def test_create_match_reuses_result_for_same_idempotency_key(

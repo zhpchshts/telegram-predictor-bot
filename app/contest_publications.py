@@ -56,6 +56,13 @@ def render_publication_messages(
             max_table_rows=max_table_rows,
             now_utc=now_utc,
         )
+    if publication.publication_type == "champion_predictions":
+        return _render_champion_predictions(
+            database_path=database_path,
+            contest_id=publication.contest_id,
+            max_message_length=max_message_length,
+            now_utc=now_utc,
+        )
     if publication.publication_type == "contest_completed":
         return _render_contest_completed(
             database_path=database_path,
@@ -292,6 +299,68 @@ def _render_champion_result(
     )
 
 
+def _render_champion_predictions(
+    *,
+    database_path: Path,
+    contest_id: int,
+    max_message_length: int,
+    now_utc: datetime | None,
+) -> tuple[str, ...]:
+    with database_connection(database_path) as connection:
+        contest = connection.execute(
+            """
+            SELECT
+                name,
+                is_active,
+                champion_prediction_enabled,
+                champion_prediction_deadline_at
+            FROM contests
+            WHERE id = ?
+            """,
+            (contest_id,),
+        ).fetchone()
+        if contest is None:
+            raise RuntimeError(
+                "Contest was not found for champion predictions publication."
+            )
+        _validate_champion_publication_deadline(contest, now_utc=now_utc)
+        predictions = connection.execute(
+            """
+            SELECT
+                users.id AS user_id,
+                users.first_name,
+                users.last_name,
+                teams.name AS predicted_team_name
+            FROM champion_predictions
+            JOIN users ON users.id = champion_predictions.user_id
+            JOIN teams ON teams.id = champion_predictions.predicted_team_id
+            WHERE champion_predictions.contest_id = ?
+            ORDER BY
+                users.first_name ASC,
+                COALESCE(users.last_name, '') ASC,
+                users.id ASC
+            """,
+            (contest_id,),
+        ).fetchall()
+
+    header = (
+        "<p>🏆 <b>Прогнозы на чемпиона</b></p>"
+        f"<p>Конкурс: «{escape_rich_text(contest['name'])}»</p>"
+    )
+    lines = tuple(
+        "• "
+        f"{escape_rich_text(_participant_name(row))} — "
+        f"{escape_rich_text(row['predicted_team_name'])}"
+        for row in predictions
+    )
+    return _split_lines(
+        header=header,
+        lines=lines,
+        empty_text="Никто не сделал прогноз на чемпиона.",
+        max_message_length=max_message_length,
+    )
+
+
 def _validate_champion_publication_deadline(contest, *, now_utc) -> None:
     deadline_value = contest["champion_prediction_deadline_at"]
     if not bool(contest["champion_prediction_enabled"]):
@@ -305,7 +374,7 @@ def _validate_champion_publication_deadline(contest, *, now_utc) -> None:
     deadline = datetime.fromisoformat(str(deadline_value).replace("Z", "+00:00"))
     if deadline.tzinfo is None or deadline.utcoffset() is None:
         raise RuntimeError("Champion prediction deadline does not include a timezone.")
-    if deadline > resolve_service_time(now_utc):
+    if bool(contest["is_active"]) and deadline > resolve_service_time(now_utc):
         raise StalePublicationRevision(
             "Champion prediction is still open and cannot be rendered."
         )
@@ -485,3 +554,36 @@ def _single_message(
     if len(rich_html) > max_message_length:
         raise ValueError("Rich Message content does not fit into one message.")
     return (rich_html,)
+
+
+def _split_lines(
+    *,
+    header: str,
+    lines: tuple[str, ...],
+    empty_text: str,
+    max_message_length: int,
+) -> tuple[str, ...]:
+    if not lines:
+        return _single_message(
+            f"{header}<p>{escape_rich_text(empty_text)}</p>",
+            max_message_length=max_message_length,
+        )
+
+    messages: list[str] = []
+    current_lines: list[str] = []
+    for line in lines:
+        candidate_lines = (*current_lines, line)
+        candidate = f"{header}<p>{'<br>'.join(candidate_lines)}</p>"
+        if len(candidate) <= max_message_length:
+            current_lines.append(line)
+            continue
+        if not current_lines:
+            raise ValueError("A champion prediction line does not fit in one message.")
+        messages.append(f"{header}<p>{'<br>'.join(current_lines)}</p>")
+        current_lines = [line]
+        if len(f"{header}<p>{line}</p>") > max_message_length:
+            raise ValueError("A champion prediction line does not fit in one message.")
+
+    if current_lines:
+        messages.append(f"{header}<p>{'<br>'.join(current_lines)}</p>")
+    return tuple(messages)
