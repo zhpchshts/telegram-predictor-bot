@@ -8,6 +8,15 @@ from pathlib import Path
 import secrets
 
 from app.database import database_connection
+from app.publication_outbox import (
+    create_contest_completed_publication,
+    create_or_revise_champion_publication,
+    create_or_revise_match_result_publication,
+    handle_match_publication_deletion,
+    revise_champion_publication_for_related_change,
+    terminalize_champion_publication,
+    transition_contest_publications_for_master_switch,
+)
 from app.scoring_service import (
     recalculate_match_prediction_scores,
     recalculate_tie_prediction_scores,
@@ -647,7 +656,7 @@ def complete_contest(
             sort_keys=True,
         )
 
-        connection.execute(
+        completion_event = connection.execute(
             """
             INSERT INTO event_log (
                 contest_id,
@@ -667,6 +676,20 @@ def complete_contest(
                 contest_id,
                 event_payload,
             ),
+        )
+        if completion_event.lastrowid is None:
+            raise RuntimeError("Не удалось записать событие завершения конкурса.")
+        completion_event_id = int(completion_event.lastrowid)
+        if contest_row["champion_team_id"] is not None:
+            terminalize_champion_publication(
+                connection,
+                contest_id=contest_id,
+                event_id=completion_event_id,
+            )
+        create_contest_completed_publication(
+            connection,
+            contest_id=contest_id,
+            event_id=completion_event_id,
         )
 
 
@@ -1009,6 +1032,54 @@ def delete_match(
             username=username,
         )
 
+        event_payload = json.dumps(
+            {
+                "away_team": {
+                    "id": int(match_row["away_team_id"]),
+                    "name": str(match_row["away_team_name"]),
+                },
+                "home_team": {
+                    "id": int(match_row["home_team_id"]),
+                    "name": str(match_row["home_team_name"]),
+                },
+                "starts_at_utc": str(match_row["starts_at_utc"]),
+                "status": str(match_row["status"]),
+                "tie_id": tie_id,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        deletion_event = connection.execute(
+            """
+            INSERT INTO event_log (
+                contest_id,
+                actor_user_id,
+                event_type,
+                entity_type,
+                entity_id,
+                payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                contest_id,
+                actor_user_id,
+                "match.deleted",
+                "match",
+                match_id,
+                event_payload,
+            ),
+        )
+        if deletion_event.lastrowid is None:
+            raise RuntimeError("Не удалось записать событие удаления матча.")
+        handle_match_publication_deletion(
+            connection,
+            contest_id=contest_id,
+            match_id=match_id,
+            event_id=int(deletion_event.lastrowid),
+        )
+
         deleted_match = connection.execute(
             """
             DELETE FROM matches
@@ -1039,47 +1110,6 @@ def delete_match(
                     """,
                     (tie_id,),
                 )
-
-        event_payload = json.dumps(
-            {
-                "away_team": {
-                    "id": int(match_row["away_team_id"]),
-                    "name": str(match_row["away_team_name"]),
-                },
-                "home_team": {
-                    "id": int(match_row["home_team_id"]),
-                    "name": str(match_row["home_team_name"]),
-                },
-                "starts_at_utc": str(match_row["starts_at_utc"]),
-                "status": str(match_row["status"]),
-                "tie_id": tie_id,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-
-        connection.execute(
-            """
-            INSERT INTO event_log (
-                contest_id,
-                actor_user_id,
-                event_type,
-                entity_type,
-                entity_id,
-                payload_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                contest_id,
-                actor_user_id,
-                "match.deleted",
-                "match",
-                match_id,
-                event_payload,
-            ),
-        )
 
 
 def save_match_prediction(
@@ -1357,7 +1387,7 @@ def save_match_result(
             sort_keys=True,
         )
 
-        connection.execute(
+        event_cursor = connection.execute(
             """
             INSERT INTO event_log (
                 contest_id,
@@ -1381,6 +1411,16 @@ def save_match_result(
                 match_id,
                 event_payload,
             ),
+        )
+        if event_cursor.lastrowid is None:
+            raise RuntimeError("Не удалось записать событие результата матча.")
+        create_or_revise_match_result_publication(
+            connection,
+            contest_id=contest_id,
+            match_id=match_id,
+            event_id=int(event_cursor.lastrowid),
+            was_created=previous_result is None,
+            now_utc=resolved_now_utc,
         )
 
         return MatchResultSaveResult(
@@ -1458,12 +1498,19 @@ def save_match_prediction_publication_settings(
             ),
         )
 
-        _write_match_prediction_publication_event(
+        settings_event_id = _write_match_prediction_publication_event(
             connection,
             contest_id=contest_id,
             actor_user_id=actor_user_id,
             enabled=enabled,
             previous_enabled=was_enabled,
+        )
+        transition_contest_publications_for_master_switch(
+            connection,
+            contest_id=contest_id,
+            enabled=enabled,
+            event_id=settings_event_id,
+            now_utc=resolved_now_utc,
         )
 
 
@@ -1534,7 +1581,7 @@ def save_champion_prediction_settings(
             ),
         )
 
-        _write_champion_event(
+        settings_event_id = _write_champion_event(
             connection,
             contest_id=contest_id,
             actor_user_id=actor_user_id,
@@ -1547,6 +1594,11 @@ def save_champion_prediction_settings(
                 "previous_deadline_at": previous_row["champion_prediction_deadline_at"],
                 "previous_points": int(previous_row["champion_prediction_points"]),
             },
+        )
+        revise_champion_publication_for_related_change(
+            connection,
+            contest_id=contest_id,
+            event_id=settings_event_id,
         )
 
 
@@ -1640,7 +1692,7 @@ def save_champion_prediction(
             (contest_id, user_id, normalized_team_id),
         )
 
-        _write_champion_event(
+        prediction_event_id = _write_champion_event(
             connection,
             contest_id=contest_id,
             actor_user_id=user_id,
@@ -1650,6 +1702,12 @@ def save_champion_prediction(
                 else "champion_prediction.updated"
             ),
             payload={"predicted_team_id": normalized_team_id},
+        )
+        revise_champion_publication_for_related_change(
+            connection,
+            contest_id=contest_id,
+            event_id=prediction_event_id,
+            now_utc=resolved_now_utc,
         )
 
         return _team_summary_from_row(team_row)
@@ -1722,7 +1780,7 @@ def save_contest_champion(
             (normalized_team_id, contest_id),
         )
 
-        _write_champion_event(
+        champion_event_id = _write_champion_event(
             connection,
             contest_id=contest_id,
             actor_user_id=actor_user_id,
@@ -1735,6 +1793,12 @@ def save_contest_champion(
                 "champion_team_id": normalized_team_id,
                 "previous_champion_team_id": previous_champion_team_id,
             },
+        )
+        create_or_revise_champion_publication(
+            connection,
+            contest_id=contest_id,
+            event_id=champion_event_id,
+            was_created=previous_champion_team_id is None,
         )
 
         return _team_summary_from_row(team_row)
@@ -2442,7 +2506,7 @@ def _write_match_prediction_publication_event(
     actor_user_id: int,
     enabled: bool,
     previous_enabled: bool,
-) -> None:
+) -> int:
     event_payload = json.dumps(
         {
             "enabled": enabled,
@@ -2452,7 +2516,7 @@ def _write_match_prediction_publication_event(
         separators=(",", ":"),
         sort_keys=True,
     )
-    connection.execute(
+    cursor = connection.execute(
         """
         INSERT INTO event_log (
             contest_id,
@@ -2473,6 +2537,9 @@ def _write_match_prediction_publication_event(
             event_payload,
         ),
     )
+    if cursor.lastrowid is None:
+        raise RuntimeError("Could not record publication settings event.")
+    return int(cursor.lastrowid)
 
 
 def _write_champion_event(
@@ -2482,8 +2549,8 @@ def _write_champion_event(
     actor_user_id: int,
     event_type: str,
     payload: dict[str, object],
-) -> None:
-    connection.execute(
+) -> int:
+    cursor = connection.execute(
         """
         INSERT INTO event_log (
             contest_id,
@@ -2509,6 +2576,9 @@ def _write_champion_event(
             ),
         ),
     )
+    if cursor.lastrowid is None:
+        raise RuntimeError("Could not record champion event.")
+    return int(cursor.lastrowid)
 
 
 def _get_or_create_first_stage(

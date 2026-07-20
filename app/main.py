@@ -16,6 +16,7 @@ from app.database import initialize_database
 from app.match_prediction_publications import (
     run_match_prediction_publication_worker,
 )
+from app.publication_worker import run_contest_publication_worker
 from app.tma_api import router as tma_api_router
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -43,12 +44,22 @@ def create_app() -> FastAPI:
                 database_path=settings.database_path,
             )
         )
+        contest_publication_task = asyncio.create_task(
+            run_contest_publication_worker(
+                bot=bot,
+                database_path=settings.database_path,
+            )
+        )
 
         try:
             yield
         finally:
+            contest_publication_task.cancel()
             publication_task.cancel()
             polling_task.cancel()
+
+            with suppress(asyncio.CancelledError):
+                await contest_publication_task
 
             with suppress(asyncio.CancelledError):
                 await publication_task

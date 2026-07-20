@@ -2875,8 +2875,8 @@ function createMatchPredictionPublicationSettingsDisclosure(
   const title = createElement("span", {
     className: "match-form-title",
     text: publication.is_enabled
-      ? "Настройки публикации прогнозов"
-      : "Настроить публикацию прогнозов",
+      ? "Настройки публикации прогнозов и результатов"
+      : "Настроить публикацию прогнозов и результатов",
   });
   const overview = createElement("span", {
     className: "match-form-overview",
@@ -2885,8 +2885,9 @@ function createMatchPredictionPublicationSettingsDisclosure(
   const description = createElement("p", {
     className: "subtitle",
     text: (
-      "После начала матча бот отправит в чат сохранённые к этому моменту "
-      + "прогнозы участников."
+      "Бот опубликует прогнозы после начала матча, результаты после их "
+      + "внесения, результаты прогноза на чемпиона и итоговый рейтинг "
+      + "после завершения конкурса."
     ),
   });
   const form = createElement("form", {
@@ -2897,13 +2898,13 @@ function createMatchPredictionPublicationSettingsDisclosure(
   });
   const enabledInput = createElement("input");
   const enabledText = createElement("span", {
-    text: "Публиковать прогнозы в чате при начале матча",
+    text: "Публиковать прогнозы и результаты в чат",
   });
   const hint = createElement("p", {
     className: "form-hint",
     text: (
-      "После включения будут опубликованы только прогнозы матчей, "
-      + "которые начнутся позднее. Уже начавшиеся матчи не публикуются."
+      "Исторические события не публикуются. После включения сообщения "
+      + "будут создаваться только для новых событий конкурса."
     ),
   });
   const message = createElement("p", {

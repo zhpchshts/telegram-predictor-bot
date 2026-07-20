@@ -234,6 +234,69 @@ CREATE TABLE IF NOT EXISTS event_log (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS contest_publications (
+    id INTEGER PRIMARY KEY,
+    contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+    publication_type TEXT NOT NULL CHECK (
+        publication_type IN (
+            'match_result',
+            'champion_result',
+            'contest_completed'
+        )
+    ),
+    entity_id INTEGER NOT NULL,
+    desired_revision INTEGER NOT NULL DEFAULT 1 CHECK (
+        desired_revision >= 1
+    ),
+    settled_revision INTEGER NOT NULL DEFAULT 0 CHECK (
+        settled_revision >= 0
+        AND settled_revision <= desired_revision
+    ),
+    desired_action TEXT NOT NULL DEFAULT 'publish' CHECK (
+        desired_action IN ('publish', 'withdraw')
+    ),
+    delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        delivery_status IN (
+            'pending',
+            'published',
+            'withdrawn',
+            'terminal_failed'
+        )
+    ),
+    first_event_id INTEGER NOT NULL,
+    latest_event_id INTEGER NOT NULL,
+    reconcile_at TEXT,
+    claim_token TEXT,
+    claim_expires_at TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (contest_id, publication_type, entity_id),
+    CHECK (
+        (claim_token IS NULL AND claim_expires_at IS NULL)
+        OR
+        (claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS contest_publication_messages (
+    publication_id INTEGER NOT NULL
+        REFERENCES contest_publications(id) ON DELETE CASCADE,
+    part_number INTEGER NOT NULL CHECK (part_number >= 0),
+    telegram_message_id INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    content_text TEXT,
+    part_status TEXT NOT NULL DEFAULT 'active' CHECK (
+        part_status IN ('active', 'retired', 'terminal_failed')
+    ),
+    last_error TEXT,
+    sent_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (publication_id, part_number)
+);
+
 CREATE INDEX IF NOT EXISTS idx_contests_chat_id
     ON contests(chat_id);
 
@@ -277,6 +340,21 @@ CREATE INDEX IF NOT EXISTS idx_champion_predictions_user_id
 
 CREATE INDEX IF NOT EXISTS idx_event_log_contest_id
     ON event_log(contest_id);
+
+CREATE INDEX IF NOT EXISTS idx_contest_publications_contest_order
+    ON contest_publications(contest_id, first_event_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_contest_publications_due_retry
+    ON contest_publications(next_attempt_at)
+    WHERE next_attempt_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_contest_publications_due_reconcile
+    ON contest_publications(reconcile_at)
+    WHERE reconcile_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_contest_publications_active_claim
+    ON contest_publications(claim_expires_at)
+    WHERE claim_token IS NOT NULL;
 """
 
 
@@ -349,10 +427,32 @@ def _migrate_contests_for_champion_predictions(
         )
 
 
+def _migrate_contest_publication_messages(connection: sqlite3.Connection) -> None:
+    message_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(contest_publication_messages)")
+    }
+    if "last_error" not in message_columns:
+        connection.execute(
+            """
+            ALTER TABLE contest_publication_messages
+            ADD COLUMN last_error TEXT
+            """
+        )
+    if "content_text" not in message_columns:
+        connection.execute(
+            """
+            ALTER TABLE contest_publication_messages
+            ADD COLUMN content_text TEXT
+            """
+        )
+
+
 def initialize_database(database_path: Path) -> None:
     with create_connection(database_path) as connection:
         connection.executescript(SCHEMA)
         _migrate_contests_for_champion_predictions(connection)
+        _migrate_contest_publication_messages(connection)
 
 
 @contextmanager
