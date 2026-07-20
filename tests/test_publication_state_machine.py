@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
 from pathlib import Path
 import sqlite3
 
@@ -12,6 +13,7 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
 )
 from aiogram.methods import SendMessage
+from aiogram.types import InputRichMessage
 import pytest
 
 from app import publication_delivery, publication_worker
@@ -49,22 +51,34 @@ class RecordingBot:
         self.edited: list[dict[str, object]] = []
         self.deleted: list[dict[str, int]] = []
 
-    async def send_message(
-        self, chat_id: int, text: str, *, parse_mode: str
+    async def send_rich_message(
+        self, chat_id: int, *, rich_message: InputRichMessage
     ) -> SentMessage:
         message_id = 1000 + len(self.sent)
-        self.sent.append({"chat_id": chat_id, "text": text})
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "text": rich_message.html,
+                "rich_message": rich_message,
+            }
+        )
         return SentMessage(message_id)
 
     async def edit_message_text(
         self,
-        text: str,
         *,
         chat_id: int,
         message_id: int,
-        parse_mode: str,
+        rich_message: InputRichMessage,
     ) -> bool:
-        self.edited.append({"chat_id": chat_id, "message_id": message_id, "text": text})
+        self.edited.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": rich_message.html,
+                "rich_message": rich_message,
+            }
+        )
         return True
 
     async def delete_message(self, chat_id: int, message_id: int) -> bool:
@@ -111,6 +125,37 @@ def test_claim_loss_before_telegram_call_sends_nothing(tmp_path: Path) -> None:
             )
         )
     assert bot.sent == []
+
+
+def test_rich_content_is_sent_and_hashed_as_raw_utf8_html(tmp_path: Path) -> None:
+    database_path = tmp_path / "predictor.db"
+    _seed_publications(database_path)
+    claim = claim_next_publication(database_path=database_path)
+    assert claim is not None
+    rich_html = "<p><b>Итог</b></p>"
+    bot = RecordingBot()
+
+    asyncio.run(
+        deliver_publication(
+            bot=bot,
+            database_path=database_path,
+            publication=claim,
+            desired_messages=(rich_html,),
+        )
+    )
+
+    sent_rich_message = bot.sent[0]["rich_message"]
+    assert isinstance(sent_rich_message, InputRichMessage)
+    assert sent_rich_message.html == rich_html
+    assert sent_rich_message.skip_entity_detection is True
+    with database_connection(database_path) as connection:
+        stored = connection.execute(
+            "SELECT content_text, content_hash FROM contest_publication_messages"
+        ).fetchone()
+    assert tuple(stored) == (
+        rich_html,
+        hashlib.sha256(rich_html.encode("utf-8")).hexdigest(),
+    )
 
 
 def test_stale_revision_before_telegram_call_is_settled_without_send(
@@ -165,10 +210,10 @@ def test_claim_loss_after_telegram_call_compensates_message(tmp_path: Path) -> N
     assert claim is not None
 
     class ClaimLosingBot(RecordingBot):
-        async def send_message(
-            self, chat_id: int, text: str, *, parse_mode: str
+        async def send_rich_message(
+            self, chat_id: int, *, rich_message: InputRichMessage
         ) -> SentMessage:
-            sent = await super().send_message(chat_id, text, parse_mode=parse_mode)
+            sent = await super().send_rich_message(chat_id, rich_message=rich_message)
             _release_claim(database_path, claim.id)
             return sent
 
@@ -262,7 +307,7 @@ def test_telegram_retry_after_preserves_retry_delay(tmp_path: Path) -> None:
     assert claim is not None
 
     class RetryAfterBot(RecordingBot):
-        async def send_message(self, *args, **kwargs) -> SentMessage:
+        async def send_rich_message(self, *args, **kwargs) -> SentMessage:
             raise TelegramRetryAfter(
                 method=SendMessage(chat_id=-1001, text="x"),
                 message="retry later",
@@ -408,6 +453,8 @@ def test_multipart_shrink_deletes_extra_part(tmp_path: Path) -> None:
         )
     )
     assert bot.deleted == [{"chat_id": -1001, "message_id": 1001}]
+    assert bot.sent == []
+    assert bot.edited == []
     with database_connection(database_path) as connection:
         parts = connection.execute(
             "SELECT part_number FROM contest_publication_messages"
@@ -438,6 +485,12 @@ def test_delete_failure_uses_fallback_neutralization(tmp_path: Path) -> None:
         )
     )
     assert len(bot.edited) == 1
+    retired_message = bot.edited[0]["rich_message"]
+    assert isinstance(retired_message, InputRichMessage)
+    assert retired_message.skip_entity_detection is True
+    assert retired_message.html == (
+        "<p>Продолжение этой публикации больше не актуально.</p>"
+    )
     with database_connection(database_path) as connection:
         status = connection.execute(
             """

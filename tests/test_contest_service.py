@@ -1605,6 +1605,20 @@ def test_leaderboard_uses_sporting_tiebreakers_in_strict_order(
 
     assert [entry.participant_name for entry in leaderboard] == ["Zulu", "Alpha"]
     assert [entry.place for entry in leaderboard] == [1, 2]
+    expected_reason = {
+        "total_points": None,
+        "exact_score_count": "exact_score",
+        "goal_difference_count": "goal_difference",
+        "outcome_count": "outcome",
+        "drawn_advancing_team_count": "drawn_advancing_team",
+        "correct_champion_count": "champion",
+    }[criterion]
+    assert (
+        contest_service.resolve_leaderboard_tiebreak_reason(
+            leaderboard[0], leaderboard[1]
+        )
+        == expected_reason
+    )
 
 
 def test_leaderboard_draw_is_stable_and_ignores_names_and_completeness() -> None:
@@ -1645,6 +1659,12 @@ def test_leaderboard_draw_is_stable_and_ignores_names_and_completeness() -> None
     ]
     assert second_leaderboard == first_leaderboard
     assert [entry.place for entry in first_leaderboard] == [1, 2]
+    assert (
+        contest_service.resolve_leaderboard_tiebreak_reason(
+            first_leaderboard[0], first_leaderboard[1]
+        )
+        == "draw"
+    )
     assert contest_service._leaderboard_tiebreak_digest(
         contest_slug="first-contest",
         telegram_user_id=first_user_id,

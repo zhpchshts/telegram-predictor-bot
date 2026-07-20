@@ -5,10 +5,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from aiogram.types import InputRichMessage
 
+from app import contest_publications
 from app.contest_service import (
+    LeaderboardTiebreakReason,
     complete_contest,
     create_match,
     create_world_cup_2026_contest,
@@ -50,27 +54,32 @@ class RecordingBot:
         self.edited: list[dict[str, object]] = []
         self.deleted: list[dict[str, int]] = []
 
-    async def send_message(
-        self, chat_id: int, text: str, *, parse_mode: str
+    async def send_rich_message(
+        self, chat_id: int, *, rich_message: InputRichMessage
     ) -> SentMessage:
         message_id = 1000 + len(self.sent)
-        self.sent.append({"chat_id": chat_id, "text": text, "parse_mode": parse_mode})
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "text": rich_message.html,
+                "rich_message": rich_message,
+            }
+        )
         return SentMessage(message_id=message_id)
 
     async def edit_message_text(
         self,
-        text: str,
         *,
         chat_id: int,
         message_id: int,
-        parse_mode: str,
+        rich_message: InputRichMessage,
     ) -> bool:
         self.edited.append(
             {
                 "chat_id": chat_id,
                 "message_id": message_id,
-                "text": text,
-                "parse_mode": parse_mode,
+                "text": rich_message.html,
+                "rich_message": rich_message,
             }
         )
         return True
@@ -86,13 +95,13 @@ class FailingBot(RecordingBot):
         self.fail_on_send = fail_on_send
         self.send_attempts = 0
 
-    async def send_message(
-        self, chat_id: int, text: str, *, parse_mode: str
+    async def send_rich_message(
+        self, chat_id: int, *, rich_message: InputRichMessage
     ) -> SentMessage:
         self.send_attempts += 1
         if self.send_attempts == self.fail_on_send:
             raise RuntimeError("Telegram is temporarily unavailable.")
-        return await super().send_message(chat_id, text, parse_mode=parse_mode)
+        return await super().send_rich_message(chat_id, rich_message=rich_message)
 
 
 def test_publication_schema_is_additive_idempotent_and_empty(tmp_path: Path) -> None:
@@ -159,8 +168,13 @@ def test_match_result_publication_is_sent_and_corrected(tmp_path: Path) -> None:
         == 1
     )
     assert len(bot.sent) == 1
+    rich_message = bot.sent[0]["rich_message"]
+    assert isinstance(rich_message, InputRichMessage)
+    assert rich_message.skip_entity_detection is True
     assert "2:1" in str(bot.sent[0]["text"])
-    assert "4 балла" in str(bot.sent[0]["text"])
+    assert "<table bordered striped>" in str(bot.sent[0]["text"])
+    assert '<th align="right">Очки</th>' in str(bot.sent[0]["text"])
+    assert '<td align="right"><b>+4</b></td>' in str(bot.sent[0]["text"])
     assert "Анна &lt;&amp;&gt; Иванова" in str(bot.sent[0]["text"])
 
     save_match_result(
@@ -189,6 +203,32 @@ def test_match_result_publication_is_sent_and_corrected(tmp_path: Path) -> None:
     assert len(bot.sent) == 1
     assert len(bot.edited) == 1
     assert "1:0" in str(bot.edited[0]["text"])
+
+    save_match_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        match_id=match.id,
+        telegram_user_id=USER_ID,
+        first_name="Анна <&>",
+        last_name="Иванова",
+        username="anna",
+        home_score=1,
+        away_score=1,
+        advancing_team_id=match.home_team_id,
+        now_utc=_datetime(14),
+    )
+    assert (
+        asyncio.run(
+            process_due_contest_publications(
+                bot=bot,
+                database_path=database_path,
+            )
+        )
+        == 1
+    )
+    assert len(bot.edited) == 2
+    assert "В следующий раунд проходит Франция" in str(bot.edited[-1]["text"])
 
 
 def test_disabled_first_result_is_not_backfilled_by_correction(
@@ -337,14 +377,10 @@ def test_match_deletion_during_send_is_reconciled_without_untracked_message(
     _save_result(database_path, contest_id=contest_id, match=match)
 
     class DeletingBot(RecordingBot):
-        async def send_message(
-            self, chat_id: int, text: str, *, parse_mode: str
+        async def send_rich_message(
+            self, chat_id: int, *, rich_message: InputRichMessage
         ) -> SentMessage:
-            sent = await super().send_message(
-                chat_id,
-                text,
-                parse_mode=parse_mode,
-            )
+            sent = await super().send_rich_message(chat_id, rich_message=rich_message)
             _delete_match(database_path, contest_id=contest_id, match_id=match.id)
             return sent
 
@@ -441,7 +477,7 @@ def test_final_actions_are_published_in_domain_order(tmp_path: Path) -> None:
         == 3
     )
     assert len(bot.sent) == 3
-    assert "Результаты прогнозов" in str(bot.sent[0]["text"])
+    assert "Прогнозов на этот матч не было" in str(bot.sent[0]["text"])
     assert "Чемпион турнира" in str(bot.sent[1]["text"])
     assert "Итоговый рейтинг" in str(bot.sent[2]["text"])
 
@@ -502,8 +538,43 @@ def test_completion_publication_names_exactly_one_winner_for_tied_points(
 
     assert len(winners) == 1
     assert [entry.place for entry in details.leaderboard] == [1, 2]
-    assert f"Победитель — {winners[0]}!" in completion_text
+    assert f"Победитель — {winners[0]}" in completion_text
     assert "Победители" not in completion_text
+    assert completion_text.count(f"Победитель — {winners[0]}") == 1
+    assert "Победитель определён жребием." in completion_text
+    assert "🥇" in completion_text
+    assert "🥈" in completion_text
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_text"),
+    (
+        ("exact_score", "большему количеству точных счетов"),
+        ("goal_difference", "большему количеству угаданных разниц мячей"),
+        ("outcome", "большему количеству угаданных исходов"),
+        (
+            "drawn_advancing_team",
+            "большему количеству правильных прогнозов прошедшей команды",
+        ),
+        ("champion", "правильному прогнозу чемпиона"),
+        ("draw", "Победитель определён жребием"),
+    ),
+)
+def test_final_publication_formats_only_decisive_tiebreak_reason(
+    reason: LeaderboardTiebreakReason,
+    expected_text: str,
+) -> None:
+    explanation = contest_publications._format_tiebreak_explanation("Анна <&>", reason)
+
+    assert expected_text in explanation
+    assert "Анна &lt;&amp;&gt;" in explanation or reason == "draw"
+
+
+def test_final_publication_rejects_nonconsecutive_places() -> None:
+    with pytest.raises(RuntimeError, match="unique consecutive places"):
+        contest_publications._validate_leaderboard_invariant(
+            (SimpleNamespace(place=1), SimpleNamespace(place=1))
+        )
 
 
 def test_two_workers_do_not_claim_the_same_publication(tmp_path: Path) -> None:
@@ -720,10 +791,10 @@ def test_master_switch_during_send_compensates_untracked_message(
     class DisablingDuringSendBot(RecordingBot):
         changed = False
 
-        async def send_message(
-            self, chat_id: int, text: str, *, parse_mode: str
+        async def send_rich_message(
+            self, chat_id: int, *, rich_message: InputRichMessage
         ) -> SentMessage:
-            sent = await super().send_message(chat_id, text, parse_mode=parse_mode)
+            sent = await super().send_rich_message(chat_id, rich_message=rich_message)
             if not self.changed:
                 self.changed = True
                 _disable_publications(database_path, contest_id=contest_id)
@@ -1002,17 +1073,15 @@ def test_master_switch_during_edit_restores_published_text(tmp_path: Path) -> No
 
         async def edit_message_text(
             self,
-            text: str,
             *,
             chat_id: int,
             message_id: int,
-            parse_mode: str,
+            rich_message: InputRichMessage,
         ) -> bool:
             result = await super().edit_message_text(
-                text,
                 chat_id=chat_id,
                 message_id=message_id,
-                parse_mode=parse_mode,
+                rich_message=rich_message,
             )
             if not self.changed:
                 self.changed = True
@@ -1057,17 +1126,15 @@ def test_stale_edit_withdraw_deletes_message_before_claim_release(
 
         async def edit_message_text(
             self,
-            text: str,
             *,
             chat_id: int,
             message_id: int,
-            parse_mode: str,
+            rich_message: InputRichMessage,
         ) -> bool:
             result = await super().edit_message_text(
-                text,
                 chat_id=chat_id,
                 message_id=message_id,
-                parse_mode=parse_mode,
+                rich_message=rich_message,
             )
             if self.armed and not self.changed:
                 self.changed = True
@@ -1135,17 +1202,15 @@ def test_stale_edit_withdraw_uses_fallback_when_delete_fails(
 
         async def edit_message_text(
             self,
-            text: str,
             *,
             chat_id: int,
             message_id: int,
-            parse_mode: str,
+            rich_message: InputRichMessage,
         ) -> bool:
             result = await super().edit_message_text(
-                text,
                 chat_id=chat_id,
                 message_id=message_id,
-                parse_mode=parse_mode,
+                rich_message=rich_message,
             )
             if self.armed and not self.changed:
                 self.changed = True
@@ -1219,17 +1284,15 @@ def test_stale_publish_edit_is_reconciled_by_new_revision(tmp_path: Path) -> Non
 
         async def edit_message_text(
             self,
-            text: str,
             *,
             chat_id: int,
             message_id: int,
-            parse_mode: str,
+            rich_message: InputRichMessage,
         ) -> bool:
             result = await super().edit_message_text(
-                text,
                 chat_id=chat_id,
                 message_id=message_id,
-                parse_mode=parse_mode,
+                rich_message=rich_message,
             )
             if self.armed and not self.changed:
                 self.changed = True

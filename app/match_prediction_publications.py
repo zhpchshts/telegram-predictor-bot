@@ -3,17 +3,27 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from html import escape
 import logging
 from pathlib import Path
 from typing import Protocol
 
+from aiogram.types import InputRichMessage
+
 from app.database import database_connection
+from app.rich_publications import (
+    RICH_MESSAGE_MAX_LENGTH,
+    RICH_MESSAGE_MAX_TABLE_ROWS,
+    escape_rich_text,
+    rich_message,
+    split_rich_table_messages,
+    table_row,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 MATCH_PREDICTION_PUBLICATION_POLL_INTERVAL_SECONDS = 15.0
-MATCH_PREDICTION_PUBLICATION_MAX_MESSAGE_LENGTH = 3900
+MATCH_PREDICTION_PUBLICATION_MAX_MESSAGE_LENGTH = RICH_MESSAGE_MAX_LENGTH
+MATCH_PREDICTION_PUBLICATION_MAX_TABLE_ROWS = RICH_MESSAGE_MAX_TABLE_ROWS
 
 
 class SentTelegramMessage(Protocol):
@@ -21,12 +31,11 @@ class SentTelegramMessage(Protocol):
 
 
 class TelegramMessageSender(Protocol):
-    async def send_message(
+    async def send_rich_message(
         self,
         chat_id: int,
-        text: str,
         *,
-        parse_mode: str,
+        rich_message: InputRichMessage,
     ) -> SentTelegramMessage: ...
 
 
@@ -63,6 +72,7 @@ async def publish_due_match_predictions(
     database_path: Path,
     now_utc: datetime | None = None,
     max_message_length: int = MATCH_PREDICTION_PUBLICATION_MAX_MESSAGE_LENGTH,
+    max_table_rows: int = MATCH_PREDICTION_PUBLICATION_MAX_TABLE_ROWS,
 ) -> None:
     resolved_now_utc = _resolve_now_utc(now_utc)
     pending_publications = _get_pending_publications(
@@ -77,6 +87,7 @@ async def publish_due_match_predictions(
                 database_path=database_path,
                 publication=publication,
                 max_message_length=max_message_length,
+                max_table_rows=max_table_rows,
             )
         except Exception:
             LOGGER.exception(
@@ -155,6 +166,7 @@ async def _publish_match_predictions(
     database_path: Path,
     publication: PendingMatchPredictionPublication,
     max_message_length: int,
+    max_table_rows: int,
 ) -> None:
     messages = _build_messages(
         publication=publication,
@@ -163,19 +175,19 @@ async def _publish_match_predictions(
             match_id=publication.match_id,
         ),
         max_message_length=max_message_length,
+        max_table_rows=max_table_rows,
     )
     sent_part_numbers = _get_sent_part_numbers(
         database_path=database_path,
         match_id=publication.match_id,
     )
 
-    for part_number, message_text in enumerate(messages):
+    for part_number, rich_html in enumerate(messages):
         if part_number in sent_part_numbers:
             continue
-        telegram_message = await bot.send_message(
+        telegram_message = await bot.send_rich_message(
             chat_id=publication.telegram_chat_id,
-            text=message_text,
-            parse_mode="HTML",
+            rich_message=rich_message(rich_html),
         )
         _save_sent_message(
             database_path=database_path,
@@ -262,49 +274,41 @@ def _build_messages(
     publication: PendingMatchPredictionPublication,
     predictions,
     max_message_length: int,
+    max_table_rows: int = MATCH_PREDICTION_PUBLICATION_MAX_TABLE_ROWS,
 ) -> tuple[str, ...]:
     title = (
-        f"⚽ <b>{escape(publication.home_team_name)} — "
-        f"{escape(publication.away_team_name)}</b>"
+        f"<p><b>⚽ {escape_rich_text(publication.home_team_name)} — "
+        f"{escape_rich_text(publication.away_team_name)}</b></p>"
     )
-    header = (
-        f"{title}\n"
-        f"Конкурс: «{escape(publication.contest_name)}»\n\n"
-        "Матч начался. Прогнозы участников:"
-    )
-    continuation_header = f"{title}\nПродолжение прогнозов участников:"
-    if (
-        len(header) > max_message_length
-        or len(continuation_header) > max_message_length
-    ):
-        raise ValueError("Maximum Telegram message length is too small for the header.")
+    contest_line = f"Конкурс: «{escape_rich_text(publication.contest_name)}»"
+    first_header = f"{title}<p>Матч начался<br>{contest_line}</p>"
+    continuation_header = f"{title}<p>{contest_line}</p>"
 
-    prediction_lines = tuple(
-        _format_prediction_line(prediction) for prediction in predictions
-    )
-    if not prediction_lines:
-        return (f"{header}\n\nПока никто не оставил прогноз.",)
-
-    messages: list[str] = []
-    current_message = header
-    for prediction_line in prediction_lines:
-        candidate = f"{current_message}\n{prediction_line}"
-        if len(candidate) <= max_message_length:
-            current_message = candidate
-            continue
-
-        messages.append(current_message)
-        current_message = f"{continuation_header}\n{prediction_line}"
-        if len(current_message) > max_message_length:
+    if not predictions:
+        message = f"{first_header}<p>Пока никто не оставил прогноз.</p>"
+        if len(message) > max_message_length:
             raise ValueError(
-                "A prediction line does not fit into one Telegram message."
+                "Maximum Rich Message length is too small for the publication."
             )
+        return (message,)
 
-    messages.append(current_message)
-    return tuple(messages)
+    prediction_rows = tuple(
+        _format_prediction_row(prediction) for prediction in predictions
+    )
+    return split_rich_table_messages(
+        first_header=first_header,
+        continuation_header=continuation_header,
+        first_caption=f"Прогнозы участников · {len(prediction_rows)}",
+        continuation_caption="Прогнозы участников · продолжение",
+        column_names=("Участник", "Прогноз"),
+        alignments=("left", "center"),
+        rows=prediction_rows,
+        max_message_length=max_message_length,
+        max_table_rows=max_table_rows,
+    )
 
 
-def _format_prediction_line(prediction) -> str:
+def _format_prediction_row(prediction) -> str:
     participant_name = " ".join(
         part
         for part in (
@@ -318,11 +322,14 @@ def _format_prediction_line(prediction) -> str:
 
     home_score = int(prediction["predicted_home_score"])
     away_score = int(prediction["predicted_away_score"])
-    result = f"{escape(participant_name)} — {home_score}:{away_score}"
+    result = f"{home_score}:{away_score}"
     advancing_team_name = prediction["advancing_team_name"]
     if home_score == away_score and advancing_team_name is not None:
-        return f"• {result}, проходит {escape(str(advancing_team_name))}"
-    return f"• {result}"
+        result += f" → {escape_rich_text(advancing_team_name)}"
+    return table_row(
+        (escape_rich_text(participant_name), result),
+        alignments=("left", "center"),
+    )
 
 
 def _resolve_now_utc(now_utc: datetime | None) -> datetime:

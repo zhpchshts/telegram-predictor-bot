@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from aiogram.types import InputRichMessage
+
 from app.database import database_connection, initialize_database
 from app.match_prediction_publications import publish_due_match_predictions
 
@@ -19,12 +21,11 @@ class RecordingBot:
         self.fail_on_call_number = fail_on_call_number
         self.calls: list[dict[str, object]] = []
 
-    async def send_message(
+    async def send_rich_message(
         self,
         chat_id: int,
-        text: str,
         *,
-        parse_mode: str,
+        rich_message: InputRichMessage,
     ) -> SentMessage:
         call_number = len(self.calls) + 1
         if self.fail_on_call_number == call_number:
@@ -32,8 +33,8 @@ class RecordingBot:
         self.calls.append(
             {
                 "chat_id": chat_id,
-                "text": text,
-                "parse_mode": parse_mode,
+                "text": rich_message.html,
+                "rich_message": rich_message,
             }
         )
         return SentMessage(message_id=1000 + call_number)
@@ -150,16 +151,27 @@ def test_due_match_publication_shows_predictions_and_is_not_repeated(
 
     assert len(bot.calls) == 1
     assert bot.calls[0]["chat_id"] == -1001234567890
-    assert bot.calls[0]["parse_mode"] == "HTML"
+    rich_message = bot.calls[0]["rich_message"]
+    assert isinstance(rich_message, InputRichMessage)
+    assert rich_message.skip_entity_detection is True
     published_text = str(bot.calls[0]["text"])
-    assert "⚽ <b>Парагвай — Франция</b>" in published_text
-    assert "• Анна Иванова — 1:1, проходит Франция" in published_text
-    assert "• Борис — 2:0" in published_text
+    assert "<p><b>⚽ Парагвай — Франция</b></p>" in published_text
+    assert "<table bordered striped>" in published_text
+    assert "<caption>Прогнозы участников · 3</caption>" in published_text
+    assert '<th align="left">Участник</th>' in published_text
+    assert '<th align="center">Прогноз</th>' in published_text
+    assert '<td align="left">Анна Иванова</td>' in published_text
+    assert '<td align="center">1:1 → Франция</td>' in published_text
+    assert '<td align="left">Борис</td>' in published_text
+    assert '<td align="center">2:0</td>' in published_text
     assert (
-        "• Илья &lt;&amp;&gt; Тест — 0:0, проходит Парагвай &amp; Франция"
-        in published_text
+        '<td align="left">Илья &lt;&amp;&gt; Тест</td>'
+        '<td align="center">0:0 → Парагвай &amp; Франция</td>' in published_text
     )
     assert "Без Прогноза" not in published_text
+    assert published_text.index("Анна Иванова") < published_text.index("Борис")
+    assert published_text.index("Борис") < published_text.index("Илья")
+    assert "<pre" not in published_text
 
     with database_connection(database_path) as connection:
         completed_row = connection.execute(
@@ -183,6 +195,34 @@ def test_due_match_publication_shows_predictions_and_is_not_repeated(
     assert [(row["part_number"], row["telegram_message_id"]) for row in sent_rows] == [
         (0, 1001)
     ]
+
+
+def test_due_match_without_predictions_uses_rich_empty_state(tmp_path: Path) -> None:
+    database_path = tmp_path / "predictor.db"
+    activation_time = _datetime(12, 0)
+    _seed_match(
+        database_path=database_path,
+        starts_at_utc=_datetime(12, 1),
+        publication_enabled_at=activation_time,
+        participants=(),
+    )
+    bot = RecordingBot()
+
+    asyncio.run(
+        publish_due_match_predictions(
+            bot=bot,
+            database_path=database_path,
+            now_utc=_datetime(12, 2),
+        )
+    )
+
+    assert len(bot.calls) == 1
+    rich_message = bot.calls[0]["rich_message"]
+    assert isinstance(rich_message, InputRichMessage)
+    assert rich_message.skip_entity_detection is True
+    assert rich_message.html is not None
+    assert "Пока никто не оставил прогноз." in rich_message.html
+    assert "<table" not in rich_message.html
 
 
 def test_retry_continues_from_the_first_unsent_message_part(tmp_path: Path) -> None:
@@ -218,7 +258,7 @@ def test_retry_continues_from_the_first_unsent_message_part(tmp_path: Path) -> N
             bot=failing_bot,
             database_path=database_path,
             now_utc=_datetime(12, 2),
-            max_message_length=260,
+            max_message_length=1000,
         )
     )
     assert len(failing_bot.calls) == 1
@@ -250,7 +290,7 @@ def test_retry_continues_from_the_first_unsent_message_part(tmp_path: Path) -> N
             bot=retry_bot,
             database_path=database_path,
             now_utc=_datetime(12, 3),
-            max_message_length=260,
+            max_message_length=1000,
         )
     )
     assert retry_bot.calls

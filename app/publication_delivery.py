@@ -15,6 +15,7 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
     TelegramServerError,
 )
+from aiogram.types import InputRichMessage
 
 from app.contest_publications import (
     get_publication_chat_id,
@@ -31,6 +32,7 @@ from app.publication_outbox import (
     resolve_service_time,
     serialize_service_time,
 )
+from app.rich_publications import rich_message
 
 
 LOGGER = logging.getLogger(__name__)
@@ -42,17 +44,19 @@ class SentTelegramMessage(Protocol):
 
 
 class TelegramPublicationClient(Protocol):
-    async def send_message(
-        self, chat_id: int, text: str, *, parse_mode: str
+    async def send_rich_message(
+        self,
+        chat_id: int,
+        *,
+        rich_message: InputRichMessage,
     ) -> SentTelegramMessage: ...
 
     async def edit_message_text(
         self,
-        text: str,
         *,
         chat_id: int,
         message_id: int,
-        parse_mode: str,
+        rich_message: InputRichMessage,
     ) -> object: ...
 
     async def delete_message(self, chat_id: int, message_id: int) -> bool: ...
@@ -209,7 +213,10 @@ async def _send_new_part(
     await _require_renewed_claim(database_path=database_path, publication=publication)
     try:
         sent = await asyncio.wait_for(
-            bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML"),
+            bot.send_rich_message(
+                chat_id=chat_id,
+                rich_message=rich_message(text),
+            ),
             timeout=timeout_seconds,
         )
     except Exception as error:
@@ -280,7 +287,10 @@ async def _send_replacement_part(
     await _require_renewed_claim(database_path=database_path, publication=publication)
     try:
         sent = await asyncio.wait_for(
-            bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML"),
+            bot.send_rich_message(
+                chat_id=chat_id,
+                rich_message=rich_message(text),
+            ),
             timeout=timeout_seconds,
         )
     except Exception as error:
@@ -362,10 +372,9 @@ async def _edit_part(
     try:
         await asyncio.wait_for(
             bot.edit_message_text(
-                text,
                 chat_id=chat_id,
                 message_id=message_id,
-                parse_mode="HTML",
+                rich_message=rich_message(text),
             ),
             timeout=timeout_seconds,
         )
@@ -716,10 +725,9 @@ async def _compensate_stale_edit(
     try:
         await asyncio.wait_for(
             bot.edit_message_text(
-                fallback_text,
                 chat_id=chat_id,
                 message_id=message_id,
-                parse_mode="HTML",
+                rich_message=rich_message(fallback_text),
             ),
             timeout=timeout_seconds,
         )
@@ -767,10 +775,9 @@ async def _compensate_disabled_edit(
         try:
             await asyncio.wait_for(
                 bot.edit_message_text(
-                    previous_text,
                     chat_id=chat_id,
                     message_id=message_id,
-                    parse_mode="HTML",
+                    rich_message=rich_message(previous_text),
                 ),
                 timeout=timeout_seconds,
             )
@@ -798,10 +805,9 @@ async def _compensate_disabled_edit(
     try:
         await asyncio.wait_for(
             bot.edit_message_text(
-                fallback_text,
                 chat_id=chat_id,
                 message_id=message_id,
-                parse_mode="HTML",
+                rich_message=rich_message(fallback_text),
             ),
             timeout=timeout_seconds,
         )

@@ -1,19 +1,31 @@
 from __future__ import annotations
 
 from datetime import datetime
-from html import escape
 from pathlib import Path
 
-from app.contest_service import get_contest_details
+from app.contest_service import (
+    LeaderboardTiebreakReason,
+    get_contest_details,
+    resolve_leaderboard_tiebreak_reason,
+)
 from app.database import database_connection
 from app.publication_outbox import (
     ClaimedPublication,
     StalePublicationRevision,
     resolve_service_time,
 )
+from app.rich_publications import (
+    RICH_MESSAGE_MAX_LENGTH,
+    RICH_MESSAGE_MAX_TABLE_ROWS,
+    escape_rich_text,
+    format_awarded_points,
+    split_rich_table_messages,
+    table_row,
+)
 
 
-PUBLICATION_MAX_MESSAGE_LENGTH = 3900
+PUBLICATION_MAX_MESSAGE_LENGTH = RICH_MESSAGE_MAX_LENGTH
+PUBLICATION_MAX_TABLE_ROWS = RICH_MESSAGE_MAX_TABLE_ROWS
 
 
 def render_publication_messages(
@@ -21,6 +33,7 @@ def render_publication_messages(
     database_path: Path,
     publication: ClaimedPublication,
     max_message_length: int = PUBLICATION_MAX_MESSAGE_LENGTH,
+    max_table_rows: int = PUBLICATION_MAX_TABLE_ROWS,
     now_utc: datetime | None = None,
 ) -> tuple[str, ...]:
     if publication.desired_action == "withdraw":
@@ -30,12 +43,14 @@ def render_publication_messages(
             database_path=database_path,
             match_id=publication.entity_id,
             max_message_length=max_message_length,
+            max_table_rows=max_table_rows,
         )
     if publication.publication_type == "champion_result":
         return _render_champion_result(
             database_path=database_path,
             contest_id=publication.contest_id,
             max_message_length=max_message_length,
+            max_table_rows=max_table_rows,
             now_utc=now_utc,
         )
     if publication.publication_type == "contest_completed":
@@ -43,6 +58,7 @@ def render_publication_messages(
             database_path=database_path,
             contest_id=publication.contest_id,
             max_message_length=max_message_length,
+            max_table_rows=max_table_rows,
         )
     raise RuntimeError(f"Unknown publication type: {publication.publication_type}")
 
@@ -65,16 +81,20 @@ def get_publication_chat_id(*, database_path: Path, contest_id: int) -> int:
 
 def withdrawal_fallback_text(publication: ClaimedPublication) -> str:
     if publication.publication_type == "match_result":
-        return "Эта публикация больше не актуальна: матч удалён из конкурса."
-    return "Эта публикация больше не актуальна."
+        return "<p>Эта публикация больше не актуальна: матч удалён из конкурса.</p>"
+    return "<p>Эта публикация больше не актуальна.</p>"
 
 
 def retired_part_fallback_text() -> str:
-    return "Продолжение этой публикации больше не актуально."
+    return "<p>Продолжение этой публикации больше не актуально.</p>"
 
 
 def _render_match_result(
-    *, database_path: Path, match_id: int, max_message_length: int
+    *,
+    database_path: Path,
+    match_id: int,
+    max_message_length: int,
+    max_table_rows: int,
 ) -> tuple[str, ...]:
     with database_connection(database_path) as connection:
         match = connection.execute(
@@ -138,6 +158,7 @@ def _render_match_result(
                     tie_predictions.predicted_advancing_team_id
             WHERE match_predictions.match_id = ?
             ORDER BY
+                match_points + advancing_points DESC,
                 users.first_name COLLATE NOCASE ASC,
                 COALESCE(users.last_name, '') COLLATE NOCASE ASC,
                 users.id ASC
@@ -148,30 +169,37 @@ def _render_match_result(
     home_score = int(match["home_score_final"])
     away_score = int(match["away_score_final"])
     title = (
-        f"🏁 <b>{escape(str(match['home_team_name']))} — "
-        f"{escape(str(match['away_team_name']))}: {home_score}:{away_score}</b>"
+        f"<p><b>🏁 {escape_rich_text(match['home_team_name'])} "
+        f"{home_score}:{away_score} "
+        f"{escape_rich_text(match['away_team_name'])}</b></p>"
     )
-    header_lines = [title, f"Конкурс: «{escape(str(match['contest_name']))}»"]
+    advancement = ""
     if home_score == away_score and match["advancing_team_name"] is not None:
-        header_lines.append(f"Проходит: {escape(str(match['advancing_team_name']))}")
-    header_lines.extend(("", "Результаты прогнозов:"))
-    header = "\n".join(header_lines)
-    continuation = f"{title}\nПродолжение результатов прогнозов:"
+        advancement = (
+            "<p>В следующий раунд проходит "
+            f"{escape_rich_text(match['advancing_team_name'])}</p>"
+        )
+    contest_line = f"<p>Конкурс: «{escape_rich_text(match['contest_name'])}»</p>"
+    first_header = f"{title}{advancement}{contest_line}"
+    continuation_header = f"{title}{contest_line}"
 
     if not predictions:
-        return _split_lines(
-            header=header,
-            continuation_header=continuation,
-            body_lines=("Прогнозов на этот матч не было.",),
+        return _single_message(
+            f"{first_header}<p>Прогнозов на этот матч не было.</p>",
             max_message_length=max_message_length,
         )
 
-    body_lines = tuple(_format_match_prediction(row) for row in predictions)
-    return _split_lines(
-        header=header,
-        continuation_header=continuation,
-        body_lines=body_lines,
+    rows = tuple(_format_match_prediction_row(row) for row in predictions)
+    return split_rich_table_messages(
+        first_header=first_header,
+        continuation_header=continuation_header,
+        first_caption="Очки за матч",
+        continuation_caption="Очки за матч · продолжение",
+        column_names=("Участник", "Прогноз", "Очки"),
+        alignments=("left", "center", "right"),
+        rows=rows,
         max_message_length=max_message_length,
+        max_table_rows=max_table_rows,
     )
 
 
@@ -180,6 +208,7 @@ def _render_champion_result(
     database_path: Path,
     contest_id: int,
     max_message_length: int,
+    max_table_rows: int,
     now_utc: datetime | None,
 ) -> tuple[str, ...]:
     with database_connection(database_path) as connection:
@@ -202,26 +231,7 @@ def _render_champion_result(
         if contest is None or contest["champion_name"] is None:
             raise RuntimeError("Champion data was not found for publication.")
         if bool(contest["is_active"]):
-            deadline_value = contest["champion_prediction_deadline_at"]
-            if not bool(contest["champion_prediction_enabled"]):
-                raise StalePublicationRevision(
-                    "Champion prediction was disabled before rendering."
-                )
-            if deadline_value is None:
-                raise StalePublicationRevision(
-                    "Champion prediction deadline is not configured."
-                )
-            deadline = datetime.fromisoformat(
-                str(deadline_value).replace("Z", "+00:00")
-            )
-            if deadline.tzinfo is None or deadline.utcoffset() is None:
-                raise RuntimeError(
-                    "Champion prediction deadline does not include a timezone."
-                )
-            if deadline > resolve_service_time(now_utc):
-                raise StalePublicationRevision(
-                    "Champion prediction is still open and cannot be rendered."
-                )
+            _validate_champion_publication_deadline(contest, now_utc=now_utc)
 
         predictions = connection.execute(
             """
@@ -230,9 +240,12 @@ def _render_champion_result(
                 users.first_name,
                 users.last_name,
                 predicted_team.name AS predicted_team_name,
-                champion_predictions.predicted_team_id,
-                contests.champion_team_id,
-                contests.champion_prediction_points
+                CASE
+                    WHEN champion_predictions.predicted_team_id =
+                        contests.champion_team_id
+                    THEN contests.champion_prediction_points
+                    ELSE 0
+                END AS awarded_points
             FROM champion_predictions
             JOIN users ON users.id = champion_predictions.user_id
             JOIN teams AS predicted_team
@@ -240,6 +253,7 @@ def _render_champion_result(
             JOIN contests ON contests.id = champion_predictions.contest_id
             WHERE champion_predictions.contest_id = ?
             ORDER BY
+                awarded_points DESC,
                 users.first_name COLLATE NOCASE ASC,
                 COALESCE(users.last_name, '') COLLATE NOCASE ASC,
                 users.id ASC
@@ -247,25 +261,57 @@ def _render_champion_result(
             (contest_id,),
         ).fetchall()
 
-    title = f"🏆 <b>Чемпион турнира — {escape(str(contest['champion_name']))}</b>"
-    header = (
-        f"{title}\nКонкурс: «{escape(str(contest['name']))}»\n\nРезультаты прогнозов:"
+    title = (
+        "<p><b>🏆 Чемпион турнира — "
+        f"{escape_rich_text(contest['champion_name'])}</b></p>"
     )
-    continuation = f"{title}\nПродолжение результатов прогнозов:"
+    contest_line = f"<p>Конкурс: «{escape_rich_text(contest['name'])}»</p>"
+    header = f"{title}{contest_line}"
     if not predictions:
-        body_lines = ("Никто не сделал прогноз на чемпиона.",)
-    else:
-        body_lines = tuple(_format_champion_prediction(row) for row in predictions)
-    return _split_lines(
-        header=header,
-        continuation_header=continuation,
-        body_lines=body_lines,
+        return _single_message(
+            f"{header}<p>Никто не сделал прогноз на чемпиона.</p>",
+            max_message_length=max_message_length,
+        )
+
+    rows = tuple(_format_champion_prediction_row(row) for row in predictions)
+    return split_rich_table_messages(
+        first_header=header,
+        continuation_header=header,
+        first_caption="Очки за прогноз",
+        continuation_caption="Очки за прогноз · продолжение",
+        column_names=("Участник", "Прогноз", "Очки"),
+        alignments=("left", "center", "right"),
+        rows=rows,
         max_message_length=max_message_length,
+        max_table_rows=max_table_rows,
     )
+
+
+def _validate_champion_publication_deadline(contest, *, now_utc) -> None:
+    deadline_value = contest["champion_prediction_deadline_at"]
+    if not bool(contest["champion_prediction_enabled"]):
+        raise StalePublicationRevision(
+            "Champion prediction was disabled before rendering."
+        )
+    if deadline_value is None:
+        raise StalePublicationRevision(
+            "Champion prediction deadline is not configured."
+        )
+    deadline = datetime.fromisoformat(str(deadline_value).replace("Z", "+00:00"))
+    if deadline.tzinfo is None or deadline.utcoffset() is None:
+        raise RuntimeError("Champion prediction deadline does not include a timezone.")
+    if deadline > resolve_service_time(now_utc):
+        raise StalePublicationRevision(
+            "Champion prediction is still open and cannot be rendered."
+        )
 
 
 def _render_contest_completed(
-    *, database_path: Path, contest_id: int, max_message_length: int
+    *,
+    database_path: Path,
+    contest_id: int,
+    max_message_length: int,
+    max_table_rows: int,
 ) -> tuple[str, ...]:
     with database_connection(database_path) as connection:
         row = connection.execute(
@@ -285,62 +331,85 @@ def _render_contest_completed(
         telegram_chat_id=int(row["telegram_chat_id"]),
         contest_id=contest_id,
     )
-    title = f"🍀 <b>Конкурс «{escape(str(row['name']))}» завершён</b>"
-    header = f"{title}\n\nИтоговый рейтинг:"
-    continuation = f"{title}\nПродолжение итогового рейтинга:"
+    title = f"<p><b>🍀 Конкурс «{escape_rich_text(row['name'])}» завершён</b></p>"
     if not details.leaderboard:
-        body_lines = ("В рейтинге нет участников.",)
-    else:
-        rating_lines = tuple(
-            _format_leaderboard_entry(entry) for entry in details.leaderboard
+        return _single_message(
+            f"{title}<p>В рейтинге нет участников.</p>",
+            max_message_length=max_message_length,
         )
-        winners = tuple(
-            entry.participant_name for entry in details.leaderboard if entry.place == 1
+
+    _validate_leaderboard_invariant(details.leaderboard)
+    winner = details.leaderboard[0]
+    winner_line = (
+        f"<p><b>🏆 Победитель — {escape_rich_text(winner.participant_name)}</b></p>"
+    )
+    explanation = ""
+    if len(details.leaderboard) > 1:
+        reason = resolve_leaderboard_tiebreak_reason(
+            winner,
+            details.leaderboard[1],
         )
-        winner_label = "Победитель" if len(winners) == 1 else "Победители"
-        body_lines = rating_lines + (
-            "",
-            f"{winner_label} — {escape(', '.join(winners))}!",
-        )
-    return _split_lines(
-        header=header,
-        continuation_header=continuation,
-        body_lines=body_lines,
+        if reason is not None:
+            explanation = (
+                f"<p>{_format_tiebreak_explanation(winner.participant_name, reason)}"
+                "</p>"
+            )
+
+    rows = tuple(_format_leaderboard_row(entry) for entry in details.leaderboard)
+    return split_rich_table_messages(
+        first_header=f"{title}{winner_line}{explanation}",
+        continuation_header=title,
+        first_caption="Итоговый рейтинг",
+        continuation_caption="Итоговый рейтинг · продолжение",
+        column_names=("Место", "Участник", "Очки"),
+        alignments=("center", "left", "right"),
+        rows=rows,
         max_message_length=max_message_length,
+        max_table_rows=max_table_rows,
     )
 
 
-def _format_match_prediction(row) -> str:
-    participant = _participant_name(row)
+def _format_match_prediction_row(row) -> str:
     home_score = int(row["predicted_home_score"])
     away_score = int(row["predicted_away_score"])
-    prediction = f"{escape(participant)} — {home_score}:{away_score}"
+    prediction = f"{home_score}:{away_score}"
     if home_score == away_score and row["advancing_team_name"] is not None:
-        prediction += f", проходит {escape(str(row['advancing_team_name']))}"
+        prediction += f" → {escape_rich_text(row['advancing_team_name'])}"
     points = int(row["match_points"]) + int(row["advancing_points"])
-    return f"• {prediction} — {points} {_points_label(points)}"
-
-
-def _format_champion_prediction(row) -> str:
-    participant = escape(_participant_name(row))
-    team = escape(str(row["predicted_team_name"]))
-    points = (
-        int(row["champion_prediction_points"])
-        if int(row["predicted_team_id"]) == int(row["champion_team_id"])
-        else 0
+    points_text = format_awarded_points(points)
+    if points > 0:
+        points_text = f"<b>{points_text}</b>"
+    return table_row(
+        (escape_rich_text(_participant_name(row)), prediction, points_text),
+        alignments=("left", "center", "right"),
     )
-    formatted_points = f"+{points}" if points > 0 else "0"
-    return f"• {participant} — {team} — {formatted_points} {_points_label(points)}"
 
 
-def _format_leaderboard_entry(entry) -> str:
-    place_label = {1: "🥇", 2: "🥈", 3: "🥉"}.get(
-        entry.place,
-        f"{entry.place}.",
+def _format_champion_prediction_row(row) -> str:
+    points = int(row["awarded_points"])
+    points_text = format_awarded_points(points)
+    if points > 0:
+        points_text = f"<b>{points_text}</b>"
+    return table_row(
+        (
+            escape_rich_text(_participant_name(row)),
+            escape_rich_text(row["predicted_team_name"]),
+            points_text,
+        ),
+        alignments=("left", "center", "right"),
     )
-    return (
-        f"{place_label} {escape(entry.participant_name)} — "
-        f"{entry.total_points} {_points_label(entry.total_points)}"
+
+
+def _format_leaderboard_row(entry) -> str:
+    place = {1: "🥇", 2: "🥈", 3: "🥉"}.get(entry.place, str(entry.place))
+    participant = escape_rich_text(entry.participant_name)
+    points = str(entry.total_points)
+    if entry.place == 1:
+        participant = f"<b>{participant}</b>"
+        points = f"<b>{points}</b>"
+    return table_row(
+        (place, participant, points),
+        alignments=("center", "left", "right"),
     )
 
 
@@ -356,40 +425,54 @@ def _participant_name(row) -> str:
     return name or f"Участник {int(row['user_id'])}"
 
 
-def _points_label(points: int) -> str:
-    absolute = abs(points)
-    if absolute % 100 in range(11, 15):
-        return "баллов"
-    if absolute % 10 == 1:
-        return "балл"
-    if absolute % 10 in range(2, 5):
-        return "балла"
-    return "баллов"
+def _validate_leaderboard_invariant(leaderboard) -> None:
+    expected_places = tuple(range(1, len(leaderboard) + 1))
+    actual_places = tuple(entry.place for entry in leaderboard)
+    if actual_places != expected_places:
+        raise RuntimeError(
+            "Leaderboard must contain unique consecutive places starting at one."
+        )
 
 
-def _split_lines(
+def _format_tiebreak_explanation(
+    winner_name: str,
+    reason: LeaderboardTiebreakReason,
+) -> str:
+    winner = escape_rich_text(winner_name)
+    explanations = {
+        "exact_score": (
+            f"При равенстве очков {winner} занял первое место благодаря "
+            "большему количеству точных счетов."
+        ),
+        "goal_difference": (
+            f"При равенстве очков {winner} занял первое место благодаря "
+            "большему количеству угаданных разниц мячей."
+        ),
+        "outcome": (
+            f"При равенстве очков {winner} занял первое место благодаря "
+            "большему количеству угаданных исходов."
+        ),
+        "drawn_advancing_team": (
+            f"При равенстве очков {winner} занял первое место благодаря "
+            "большему количеству правильных прогнозов прошедшей команды."
+        ),
+        "champion": (
+            f"При равенстве очков {winner} занял первое место благодаря "
+            "правильному прогнозу чемпиона."
+        ),
+        "draw": (
+            "Все дополнительные показатели участников с первого и второго "
+            "места совпали. Победитель определён жребием."
+        ),
+    }
+    return explanations[reason]
+
+
+def _single_message(
+    rich_html: str,
     *,
-    header: str,
-    continuation_header: str,
-    body_lines: tuple[str, ...],
     max_message_length: int,
 ) -> tuple[str, ...]:
-    if (
-        len(header) > max_message_length
-        or len(continuation_header) > max_message_length
-    ):
-        raise ValueError("Maximum Telegram message length is too small for the header.")
-
-    messages: list[str] = []
-    current = header
-    for line in body_lines:
-        candidate = f"{current}\n{line}"
-        if len(candidate) <= max_message_length:
-            current = candidate
-            continue
-        messages.append(current)
-        current = f"{continuation_header}\n{line}"
-        if len(current) > max_message_length:
-            raise ValueError("A publication line does not fit into one message.")
-    messages.append(current)
-    return tuple(messages)
+    if len(rich_html) > max_message_length:
+        raise ValueError("Rich Message content does not fit into one message.")
+    return (rich_html,)

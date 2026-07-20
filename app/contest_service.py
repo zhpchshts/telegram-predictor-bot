@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import secrets
+from typing import Literal
 
 from app.database import database_connection
 from app.publication_outbox import (
@@ -141,6 +142,33 @@ class ChampionPredictionHistory:
 
 
 @dataclass(frozen=True, slots=True)
+class LeaderboardTiebreakMetrics:
+    exact_score_count: int
+    goal_difference_count: int
+    outcome_count: int
+    drawn_advancing_team_count: int
+    correct_champion_count: int
+
+
+LeaderboardTiebreakReason = Literal[
+    "exact_score",
+    "goal_difference",
+    "outcome",
+    "drawn_advancing_team",
+    "champion",
+    "draw",
+]
+
+LEADERBOARD_SPORTING_TIEBREAKS: tuple[tuple[LeaderboardTiebreakReason, str], ...] = (
+    ("exact_score", "exact_score_count"),
+    ("goal_difference", "goal_difference_count"),
+    ("outcome", "outcome_count"),
+    ("drawn_advancing_team", "drawn_advancing_team_count"),
+    ("champion", "correct_champion_count"),
+)
+
+
+@dataclass(frozen=True, slots=True)
 class ContestLeaderboardEntry:
     place: int
     participant_name: str
@@ -148,6 +176,7 @@ class ContestLeaderboardEntry:
     match_predictions_count: int
     champion_prediction_count: int
     total_matches_count: int
+    tiebreak_metrics: LeaderboardTiebreakMetrics
     prediction_history: tuple[MatchSummary, ...] = ()
     champion_prediction_history: ChampionPredictionHistory | None = None
 
@@ -3009,19 +3038,7 @@ def _contest_leaderboard_from_rows(
 
     sorted_rows = sorted(
         rows,
-        key=lambda row: (
-            -int(row["total_points"]),
-            -int(row["exact_score_count"]),
-            -int(row["goal_difference_count"]),
-            -int(row["outcome_count"]),
-            -int(row["drawn_advancing_team_count"]),
-            -int(row["correct_champion_count"]),
-            _leaderboard_tiebreak_digest(
-                contest_slug=contest_slug,
-                telegram_user_id=int(row["telegram_user_id"]),
-            ),
-            int(row["telegram_user_id"]),
-        ),
+        key=lambda row: _leaderboard_sort_key(row, contest_slug=contest_slug),
     )
 
     for place, row in enumerate(sorted_rows, start=1):
@@ -3041,6 +3058,7 @@ def _contest_leaderboard_from_rows(
                 match_predictions_count=int(row["match_predictions_count"]),
                 champion_prediction_count=int(row["champion_prediction_count"]),
                 total_matches_count=int(row["total_matches_count"]),
+                tiebreak_metrics=_leaderboard_tiebreak_metrics(row),
                 prediction_history=history_by_user.get(int(row["user_id"]), ()),
                 champion_prediction_history=champion_history_by_user.get(
                     int(row["user_id"]),
@@ -3049,6 +3067,52 @@ def _contest_leaderboard_from_rows(
         )
 
     return tuple(leaderboard)
+
+
+def resolve_leaderboard_tiebreak_reason(
+    winner: ContestLeaderboardEntry,
+    runner_up: ContestLeaderboardEntry,
+) -> LeaderboardTiebreakReason | None:
+    if winner.total_points != runner_up.total_points:
+        return None
+    for reason, attribute in LEADERBOARD_SPORTING_TIEBREAKS:
+        winner_value = getattr(winner.tiebreak_metrics, attribute)
+        runner_up_value = getattr(runner_up.tiebreak_metrics, attribute)
+        if winner_value > runner_up_value:
+            return reason
+        if winner_value < runner_up_value:
+            raise RuntimeError(
+                "Leaderboard order contradicts its sporting tiebreak metrics."
+            )
+    return "draw"
+
+
+def _leaderboard_sort_key(row, *, contest_slug: str) -> tuple[object, ...]:
+    metrics = _leaderboard_tiebreak_metrics(row)
+    sporting_key = tuple(
+        -int(getattr(metrics, attribute))
+        for _, attribute in LEADERBOARD_SPORTING_TIEBREAKS
+    )
+    telegram_user_id = int(row["telegram_user_id"])
+    return (
+        -int(row["total_points"]),
+        *sporting_key,
+        _leaderboard_tiebreak_digest(
+            contest_slug=contest_slug,
+            telegram_user_id=telegram_user_id,
+        ),
+        telegram_user_id,
+    )
+
+
+def _leaderboard_tiebreak_metrics(row) -> LeaderboardTiebreakMetrics:
+    return LeaderboardTiebreakMetrics(
+        exact_score_count=int(row["exact_score_count"]),
+        goal_difference_count=int(row["goal_difference_count"]),
+        outcome_count=int(row["outcome_count"]),
+        drawn_advancing_team_count=int(row["drawn_advancing_team_count"]),
+        correct_champion_count=int(row["correct_champion_count"]),
+    )
 
 
 def _leaderboard_tiebreak_digest(
