@@ -227,7 +227,6 @@ def _render_champion_result(
             """
             SELECT
                 contests.name,
-                contests.is_active,
                 contests.champion_prediction_enabled,
                 contests.champion_prediction_deadline_at,
                 contests.champion_prediction_points,
@@ -241,8 +240,7 @@ def _render_champion_result(
         ).fetchone()
         if contest is None or contest["champion_name"] is None:
             raise RuntimeError("Champion data was not found for publication.")
-        if bool(contest["is_active"]):
-            _validate_champion_publication_deadline(contest, now_utc=now_utc)
+        _validate_champion_publication_deadline(contest, now_utc=now_utc)
 
         predictions = connection.execute(
             """
@@ -311,7 +309,6 @@ def _render_champion_predictions(
             """
             SELECT
                 name,
-                is_active,
                 champion_prediction_enabled,
                 champion_prediction_deadline_at
             FROM contests
@@ -374,7 +371,7 @@ def _validate_champion_publication_deadline(contest, *, now_utc) -> None:
     deadline = datetime.fromisoformat(str(deadline_value).replace("Z", "+00:00"))
     if deadline.tzinfo is None or deadline.utcoffset() is None:
         raise RuntimeError("Champion prediction deadline does not include a timezone.")
-    if bool(contest["is_active"]) and deadline > resolve_service_time(now_utc):
+    if deadline > resolve_service_time(now_utc):
         raise StalePublicationRevision(
             "Champion prediction is still open and cannot be rendered."
         )

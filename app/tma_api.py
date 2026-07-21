@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.config import load_settings
 from app.contest_service import (
+    ChampionPredictionSettingsLockedError,
     ChampionUnavailableError,
     ContestCompletedError,
     ContestCompletionUnavailableError,
@@ -266,6 +267,7 @@ async def complete_tma_contest(
     )
 
     settings = load_settings()
+    now_utc = _utc_now()
 
     try:
         complete_contest(
@@ -276,6 +278,7 @@ async def complete_tma_contest(
             first_name=context.user.first_name,
             last_name=context.user.last_name,
             username=context.user.username,
+            now_utc=now_utc,
         )
 
         contest = get_contest_details(
@@ -283,7 +286,7 @@ async def complete_tma_contest(
             telegram_chat_id=context.chat.telegram_chat_id,
             contest_id=contest_id,
             telegram_user_id=context.user.telegram_user_id,
-            now_utc=_utc_now(),
+            now_utc=now_utc,
         )
     except ContestNotFoundError as error:
         raise HTTPException(
@@ -636,7 +639,10 @@ async def save_tma_champion_prediction_settings(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except ContestCompletedError as error:
+    except (
+        ChampionPredictionSettingsLockedError,
+        ContestCompletedError,
+    ) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -724,6 +730,7 @@ async def save_tma_contest_champion(
             last_name=context.user.last_name,
             username=context.user.username,
             champion_team_id=payload.champion_team_id,
+            now_utc=_utc_now(),
         )
     except ContestNotFoundError as error:
         raise HTTPException(

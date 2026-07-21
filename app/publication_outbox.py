@@ -348,35 +348,77 @@ def revise_champion_publication_for_related_change(
     )
 
 
-def terminalize_champion_publication(
-    connection: sqlite3.Connection,
+def restore_legacy_champion_result_reconciliations(
     *,
-    contest_id: int,
-    event_id: int,
+    database_path: Path,
     now_utc: datetime | None = None,
-) -> None:
-    created = create_publication_if_enabled(
-        connection,
-        contest_id=contest_id,
-        publication_type="champion_result",
-        entity_id=contest_id,
-        event_id=event_id,
-        desired_action="publish",
-        reconcile_at=None,
-        now_utc=now_utc,
-    )
-    if created:
-        return
-    revise_existing_publication(
-        connection,
-        contest_id=contest_id,
-        publication_type="champion_result",
-        entity_id=contest_id,
-        event_id=event_id,
-        desired_action="publish",
-        reconcile_at=None,
-        now_utc=now_utc,
-    )
+) -> int:
+    now_value = serialize_service_time(resolve_service_time(now_utc))
+    restored_count = 0
+
+    with database_connection(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                publication.id AS publication_id,
+                contest.champion_prediction_deadline_at AS deadline_at
+            FROM contest_publications AS publication
+            JOIN contests AS contest ON contest.id = publication.contest_id
+            WHERE publication.publication_type = 'champion_result'
+              AND publication.entity_id = publication.contest_id
+              AND publication.desired_action = 'withdraw'
+              AND publication.reconcile_at IS NULL
+              AND contest.is_active = 1
+              AND contest.match_prediction_publication_enabled = 1
+              AND contest.champion_prediction_enabled = 1
+              AND contest.champion_team_id IS NOT NULL
+              AND contest.champion_prediction_deadline_at IS NOT NULL
+            """
+        ).fetchall()
+
+        for row in rows:
+            deadline_value = str(row["deadline_at"])
+            try:
+                deadline = datetime.fromisoformat(deadline_value.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise RuntimeError(
+                    "Champion prediction deadline is invalid."
+                ) from error
+            if deadline.tzinfo is None or deadline.utcoffset() is None:
+                raise RuntimeError(
+                    "Champion prediction deadline does not include a timezone."
+                )
+
+            update = connection.execute(
+                """
+                UPDATE contest_publications
+                SET reconcile_at = ?, updated_at = ?
+                WHERE id = ?
+                  AND publication_type = 'champion_result'
+                  AND entity_id = contest_id
+                  AND desired_action = 'withdraw'
+                  AND reconcile_at IS NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM contests AS contest
+                      WHERE contest.id = contest_publications.contest_id
+                        AND contest.is_active = 1
+                        AND contest.match_prediction_publication_enabled = 1
+                        AND contest.champion_prediction_enabled = 1
+                        AND contest.champion_team_id IS NOT NULL
+                        AND contest.champion_prediction_deadline_at = ?
+                  )
+                """,
+                (
+                    serialize_service_time(deadline),
+                    now_value,
+                    int(row["publication_id"]),
+                    deadline_value,
+                ),
+            )
+            restored_count += update.rowcount
+
+    return restored_count
 
 
 def transition_contest_publications_for_master_switch(
@@ -442,37 +484,6 @@ def create_contest_completed_publication(
         publication_type="contest_completed",
         entity_id=contest_id,
         event_id=event_id,
-        now_utc=now_utc,
-    )
-
-
-def terminalize_champion_predictions_publication(
-    connection: sqlite3.Connection,
-    *,
-    contest_id: int,
-    event_id: int,
-    now_utc: datetime | None = None,
-) -> None:
-    created = create_publication_if_enabled(
-        connection,
-        contest_id=contest_id,
-        publication_type="champion_predictions",
-        entity_id=contest_id,
-        event_id=event_id,
-        desired_action="publish",
-        reconcile_at=None,
-        now_utc=now_utc,
-    )
-    if created:
-        return
-    revise_existing_publication(
-        connection,
-        contest_id=contest_id,
-        publication_type="champion_predictions",
-        entity_id=contest_id,
-        event_id=event_id,
-        desired_action="publish",
-        reconcile_at=None,
         now_utc=now_utc,
     )
 
@@ -1196,7 +1207,6 @@ def _champion_desired_state(
     row = connection.execute(
         """
         SELECT
-            is_active,
             champion_prediction_enabled,
             champion_prediction_deadline_at,
             champion_team_id
@@ -1208,10 +1218,21 @@ def _champion_desired_state(
     if row is None:
         raise RuntimeError("Contest was not found while reconciling champion results.")
 
-    champion_exists = row["champion_team_id"] is not None
-    if not bool(row["is_active"]):
-        return ("publish", None) if champion_exists else ("withdraw", None)
-    return "withdraw", None
+    deadline_value = row["champion_prediction_deadline_at"]
+    if (
+        row["champion_team_id"] is None
+        or not bool(row["champion_prediction_enabled"])
+        or deadline_value is None
+    ):
+        return "withdraw", None
+
+    deadline = datetime.fromisoformat(str(deadline_value).replace("Z", "+00:00"))
+    if deadline.tzinfo is None or deadline.utcoffset() is None:
+        raise RuntimeError("Champion prediction deadline does not include a timezone.")
+    deadline = deadline.astimezone(timezone.utc)
+    if deadline > now_utc:
+        return "withdraw", serialize_service_time(deadline)
+    return "publish", None
 
 
 def _champion_predictions_desired_state(
@@ -1223,7 +1244,6 @@ def _champion_predictions_desired_state(
     row = connection.execute(
         """
         SELECT
-            is_active,
             champion_prediction_enabled,
             champion_prediction_deadline_at
         FROM contests
@@ -1238,9 +1258,6 @@ def _champion_predictions_desired_state(
     deadline_value = row["champion_prediction_deadline_at"]
     if not bool(row["champion_prediction_enabled"]) or deadline_value is None:
         return "withdraw", None
-    if not bool(row["is_active"]):
-        return "publish", None
-
     deadline = datetime.fromisoformat(str(deadline_value).replace("Z", "+00:00"))
     if deadline.tzinfo is None or deadline.utcoffset() is None:
         raise RuntimeError("Champion prediction deadline does not include a timezone.")

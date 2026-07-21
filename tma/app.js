@@ -560,6 +560,18 @@ function createContestCompletionCard(bootstrap, contest, state) {
     state.completionMessageType || "",
   );
 
+  if (getChampionPrediction(contest).is_open) {
+    card.append(
+      heading,
+      createElement("p", {
+        className: "subtitle",
+        text: "Конкурс можно завершить после закрытия прогнозов на чемпиона.",
+      }),
+      message,
+    );
+    return card;
+  }
+
   if (!isConfirming) {
     const description = createElement("p", {
       className: "subtitle",
@@ -2675,13 +2687,16 @@ function createContestChampionSection(
 
   section.append(heading);
 
-  if (!championPrediction.is_tournament_completed) {
+  if (
+    !championPrediction.is_tournament_completed
+    || championPrediction.is_open
+  ) {
     section.append(
       createElement("p", {
         className: "match-prediction-closed",
         text: (
-          "Фактического чемпиона можно указать после завершения " +
-          "всех матчей конкурса."
+          "Фактического чемпиона можно указать после завершения всех " +
+          "матчей конкурса и закрытия прогнозов на чемпиона."
         ),
       }),
     );
@@ -3064,11 +3079,18 @@ function createChampionAdministrationCard(contest, state, onUpdated) {
 
   item.append(
     createChampionPredictionMeta(championPrediction),
-    createChampionPredictionSettingsDisclosure(
-      contest,
-      championPrediction,
-      onUpdated,
-    ),
+    championPrediction.actual_champion
+      ? createElement("p", {
+        className: "match-prediction-closed",
+        text: (
+          "Настройки зафиксированы после указания фактического чемпиона."
+        ),
+      })
+      : createChampionPredictionSettingsDisclosure(
+        contest,
+        championPrediction,
+        onUpdated,
+      ),
     createContestChampionSection(
       contest,
       championPrediction,

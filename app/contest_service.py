@@ -17,8 +17,6 @@ from app.publication_outbox import (
     create_or_revise_match_result_publication,
     handle_match_publication_deletion,
     revise_champion_publication_for_related_change,
-    terminalize_champion_predictions_publication,
-    terminalize_champion_publication,
     transition_contest_publications_for_master_switch,
 )
 from app.scoring_service import (
@@ -71,6 +69,10 @@ class MatchResultUnavailableError(ValueError):
 
 class ChampionUnavailableError(ValueError):
     """Raised when the tournament champion cannot be saved yet."""
+
+
+class ChampionPredictionSettingsLockedError(ValueError):
+    """Raised when champion prediction settings are locked by a saved result."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -747,7 +749,10 @@ def complete_contest(
     first_name: str,
     last_name: str | None,
     username: str | None,
+    now_utc: datetime | None = None,
 ) -> None:
+    resolved_now_utc = _resolve_now_utc(now_utc)
+
     with database_connection(database_path) as connection:
         contest_row = _get_active_contest_row(
             connection,
@@ -778,6 +783,20 @@ def complete_contest(
             raise ContestCompletionUnavailableError(
                 "Сначала внесите финальные результаты всех матчей."
             )
+
+        if bool(contest_row["champion_prediction_enabled"]):
+            champion_deadline_at = contest_row["champion_prediction_deadline_at"]
+            if champion_deadline_at is None:
+                raise ContestCompletionUnavailableError(
+                    "Сначала укажите дедлайн прогноза на чемпиона."
+                )
+            if _is_champion_prediction_open(
+                str(champion_deadline_at),
+                now_utc=resolved_now_utc,
+            ):
+                raise ContestCompletionUnavailableError(
+                    "Конкурс можно завершить после закрытия прогнозов на чемпиона."
+                )
 
         if (
             bool(contest_row["champion_prediction_enabled"])
@@ -840,23 +859,10 @@ def complete_contest(
         )
         if completion_event.lastrowid is None:
             raise RuntimeError("Не удалось записать событие завершения конкурса.")
-        completion_event_id = int(completion_event.lastrowid)
-        if bool(contest_row["champion_prediction_enabled"]):
-            terminalize_champion_predictions_publication(
-                connection,
-                contest_id=contest_id,
-                event_id=completion_event_id,
-            )
-        if contest_row["champion_team_id"] is not None:
-            terminalize_champion_publication(
-                connection,
-                contest_id=contest_id,
-                event_id=completion_event_id,
-            )
         create_contest_completed_publication(
             connection,
             contest_id=contest_id,
-            event_id=completion_event_id,
+            event_id=int(completion_event.lastrowid),
         )
 
 
@@ -1695,31 +1701,14 @@ def save_champion_prediction_settings(
     points: int,
     now_utc: datetime | None = None,
 ) -> None:
-    normalized_enabled = _normalize_champion_prediction_enabled(enabled)
-    normalized_points = _normalize_champion_prediction_points(points)
-
-    if normalized_enabled:
-        if deadline_at is None:
-            raise ValueError("Укажите, когда прогноз на чемпиона закрывается.")
-
-        normalized_deadline_at = _normalize_champion_prediction_deadline_at(deadline_at)
-    else:
-        normalized_deadline_at = None
-
     resolved_now_utc = _resolve_now_utc(now_utc)
 
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
-        )
-        actor_user_id = _upsert_user(
-            connection,
-            telegram_user_id=telegram_user_id,
-            first_name=first_name,
-            last_name=last_name,
-            username=username,
         )
 
         previous_row = _get_champion_prediction_configuration_row(
@@ -1729,7 +1718,34 @@ def save_champion_prediction_settings(
         if previous_row is None:
             raise RuntimeError("Не удалось найти настройки прогноза чемпиона.")
 
-        connection.execute(
+        if previous_row["champion_team_id"] is not None:
+            raise ChampionPredictionSettingsLockedError(
+                "Настройки прогноза на чемпиона нельзя изменить после указания "
+                "фактического чемпиона."
+            )
+
+        normalized_enabled = _normalize_champion_prediction_enabled(enabled)
+        normalized_points = _normalize_champion_prediction_points(points)
+
+        if normalized_enabled:
+            if deadline_at is None:
+                raise ValueError("Укажите, когда прогноз на чемпиона закрывается.")
+
+            normalized_deadline_at = _normalize_champion_prediction_deadline_at(
+                deadline_at
+            )
+        else:
+            normalized_deadline_at = None
+
+        actor_user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+
+        settings_update = connection.execute(
             """
             UPDATE contests
             SET
@@ -1741,6 +1757,7 @@ def save_champion_prediction_settings(
                     ELSE NULL
                 END
             WHERE id = ?
+              AND champion_team_id IS NULL
             """,
             (
                 int(normalized_enabled),
@@ -1750,6 +1767,11 @@ def save_champion_prediction_settings(
                 contest_id,
             ),
         )
+        if settings_update.rowcount != 1:
+            raise ChampionPredictionSettingsLockedError(
+                "Настройки прогноза на чемпиона нельзя изменить после указания "
+                "фактического чемпиона."
+            )
 
         settings_event_id = _write_champion_event(
             connection,
@@ -1908,13 +1930,17 @@ def save_contest_champion(
     last_name: str | None,
     username: str | None,
     champion_team_id: int,
+    now_utc: datetime | None = None,
 ) -> TeamSummary:
     normalized_team_id = _normalize_champion_team_id(
         champion_team_id,
         field_name="Фактический чемпион",
     )
 
+    resolved_now_utc = _resolve_now_utc(now_utc)
+
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -1934,6 +1960,18 @@ def save_contest_champion(
         if not _is_contest_completed(connection, contest_id=contest_id):
             raise ChampionUnavailableError(
                 "Чемпиона можно указать после завершения всех матчей конкурса."
+            )
+
+        deadline_at = configuration_row["champion_prediction_deadline_at"]
+        if deadline_at is None:
+            raise ChampionUnavailableError("Для прогноза на чемпиона не задан дедлайн.")
+        if _is_champion_prediction_open(
+            str(deadline_at),
+            now_utc=resolved_now_utc,
+        ):
+            raise ChampionUnavailableError(
+                "Фактического чемпиона можно указать после закрытия прогнозов "
+                "на чемпиона."
             )
 
         team_row = _get_champion_candidate_team_row(
@@ -1984,6 +2022,7 @@ def save_contest_champion(
             contest_id=contest_id,
             event_id=champion_event_id,
             was_created=previous_champion_team_id is None,
+            now_utc=resolved_now_utc,
         )
 
         return _team_summary_from_row(team_row)

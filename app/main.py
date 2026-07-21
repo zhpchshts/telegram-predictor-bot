@@ -17,6 +17,7 @@ from app.match_prediction_publications import (
     run_match_prediction_publication_worker,
 )
 from app.match_lifecycle import run_match_lifecycle_worker
+from app.publication_outbox import restore_legacy_champion_result_reconciliations
 from app.publication_worker import run_contest_publication_worker
 from app.tma_api import router as tma_api_router
 
@@ -29,6 +30,9 @@ def create_app() -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         settings = load_settings()
         initialize_database(settings.database_path)
+        restore_legacy_champion_result_reconciliations(
+            database_path=settings.database_path,
+        )
 
         bot = Bot(token=settings.bot_token)
         dispatcher = create_dispatcher(settings)

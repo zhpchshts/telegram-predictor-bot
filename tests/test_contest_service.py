@@ -1808,7 +1808,8 @@ def test_complete_contest_requires_actual_champion_when_enabled(
         connection.execute(
             """
             UPDATE contests
-            SET champion_prediction_enabled = 1
+            SET champion_prediction_enabled = 1,
+                champion_prediction_deadline_at = '2020-01-01T00:00:00Z'
             WHERE id = ?
             """,
             (contest.id,),

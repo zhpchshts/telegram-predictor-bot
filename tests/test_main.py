@@ -18,9 +18,24 @@ def test_tma_index_is_available() -> None:
     assert "Клевер" in response.text
 
 
+def test_tma_locks_champion_settings_after_actual_champion() -> None:
+    source = (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
+    card_start = source.index("function createChampionAdministrationCard")
+    card_end = source.index("function createChampionPredictionCard", card_start)
+    card_source = source[card_start:card_end]
+
+    assert "championPrediction.actual_champion\n      ? createElement" in card_source
+    assert (
+        "Настройки зафиксированы после указания фактического чемпиона." in card_source
+    )
+    assert ": createChampionPredictionSettingsDisclosure" in card_source
+    assert "createContestChampionSection" in card_source
+
+
 def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None:
     started: list[str] = []
     cancelled: list[str] = []
+    startup_steps: list[str] = []
     session_closed = False
 
     async def background_task(name: str) -> None:
@@ -50,6 +65,7 @@ def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None
         await background_task("match-publication")
 
     async def contest_publication_worker(**_kwargs) -> None:
+        startup_steps.append("contest-publication-worker")
         await background_task("contest-publication")
 
     async def match_lifecycle_worker(**_kwargs) -> None:
@@ -63,7 +79,16 @@ def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None
             database_path=Path("unused.db"),
         ),
     )
-    monkeypatch.setattr(main, "initialize_database", lambda _path: None)
+    monkeypatch.setattr(
+        main,
+        "initialize_database",
+        lambda _path: startup_steps.append("initialize-database"),
+    )
+    monkeypatch.setattr(
+        main,
+        "restore_legacy_champion_result_reconciliations",
+        lambda **_kwargs: startup_steps.append("restore-legacy-publications"),
+    )
     monkeypatch.setattr(main, "Bot", FakeBot)
     monkeypatch.setattr(main, "create_dispatcher", lambda _settings: FakeDispatcher())
     monkeypatch.setattr(
@@ -98,3 +123,8 @@ def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None
     }
     assert set(cancelled) == set(started)
     assert session_closed is True
+    assert startup_steps[:3] == [
+        "initialize-database",
+        "restore-legacy-publications",
+        "contest-publication-worker",
+    ]

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -337,6 +339,47 @@ def test_champion_recalculation_updates_leaderboard_after_correction(
         contest_id=contest_id,
     )
 
+    with pytest.raises(
+        ChampionUnavailableError,
+        match=(
+            "Фактического чемпиона можно указать после закрытия прогнозов на чемпиона."
+        ),
+    ):
+        save_contest_champion(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+            first_name="Администратор",
+            last_name=None,
+            username="admin",
+            champion_team_id=spain_team_id,
+            now_utc=OPEN_PREDICTION_TIME,
+        )
+
+    with database_connection(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT champion_team_id FROM contests WHERE id = ?",
+                (contest_id,),
+            ).fetchone()[0]
+            is None
+        )
+        assert (
+            connection.execute(
+                """
+            SELECT COUNT(*) FROM event_log
+            WHERE contest_id = ?
+              AND event_type IN (
+                  'contest.champion_recorded',
+                  'contest.champion_corrected'
+              )
+            """,
+                (contest_id,),
+            ).fetchone()[0]
+            == 0
+        )
+
     saved_champion = save_contest_champion(
         database_path=database_path,
         telegram_chat_id=CHAT_ID,
@@ -346,6 +389,7 @@ def test_champion_recalculation_updates_leaderboard_after_correction(
         last_name=None,
         username="admin",
         champion_team_id=spain_team_id,
+        now_utc=CLOSED_PREDICTION_TIME,
     )
     assert saved_champion.name == "Испания"
 
@@ -371,6 +415,7 @@ def test_champion_recalculation_updates_leaderboard_after_correction(
         last_name=None,
         username="admin",
         champion_team_id=france_team_id,
+        now_utc=CLOSED_PREDICTION_TIME,
     )
     assert corrected_champion.name == "Франция"
 
@@ -385,6 +430,179 @@ def test_champion_recalculation_updates_leaderboard_after_correction(
         (entry.participant_name, entry.total_points)
         for entry in corrected_details.leaderboard
     ] == [("Боб", 5), ("Алиса", 0)]
+
+
+def test_moving_deadline_first_blocks_subsequent_champion(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    _, spain_team_id, _, _ = _create_matches(
+        database_path,
+        contest_id=contest_id,
+    )
+    _configure_champion_prediction(database_path, contest_id=contest_id)
+    _mark_all_matches_finished(database_path, contest_id=contest_id)
+
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        enabled=True,
+        deadline_at="2031-01-01T12:00:00Z",
+        points=5,
+        now_utc=CLOSED_PREDICTION_TIME,
+    )
+
+    with pytest.raises(
+        ChampionUnavailableError,
+        match=(
+            "Фактического чемпиона можно указать после закрытия прогнозов на чемпиона"
+        ),
+    ):
+        save_contest_champion(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+            first_name="Администратор",
+            last_name=None,
+            username="admin",
+            champion_team_id=spain_team_id,
+            now_utc=CLOSED_PREDICTION_TIME,
+        )
+
+
+def test_concurrent_champion_and_settings_changes_preserve_invariant(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    _, spain_team_id, _, _ = _create_matches(
+        database_path,
+        contest_id=contest_id,
+    )
+    _configure_champion_prediction(database_path, contest_id=contest_id)
+    _mark_all_matches_finished(database_path, contest_id=contest_id)
+    barrier = Barrier(2)
+
+    def move_deadline() -> tuple[str, str, str]:
+        barrier.wait()
+        try:
+            save_champion_prediction_settings(
+                database_path=database_path,
+                telegram_chat_id=CHAT_ID,
+                contest_id=contest_id,
+                telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+                first_name="Администратор",
+                last_name=None,
+                username="admin",
+                enabled=True,
+                deadline_at="2031-01-01T12:00:00Z",
+                points=5,
+                now_utc=CLOSED_PREDICTION_TIME,
+            )
+        except ValueError as error:
+            return "settings", type(error).__name__, str(error)
+        return "settings", "ok", ""
+
+    def record_champion() -> tuple[str, str, str]:
+        barrier.wait()
+        try:
+            save_contest_champion(
+                database_path=database_path,
+                telegram_chat_id=CHAT_ID,
+                contest_id=contest_id,
+                telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+                first_name="Администратор",
+                last_name=None,
+                username="admin",
+                champion_team_id=spain_team_id,
+                now_utc=CLOSED_PREDICTION_TIME,
+            )
+        except ValueError as error:
+            return "champion", type(error).__name__, str(error)
+        return "champion", "ok", ""
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        settings_future = executor.submit(move_deadline)
+        champion_future = executor.submit(record_champion)
+        results = {
+            result[0]: result[1:]
+            for result in (
+                settings_future.result(),
+                champion_future.result(),
+            )
+        }
+
+    assert sum(status == "ok" for status, _ in results.values()) == 1
+    with database_connection(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT champion_prediction_deadline_at, champion_team_id
+            FROM contests
+            WHERE id = ?
+            """,
+            (contest_id,),
+        ).fetchone()
+
+    if row["champion_team_id"] is None:
+        assert row["champion_prediction_deadline_at"] == "2031-01-01T12:00:00Z"
+        assert results["settings"] == ("ok", "")
+        assert results["champion"][0] == "ChampionUnavailableError"
+    else:
+        assert row["champion_team_id"] == spain_team_id
+        assert row["champion_prediction_deadline_at"] == FUTURE_DEADLINE
+        assert results["champion"] == ("ok", "")
+        assert results["settings"][0] == "ChampionPredictionSettingsLockedError"
+
+
+def test_complete_contest_rejects_enabled_champion_prediction_without_deadline(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    _, spain_team_id, _, _ = _create_matches(
+        database_path,
+        contest_id=contest_id,
+    )
+    _configure_champion_prediction(database_path, contest_id=contest_id)
+    _mark_all_matches_finished(database_path, contest_id=contest_id)
+    with database_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE contests
+            SET champion_prediction_deadline_at = NULL,
+                champion_team_id = ?
+            WHERE id = ?
+            """,
+            (spain_team_id, contest_id),
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="Сначала укажите дедлайн прогноза на чемпиона",
+    ):
+        complete_contest(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+            first_name="Администратор",
+            last_name=None,
+            username="admin",
+            now_utc=CLOSED_PREDICTION_TIME,
+        )
+
+    with database_connection(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT is_active FROM contests WHERE id = ?",
+                (contest_id,),
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_correct_champion_breaks_tie_with_zero_points_in_completed_contest(
@@ -427,6 +645,7 @@ def test_correct_champion_breaks_tie_with_zero_points_in_completed_contest(
         last_name=None,
         username="admin",
         champion_team_id=spain_team_id,
+        now_utc=CLOSED_PREDICTION_TIME,
     )
 
     active_details = get_contest_details(
@@ -442,6 +661,7 @@ def test_correct_champion_breaks_tie_with_zero_points_in_completed_contest(
         first_name="Администратор",
         last_name=None,
         username="admin",
+        now_utc=CLOSED_PREDICTION_TIME,
     )
     completed_details = get_contest_details(
         database_path=database_path,

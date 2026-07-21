@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import time
 from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi.testclient import TestClient
 
-from app.database import create_connection, initialize_database
+from app.database import create_connection, database_connection, initialize_database
 from app.main import create_app
 from app.tma_auth import calculate_init_data_hash
 from app.tma_launch import create_tma_launch_token
@@ -182,6 +183,38 @@ def test_champion_prediction_api_configures_selects_and_records_champion(
 
     assert result_response.status_code == 201
 
+    open_deadline_response = client.put(
+        f"/api/tma/contests/{contest['id']}/champion",
+        headers=build_tma_headers(),
+        json={"champion_team_id": match["home_team_id"]},
+    )
+    assert open_deadline_response.status_code == 409
+    assert open_deadline_response.json() == {
+        "detail": (
+            "Фактического чемпиона можно указать после закрытия прогнозов на чемпиона."
+        )
+    }
+
+    with database_connection(database_path) as connection:
+        connection.execute(
+            "UPDATE contests SET champion_team_id = ? WHERE id = ?",
+            (match["home_team_id"], contest["id"]),
+        )
+
+    completion_response = client.post(
+        f"/api/tma/contests/{contest['id']}/complete",
+        headers=build_tma_headers(),
+    )
+    assert completion_response.status_code == 409
+    assert completion_response.json() == {
+        "detail": "Конкурс можно завершить после закрытия прогнозов на чемпиона."
+    }
+
+    monkeypatch.setattr(
+        "app.tma_api._utc_now",
+        lambda: datetime(2035, 1, 2, tzinfo=timezone.utc),
+    )
+
     champion_response = client.put(
         f"/api/tma/contests/{contest['id']}/champion",
         headers=build_tma_headers(),
@@ -194,6 +227,23 @@ def test_champion_prediction_api_configures_selects_and_records_champion(
             "id": match["home_team_id"],
             "name": "Аргентина",
         }
+    }
+
+    locked_settings_response = client.put(
+        f"/api/tma/contests/{contest['id']}/champion-prediction/settings",
+        headers=build_tma_headers(),
+        json={
+            "enabled": True,
+            "deadline_at": "2036-01-01T12:00:00Z",
+            "points": 8,
+        },
+    )
+    assert locked_settings_response.status_code == 409
+    assert locked_settings_response.json() == {
+        "detail": (
+            "Настройки прогноза на чемпиона нельзя изменить после указания "
+            "фактического чемпиона."
+        )
     }
 
     contest_response = client.get(
@@ -221,7 +271,17 @@ def test_champion_prediction_api_configures_selects_and_records_champion(
             "champion_prediction_count": 1,
             "total_matches_count": 1,
             "prediction_history": [],
-            "champion_prediction_history": None,
+            "champion_prediction_history": {
+                "prediction": {
+                    "id": match["home_team_id"],
+                    "name": "Аргентина",
+                },
+                "actual_champion": {
+                    "id": match["home_team_id"],
+                    "name": "Аргентина",
+                },
+                "awarded_points": 7,
+            },
         }
     ]
 
