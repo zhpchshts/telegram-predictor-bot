@@ -13,6 +13,7 @@ def test_initialize_database_creates_core_tables(tmp_path: Path) -> None:
     expected_tables = {
         "chats",
         "users",
+        "supermoderator_assignments",
         "contests",
         "competitions",
         "scoring_rule_sets",
@@ -39,6 +40,19 @@ def test_initialize_database_creates_core_tables(tmp_path: Path) -> None:
 
     assert expected_tables <= actual_tables
     assert foreign_keys_enabled == 1
+
+    with create_connection(database_path) as connection:
+        assignment_indexes = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA index_list(supermoderator_assignments)"
+            )
+        }
+
+    assert {
+        "idx_supermoderator_assignments_active_chat_user",
+        "idx_supermoderator_assignments_chat_user_history",
+    } <= assignment_indexes
 
 
 def test_initialize_database_allows_multiple_active_contests_in_one_chat(
@@ -154,7 +168,7 @@ def test_initialize_database_migrates_existing_contests_without_losing_predictio
             (chat_id, "Тестовый конкурс", "test-contest"),
         ).lastrowid
 
-        connection.execute(
+        prediction_id = connection.execute(
             """
             INSERT INTO match_predictions (
               match_id,
@@ -165,7 +179,7 @@ def test_initialize_database_migrates_existing_contests_without_losing_predictio
             VALUES (?, ?, ?, ?)
             """,
             (987654321, user_id, 2, 1),
-        )
+        ).lastrowid
 
     initialize_database(database_path)
 
@@ -185,12 +199,32 @@ def test_initialize_database_migrates_existing_contests_without_losing_predictio
             (contest_id,),
         ).fetchone()
 
-        prediction_count = connection.execute(
+        chat_row = connection.execute(
             """
-            SELECT COUNT(*)
+            SELECT id, telegram_chat_id, title
+            FROM chats
+            WHERE id = ?
+            """,
+            (chat_id,),
+        ).fetchone()
+
+        user_row = connection.execute(
+            """
+            SELECT id, telegram_user_id, first_name
+            FROM users
+            WHERE id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+        prediction_row = connection.execute(
+            """
+            SELECT id, match_id, user_id, predicted_home_score, predicted_away_score
             FROM match_predictions
-            """
-        ).fetchone()[0]
+            WHERE id = ?
+            """,
+            (prediction_id,),
+        ).fetchone()
 
         champion_predictions_table = connection.execute(
             """
@@ -201,6 +235,22 @@ def test_initialize_database_migrates_existing_contests_without_losing_predictio
             """
         ).fetchone()
 
+        supermoderator_assignments_table = connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = 'supermoderator_assignments'
+            """
+        ).fetchone()
+
+        supermoderator_assignment_indexes = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA index_list(supermoderator_assignments)"
+            )
+        }
+
     assert contest_row is not None
     assert contest_row["id"] == contest_id
     assert contest_row["name"] == "Тестовый конкурс"
@@ -208,5 +258,21 @@ def test_initialize_database_migrates_existing_contests_without_losing_predictio
     assert contest_row["champion_prediction_deadline_at"] is None
     assert contest_row["champion_prediction_points"] == 5
     assert contest_row["champion_team_id"] is None
-    assert prediction_count == 1
+    assert chat_row is not None
+    assert chat_row["id"] == chat_id
+    assert chat_row["telegram_chat_id"] == -1001234567890
+    assert user_row is not None
+    assert user_row["id"] == user_id
+    assert user_row["telegram_user_id"] == 123456789
+    assert prediction_row is not None
+    assert prediction_row["id"] == prediction_id
+    assert prediction_row["match_id"] == 987654321
+    assert prediction_row["user_id"] == user_id
+    assert prediction_row["predicted_home_score"] == 2
+    assert prediction_row["predicted_away_score"] == 1
     assert champion_predictions_table is not None
+    assert supermoderator_assignments_table is not None
+    assert {
+        "idx_supermoderator_assignments_active_chat_user",
+        "idx_supermoderator_assignments_chat_user_history",
+    } <= supermoderator_assignment_indexes

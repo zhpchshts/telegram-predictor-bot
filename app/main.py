@@ -27,7 +27,7 @@ TMA_DIRECTORY = PROJECT_ROOT / "tma"
 
 def create_app() -> FastAPI:
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings = load_settings()
         initialize_database(settings.database_path)
         restore_legacy_champion_result_reconciliations(
@@ -35,6 +35,7 @@ def create_app() -> FastAPI:
         )
 
         bot = Bot(token=settings.bot_token)
+        app.state.telegram_bot = bot
         dispatcher = create_dispatcher(settings)
 
         polling_task = asyncio.create_task(
@@ -80,6 +81,7 @@ def create_app() -> FastAPI:
                 await polling_task
 
             await bot.session.close()
+            del app.state.telegram_bot
 
     app = FastAPI(
         title="Клевер",

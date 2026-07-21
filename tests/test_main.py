@@ -111,6 +111,7 @@ def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None
 
     async def exercise_lifespan() -> None:
         async with app.router.lifespan_context(app):
+            assert isinstance(app.state.telegram_bot, FakeBot)
             await asyncio.sleep(0)
 
     asyncio.run(exercise_lifespan())

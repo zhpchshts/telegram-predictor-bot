@@ -3,10 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
+from app.access_control import (
+    AccessDecision,
+    TelegramAdministratorsClient,
+    determine_access,
+)
 from app.config import load_settings
 from app.contest_service import (
     ChampionPredictionSettingsLockedError,
@@ -91,8 +96,23 @@ class SaveContestChampionRequest(BaseModel):
     champion_team_id: int
 
 
+def get_telegram_administrators_client(
+    request: Request,
+) -> TelegramAdministratorsClient:
+    try:
+        return request.app.state.telegram_bot
+    except AttributeError as error:
+        raise RuntimeError(
+            "Telegram bot is unavailable outside application lifespan."
+        ) from error
+
+
 @router.get("/bootstrap")
 async def get_tma_bootstrap(
+    telegram_client: Annotated[
+        TelegramAdministratorsClient,
+        Depends(get_telegram_administrators_client),
+    ],
     x_telegram_init_data: Annotated[
         str | None,
         Header(alias=TMA_INIT_DATA_HEADER),
@@ -110,8 +130,16 @@ async def get_tma_bootstrap(
         database_path=settings.database_path,
         telegram_chat_id=context.chat.telegram_chat_id,
     )
+    access = await determine_access(
+        database_path=settings.database_path,
+        telegram_chat_id=context.chat.telegram_chat_id,
+        telegram_user_id=context.user.telegram_user_id,
+        telegram_client=telegram_client,
+        enforcement_enabled=settings.role_enforcement_enabled,
+    )
     return {
         "context": _serialize_context(context),
+        "access": _serialize_access(access),
         "active_contests": [
             _serialize_active_contest(contest) for contest in active_contests
         ],
@@ -789,6 +817,16 @@ def _serialize_context(context: TmaContext) -> dict[str, object]:
             "type": context.chat.chat_type,
             "title": context.chat.title,
         },
+    }
+
+
+def _serialize_access(access: AccessDecision) -> dict[str, object]:
+    return {
+        "verification_status": access.verification_status.value,
+        "role": access.role.value if access.role is not None else None,
+        "can_manage_contests": access.can_manage_contests,
+        "can_manage_roles": access.can_manage_roles,
+        "enforcement_enabled": access.enforcement_enabled,
     }
 
 

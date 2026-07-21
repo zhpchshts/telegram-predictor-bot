@@ -5,10 +5,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
+from aiogram.exceptions import TelegramNetworkError
+from aiogram.methods import GetChatAdministrators
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.database import create_connection, initialize_database
-from app.main import create_app
+from app.main import create_app as create_application
+from app.tma_api import get_telegram_administrators_client
 from app.tma_auth import calculate_init_data_hash
 from app.tma_launch import create_tma_launch_token
 
@@ -16,6 +20,28 @@ from app.tma_launch import create_tma_launch_token
 BOT_TOKEN = "123456789:test-token"
 TELEGRAM_CHAT_ID = -1001234567890
 CHAT_TITLE = "Футбольные прогнозы"
+
+
+class FakeTelegramAdministratorsClient:
+    async def get_chat_administrators(self, chat_id: int) -> list[object]:
+        assert chat_id == TELEGRAM_CHAT_ID
+        return []
+
+
+def create_app() -> FastAPI:
+    app = create_application()
+    app.dependency_overrides[get_telegram_administrators_client] = (
+        FakeTelegramAdministratorsClient
+    )
+    return app
+
+
+class UnavailableTelegramAdministratorsClient:
+    async def get_chat_administrators(self, chat_id: int) -> list[object]:
+        raise TelegramNetworkError(
+            method=GetChatAdministrators(chat_id=chat_id),
+            message="private network detail",
+        )
 
 
 def build_signed_init_data(fields: dict[str, str]) -> str:
@@ -147,6 +173,13 @@ def test_bootstrap_returns_verified_context_and_empty_active_contests(
                 "title": CHAT_TITLE,
             },
         },
+        "access": {
+            "verification_status": "verified",
+            "role": "participant",
+            "can_manage_contests": False,
+            "can_manage_roles": False,
+            "enforcement_enabled": False,
+        },
         "active_contests": [],
         "completed_contests": [],
     }
@@ -262,6 +295,54 @@ def test_bootstrap_returns_active_and_completed_contests_for_context_chat(
         },
     ]
     assert all(contest["created_at"] for contest in response_data["active_contests"])
+
+
+def test_telegram_failure_keeps_bootstrap_data_and_does_not_enable_enforcement(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
+    app = create_application()
+    app.dependency_overrides[get_telegram_administrators_client] = (
+        UnavailableTelegramAdministratorsClient
+    )
+    client = TestClient(app)
+
+    contest = create_tma_contest(client)
+    with create_connection(database_path) as connection:
+        chat_id = connection.execute(
+            "SELECT id FROM chats WHERE telegram_chat_id = ?",
+            (TELEGRAM_CHAT_ID,),
+        ).fetchone()["id"]
+        connection.execute(
+            """
+            INSERT INTO contests (chat_id, name, slug, is_active)
+            VALUES (?, ?, ?, 0)
+            """,
+            (chat_id, "Завершённый конкурс", "completed-contest"),
+        )
+    response = client.get("/api/tma/bootstrap", headers=build_tma_headers())
+
+    assert response.status_code == 200
+    response_data = response.json()
+    assert response_data["context"]["chat"]["id"] == TELEGRAM_CHAT_ID
+    assert [item["id"] for item in response_data["active_contests"]] == [contest["id"]]
+    assert response_data["access"] == {
+        "verification_status": "unavailable",
+        "role": None,
+        "can_manage_contests": False,
+        "can_manage_roles": False,
+        "enforcement_enabled": True,
+    }
+    assert [item["slug"] for item in response_data["completed_contests"]] == [
+        "completed-contest"
+    ]
 
 
 def test_create_contest_rejects_missing_init_data(
