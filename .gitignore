@@ -15,6 +15,11 @@ data/
 .test-tmp/
 *.db
 *.sqlite3
+*.session
+*.session-journal
+*.session-wal
+*.session-shm
+*.session-*
 
 # Editor and OS files
 .vscode/

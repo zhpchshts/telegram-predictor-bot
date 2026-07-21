@@ -40,6 +40,38 @@ class AccessDecision:
     enforcement_enabled: bool
 
 
+class TelegramAdministratorsUnavailableError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramAdministratorsSnapshot:
+    telegram_user_ids: frozenset[int]
+
+    def contains(self, telegram_user_id: int) -> bool:
+        return telegram_user_id in self.telegram_user_ids
+
+
+async def get_telegram_administrators_snapshot(
+    *,
+    telegram_chat_id: int,
+    telegram_client: TelegramAdministratorsClient,
+) -> TelegramAdministratorsSnapshot:
+    try:
+        administrators = await telegram_client.get_chat_administrators(
+            chat_id=telegram_chat_id
+        )
+    except TelegramAPIError as error:
+        raise TelegramAdministratorsUnavailableError(
+            "Telegram administrators are unavailable."
+        ) from error
+    return TelegramAdministratorsSnapshot(
+        telegram_user_ids=frozenset(
+            int(administrator.user.id) for administrator in administrators
+        )
+    )
+
+
 async def determine_access(
     *,
     database_path: Path,
@@ -55,10 +87,11 @@ async def determine_access(
     )
 
     try:
-        administrators = await telegram_client.get_chat_administrators(
-            chat_id=telegram_chat_id
+        administrators = await get_telegram_administrators_snapshot(
+            telegram_chat_id=telegram_chat_id,
+            telegram_client=telegram_client,
         )
-    except TelegramAPIError:
+    except TelegramAdministratorsUnavailableError:
         role = AccessRole.SUPERMODERATOR if local_assignment is not None else None
         return _build_access_decision(
             verification_status=AccessVerificationStatus.UNAVAILABLE,
@@ -66,9 +99,7 @@ async def determine_access(
             enforcement_enabled=enforcement_enabled,
         )
 
-    is_telegram_admin = any(
-        administrator.user.id == telegram_user_id for administrator in administrators
-    )
+    is_telegram_admin = administrators.contains(telegram_user_id)
     if is_telegram_admin:
         role = AccessRole.TELEGRAM_ADMIN
     elif local_assignment is not None:

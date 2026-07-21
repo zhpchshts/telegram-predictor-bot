@@ -1090,3 +1090,72 @@ summary:focus-visible {
   margin-top: 16px;
   margin-bottom: 12px;
 }
+
+.role-management-card {
+  display: grid;
+  gap: 14px;
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+
+.role-management-card > h2,
+.role-management-card > h3,
+.role-management-card > .subtitle {
+  margin-bottom: 0;
+}
+
+.role-management-card > h3 {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 0.94rem;
+}
+
+.role-management-warning {
+  margin: 0;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.supermoderator-list,
+.supermoderator-preview {
+  min-width: 0;
+}
+
+.supermoderator-items {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.supermoderator-item {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--surface-raised);
+}
+
+.supermoderator-meta {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.supermoderator-item .action-button,
+.supermoderator-preview .action-button,
+.role-management-card > .form-fields > .action-button {
+  width: fit-content;
+}
+
+.supermoderator-preview:empty {
+  display: none;
+}

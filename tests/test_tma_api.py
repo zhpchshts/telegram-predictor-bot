@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
 from aiogram.exceptions import TelegramNetworkError
@@ -12,7 +13,14 @@ from fastapi.testclient import TestClient
 
 from app.database import create_connection, initialize_database
 from app.main import create_app as create_application
-from app.tma_api import get_telegram_administrators_client
+from app.telegram_username_resolver import (
+    ResolvedTelegramUser,
+    UnavailableTelegramUsernameResolver,
+)
+from app.tma_api import (
+    get_telegram_administrators_client,
+    get_telegram_username_resolver,
+)
 from app.tma_auth import calculate_init_data_hash
 from app.tma_launch import create_tma_launch_token
 
@@ -26,6 +34,32 @@ class FakeTelegramAdministratorsClient:
     async def get_chat_administrators(self, chat_id: int) -> list[object]:
         assert chat_id == TELEGRAM_CHAT_ID
         return []
+
+
+class AdminTelegramAdministratorsClient:
+    calls = 0
+
+    async def get_chat_administrators(self, chat_id: int) -> list[object]:
+        assert chat_id == TELEGRAM_CHAT_ID
+        self.calls += 1
+        return [SimpleNamespace(user=SimpleNamespace(id=123))]
+
+
+class FakeUsernameResolver:
+    def __init__(self) -> None:
+        self.usernames: list[str] = []
+
+    async def resolve_username(self, username: str) -> ResolvedTelegramUser:
+        self.usernames.append(username)
+        return ResolvedTelegramUser(
+            telegram_user_id=456,
+            username="target_user",
+            first_name="Target",
+            last_name="User",
+        )
+
+    async def close(self) -> None:
+        return None
 
 
 def create_app() -> FastAPI:
@@ -118,6 +152,257 @@ def create_tma_contest(
 
     assert response.status_code == 201
     return response.json()["contest"]
+
+
+def create_role_management_app(
+    *,
+    telegram_client=AdminTelegramAdministratorsClient,
+    username_resolver=None,
+) -> FastAPI:
+    app = create_application()
+    app.dependency_overrides[get_telegram_administrators_client] = telegram_client
+    if username_resolver is not None:
+        app.dependency_overrides[get_telegram_username_resolver] = lambda: (
+            username_resolver
+        )
+    return app
+
+
+def test_telegram_admin_resolves_assigns_lists_and_revokes_supermoderator(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    resolver = FakeUsernameResolver()
+    admin_client = AdminTelegramAdministratorsClient()
+    client = TestClient(
+        create_role_management_app(
+            telegram_client=lambda: admin_client,
+            username_resolver=resolver,
+        )
+    )
+
+    resolved = client.post(
+        "/api/tma/access/users/resolve",
+        headers=build_tma_headers(),
+        json={"username": "@Target_User"},
+    )
+
+    assert resolved.status_code == 200
+    assert resolver.usernames == ["@Target_User"]
+    user = resolved.json()["user"]
+    assert user["telegram_user_id"] == 456
+    assert resolved.json()["has_active_assignment"] is False
+    assert resolved.json()["effective_role"] == "participant"
+
+    assigned = client.put(
+        f"/api/tma/access/supermoderators/{user['telegram_user_id']}",
+        headers=build_tma_headers(),
+    )
+    repeated = client.put(
+        f"/api/tma/access/supermoderators/{user['telegram_user_id']}",
+        headers=build_tma_headers(),
+    )
+    listed = client.get(
+        "/api/tma/access/supermoderators",
+        headers=build_tma_headers(),
+    )
+
+    assert assigned.status_code == 200
+    assert assigned.json()["created"] is True
+    assert repeated.json()["created"] is False
+    assert len(listed.json()["assignments"]) == 1
+    item = listed.json()["assignments"][0]
+    assert item["user"]["telegram_user_id"] == 456
+    assert item["assigned_by"]["telegram_user_id"] == 123
+    assert item["effective_role"] == "supermoderator"
+
+    revoked = client.delete(
+        f"/api/tma/access/supermoderators/{user['telegram_user_id']}",
+        headers=build_tma_headers(),
+    )
+    repeated_revoke = client.delete(
+        f"/api/tma/access/supermoderators/{user['telegram_user_id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert revoked.status_code == 200
+    assert revoked.json()["assignment"]["revoked_at"] is not None
+    assert repeated_revoke.status_code == 404
+    assert repeated_revoke.json()["detail"]["code"] == "active_assignment_not_found"
+    assert resolver.usernames == ["@Target_User"]
+    assert admin_client.calls == 6
+
+
+def test_telegram_admin_assigns_unknown_user_by_exact_telegram_id_without_mtproto(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(
+        create_role_management_app(
+            username_resolver=UnavailableTelegramUsernameResolver(),
+        )
+    )
+
+    resolved = client.post(
+        "/api/tma/access/users/resolve",
+        headers=build_tma_headers(),
+        json={"target": "789012345"},
+    )
+    assigned = client.put(
+        "/api/tma/access/supermoderators/789012345",
+        headers=build_tma_headers(),
+    )
+    repeated = client.put(
+        "/api/tma/access/supermoderators/789012345",
+        headers=build_tma_headers(),
+    )
+
+    assert resolved.status_code == 200
+    assert resolved.json()["selection_type"] == "telegram_user_id"
+    assert resolved.json()["user"] == {
+        "id": resolved.json()["user"]["id"],
+        "telegram_user_id": 789012345,
+        "username": None,
+        "first_name": "",
+        "last_name": None,
+    }
+    assert assigned.status_code == 200
+    assert assigned.json()["created"] is True
+    assert assigned.json()["assignment"]["user"]["telegram_user_id"] == 789012345
+    assert repeated.json()["created"] is False
+
+
+def test_invalid_telegram_user_id_is_rejected_before_target_write(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(
+        create_role_management_app(
+            username_resolver=UnavailableTelegramUsernameResolver(),
+        )
+    )
+
+    resolved = client.post(
+        "/api/tma/access/users/resolve",
+        headers=build_tma_headers(),
+        json={"target": "-123"},
+    )
+    assigned = client.put(
+        "/api/tma/access/supermoderators/0",
+        headers=build_tma_headers(),
+    )
+
+    assert resolved.status_code == 400
+    assert resolved.json()["detail"]["code"] == "telegram_user_id_invalid"
+    assert assigned.status_code == 400
+    assert assigned.json()["detail"]["code"] == "telegram_user_id_invalid"
+    with create_connection(database_path) as connection:
+        invalid_targets = connection.execute(
+            "SELECT COUNT(*) FROM users WHERE telegram_user_id <= 0"
+        ).fetchone()[0]
+    assert invalid_targets == 0
+
+
+def test_non_admin_cannot_use_username_resolver(monkeypatch, tmp_path: Path) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    resolver = FakeUsernameResolver()
+    client = TestClient(
+        create_role_management_app(
+            telegram_client=FakeTelegramAdministratorsClient,
+            username_resolver=resolver,
+        )
+    )
+
+    response = client.post(
+        "/api/tma/access/users/resolve",
+        headers=build_tma_headers(),
+        json={"username": "target_user"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "telegram_admin_required"
+    assert resolver.usernames == []
+
+
+def test_telegram_admin_resolves_username_without_leading_at(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    resolver = FakeUsernameResolver()
+    client = TestClient(create_role_management_app(username_resolver=resolver))
+
+    response = client.post(
+        "/api/tma/access/users/resolve",
+        headers=build_tma_headers(),
+        json={"target": "target_user"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["selection_type"] == "username"
+    assert response.json()["user"]["telegram_user_id"] == 456
+    assert resolver.usernames == ["target_user"]
+
+
+def test_role_management_fails_closed_when_admin_check_is_unavailable(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(
+        create_role_management_app(
+            telegram_client=UnavailableTelegramAdministratorsClient,
+            username_resolver=FakeUsernameResolver(),
+        )
+    )
+
+    response = client.get(
+        "/api/tma/access/supermoderators",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == (
+        "telegram_admin_verification_unavailable"
+    )
+
+
+def test_resolve_is_unavailable_without_mtproto_configuration(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(
+        create_role_management_app(
+            username_resolver=UnavailableTelegramUsernameResolver(),
+        )
+    )
+
+    response = client.post(
+        "/api/tma/access/users/resolve",
+        headers=build_tma_headers(),
+        json={"username": "target_user"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == ("username_resolution_not_configured")
 
 
 def test_bootstrap_rejects_missing_init_data(

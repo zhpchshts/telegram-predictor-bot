@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -20,9 +21,14 @@ from app.match_lifecycle import run_match_lifecycle_worker
 from app.publication_outbox import restore_legacy_champion_result_reconciliations
 from app.publication_worker import run_contest_publication_worker
 from app.tma_api import router as tma_api_router
+from app.telegram_username_resolver import (
+    TelethonTelegramUsernameResolver,
+    UnavailableTelegramUsernameResolver,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TMA_DIRECTORY = PROJECT_ROOT / "tma"
+logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
@@ -36,6 +42,31 @@ def create_app() -> FastAPI:
 
         bot = Bot(token=settings.bot_token)
         app.state.telegram_bot = bot
+        username_resolver = UnavailableTelegramUsernameResolver()
+        telegram_api_id = getattr(settings, "telegram_api_id", None)
+        telegram_api_hash = getattr(settings, "telegram_api_hash", None)
+        if telegram_api_id is not None and telegram_api_hash is not None:
+            try:
+                username_resolver = TelethonTelegramUsernameResolver(
+                    api_id=telegram_api_id,
+                    api_hash=telegram_api_hash,
+                    bot_token=settings.bot_token,
+                    session_path=settings.telegram_mtproto_session_path,
+                )
+                await username_resolver.start()
+            except Exception as error:
+                logger.warning(
+                    "Telegram MTProto initialization failed (%s); username "
+                    "resolution is disabled.",
+                    type(error).__name__,
+                )
+                username_resolver = UnavailableTelegramUsernameResolver()
+        elif telegram_api_id is not None or telegram_api_hash is not None:
+            logger.warning(
+                "Telegram MTProto configuration is incomplete; username "
+                "resolution is disabled."
+            )
+        app.state.telegram_username_resolver = username_resolver
         dispatcher = create_dispatcher(settings)
 
         polling_task = asyncio.create_task(
@@ -81,7 +112,9 @@ def create_app() -> FastAPI:
                 await polling_task
 
             await bot.session.close()
+            await username_resolver.close()
             del app.state.telegram_bot
+            del app.state.telegram_username_resolver
 
     app = FastAPI(
         title="Клевер",

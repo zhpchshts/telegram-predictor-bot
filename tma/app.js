@@ -165,6 +165,19 @@ function formatMatchStartsAt(startsAtUtc) {
   }).format(startsAt);
 }
 
+function formatRoleAssignmentDate(value) {
+  const date = new Date(value.endsWith("Z") ? value : `${value}Z`);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat("ru-RU", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
 function createIdempotencyKey(scope = "contest") {
   if (window.crypto?.randomUUID) {
     return `${scope}-${window.crypto.randomUUID()}`;
@@ -3935,6 +3948,335 @@ async function openContest(bootstrap, contestId, state = {}) {
   }
 }
 
+function createSupermoderatorManagementCard() {
+  const card = createElement("section", {
+    className: "info-card role-management-card",
+  });
+  const heading = createElement("h2", { text: "Супермодераторы" });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: (
+      "Супермодератор назначается для всего Telegram-чата и сохраняет роль "
+      + "до явного отзыва."
+    ),
+  });
+  const warning = createElement("p", {
+    className: "role-management-warning",
+    text: (
+      "Членство пользователя в Telegram-чате не проверяется. "
+      + "Проверьте, что назначаете нужного человека."
+    ),
+  });
+  const listHeading = createElement("h3", { text: "Активные назначения" });
+  const listContainer = createElement("div", {
+    className: "supermoderator-list",
+  });
+  const listStatus = createElement("p", {
+    className: "form-message",
+    text: "Загружаем назначения…",
+  });
+  const formHeading = createElement("h3", { text: "Добавить супермодератора" });
+  const form = createElement("form", { className: "form-fields" });
+  const field = createElement("label", { className: "form-field" });
+  const fieldLabel = createElement("span", {
+    className: "form-field-label",
+    text: "Telegram ID или точный username",
+  });
+  const input = createElement("input", { className: "text-input" });
+  const findButton = createActionButton(
+    "Найти",
+    "secondary-action-button",
+    "submit",
+  );
+  const formMessage = createElement("p", { className: "form-message" });
+  const preview = createElement("div", {
+    className: "supermoderator-preview",
+  });
+  let resolvedUser = null;
+  let activeOperation = null;
+
+  input.type = "text";
+  input.name = "telegram-user";
+  input.placeholder = "123456789 или @username";
+  input.autocomplete = "off";
+  input.required = true;
+
+  const fieldHint = createElement("p", {
+    className: "form-hint",
+    text: "Допустимые форматы: положительный Telegram ID или точный @username.",
+  });
+
+  field.append(fieldLabel, input);
+  form.append(field, fieldHint, findButton, formMessage, preview);
+  listContainer.append(listStatus);
+  card.append(
+    heading,
+    description,
+    warning,
+    listHeading,
+    listContainer,
+    formHeading,
+    form,
+  );
+
+  const loadAssignments = async () => {
+    setFormMessage(listStatus, "Загружаем назначения…");
+    listContainer.replaceChildren(listStatus);
+    try {
+      const result = await apiRequest("/api/tma/access/supermoderators");
+      renderSupermoderatorAssignments(
+        listContainer,
+        Array.isArray(result.assignments) ? result.assignments : [],
+        loadAssignments,
+      );
+    } catch (error) {
+      setFormMessage(
+        listStatus,
+        getRoleManagementErrorMessage(error),
+        "error",
+      );
+      listContainer.replaceChildren(listStatus);
+    }
+  };
+
+  input.addEventListener("input", () => {
+    resolvedUser = null;
+    preview.replaceChildren();
+    setFormMessage(formMessage, "");
+  });
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (activeOperation !== null) {
+      return;
+    }
+    const target = input.value;
+    if (!target) {
+      setFormMessage(
+        formMessage,
+        "Введите Telegram ID или точный username.",
+        "error",
+      );
+      return;
+    }
+    activeOperation = "resolve";
+    resolvedUser = null;
+    preview.replaceChildren();
+    input.disabled = true;
+    findButton.disabled = true;
+    findButton.textContent = "Ищем…";
+    setFormMessage(formMessage, "Ищем пользователя в Telegram…");
+    try {
+      const result = await apiRequest("/api/tma/access/users/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target }),
+      });
+      resolvedUser = result.user;
+      setFormMessage(formMessage, "");
+      renderResolvedSupermoderator(
+        preview,
+        result,
+        async (selectedUser) => {
+          activeOperation = "assign";
+          resolvedUser = null;
+          input.disabled = true;
+          findButton.disabled = true;
+          findButton.textContent = "Назначаем…";
+          try {
+            await apiRequest(
+              `/api/tma/access/supermoderators/${selectedUser.telegram_user_id}`,
+              { method: "PUT" },
+            );
+            setFormMessage(
+              formMessage,
+              `${getRoleTargetDisplayName(selectedUser)} назначен супермодератором.`,
+              "success",
+            );
+            preview.replaceChildren();
+            await loadAssignments();
+          } finally {
+            activeOperation = null;
+            input.disabled = false;
+            findButton.disabled = false;
+            findButton.textContent = "Найти";
+          }
+        },
+      );
+    } catch (error) {
+      setFormMessage(
+        formMessage,
+        getRoleManagementErrorMessage(error),
+        "error",
+      );
+    } finally {
+      if (activeOperation === "resolve") {
+        activeOperation = null;
+      }
+      input.disabled = false;
+      findButton.disabled = false;
+      findButton.textContent = "Найти";
+    }
+  });
+
+  void loadAssignments();
+  return card;
+}
+
+function renderSupermoderatorAssignments(container, assignments, reload) {
+  if (assignments.length === 0) {
+    container.replaceChildren(
+      createElement("p", {
+        className: "subtitle",
+        text: "Активных назначений пока нет.",
+      }),
+    );
+    return;
+  }
+  const list = createElement("ul", { className: "supermoderator-items" });
+  for (const assignment of assignments) {
+    const item = createElement("li", { className: "supermoderator-item" });
+    const title = createElement("strong", {
+      text: getRoleTargetDisplayName(assignment.user),
+    });
+    const identityParts = [];
+    if (assignment.user.username) {
+      identityParts.push(`@${assignment.user.username}`);
+    }
+    identityParts.push(`Telegram ID ${assignment.user.telegram_user_id}`);
+    const role = assignment.is_telegram_admin
+      ? "Администратор Telegram · локальное назначение активно"
+      : "Супермодератор";
+    const details = createElement("p", {
+      className: "supermoderator-meta",
+      text: identityParts.join(" · "),
+    });
+    const assignmentDetails = createElement("p", {
+      className: "supermoderator-meta",
+      text: (
+        `${role}. Назначен ${formatRoleAssignmentDate(assignment.assigned_at)} `
+        + `пользователем ${getUserDisplayName(assignment.assigned_by)}.`
+      ),
+    });
+    const revokeButton = createActionButton(
+      "Отозвать",
+      "danger-action-button",
+    );
+    const message = createElement("p", { className: "form-message" });
+    revokeButton.addEventListener("click", async () => {
+      if (!window.confirm(`Отозвать роль у ${getRoleTargetDisplayName(assignment.user)}?`)) {
+        return;
+      }
+      revokeButton.disabled = true;
+      revokeButton.textContent = "Отзываем…";
+      try {
+        await apiRequest(
+          `/api/tma/access/supermoderators/${assignment.user.telegram_user_id}`,
+          { method: "DELETE" },
+        );
+        await reload();
+      } catch (error) {
+        setFormMessage(message, getRoleManagementErrorMessage(error), "error");
+        revokeButton.disabled = false;
+        revokeButton.textContent = "Отозвать";
+      }
+    });
+    item.append(title, details, assignmentDetails, revokeButton, message);
+    list.append(item);
+  }
+  container.replaceChildren(list);
+}
+
+function renderResolvedSupermoderator(container, result, assign) {
+  const selectedUser = Object.freeze({ ...result.user });
+  const panel = createElement("div", { className: "confirmation-panel" });
+  const title = createElement("strong", {
+    text: getRoleTargetDisplayName(selectedUser),
+  });
+  const identityParts = [];
+  if (selectedUser.username) {
+    identityParts.push(`@${selectedUser.username}`);
+  }
+  identityParts.push(`Telegram ID ${selectedUser.telegram_user_id}`);
+  const details = createElement("p", {
+    className: "supermoderator-meta",
+    text: identityParts.join(" · "),
+  });
+  const message = createElement("p", { className: "form-message" });
+  const assignButton = createActionButton(
+    result.has_active_assignment ? "Уже назначен" : "Назначить супермодератором",
+    "primary-action-button",
+  );
+  assignButton.disabled = result.has_active_assignment;
+  assignButton.addEventListener("click", async () => {
+    assignButton.disabled = true;
+    assignButton.textContent = "Назначаем…";
+    try {
+      await assign(selectedUser);
+    } catch (error) {
+      setFormMessage(message, getRoleManagementErrorMessage(error), "error");
+      assignButton.disabled = false;
+      assignButton.textContent = "Назначить супермодератором";
+    }
+  });
+  panel.append(title, details, assignButton, message);
+  container.replaceChildren(panel);
+}
+
+function createRoleManagementUnavailableCard() {
+  return createInfoCard(
+    "Управление супермодераторами временно недоступно",
+    [
+      "Не удалось проверить права администратора Telegram.",
+      "Поэтому управление супермодераторами временно недоступно. "
+        + "Существующие конкурсы продолжают работать как раньше.",
+    ],
+    "role-management-unavailable-card",
+  );
+}
+
+function getRoleTargetDisplayName(user) {
+  const fullName = [user.first_name, user.last_name]
+    .filter(Boolean)
+    .join(" ");
+  return fullName || `Telegram ID ${user.telegram_user_id}`;
+}
+
+function getRoleManagementErrorMessage(error) {
+  const code = error && typeof error === "object" ? error.code : "";
+  if (code === "username_not_found") {
+    return (
+      "Пользователь с таким username не найден. "
+      + "Проверьте написание и попробуйте ещё раз."
+    );
+  }
+  if (code === "telegram_user_id_invalid") {
+    return "Telegram ID должен быть положительным целым числом.";
+  }
+  if (code === "username_invalid" || code === "role_target_invalid") {
+    return "Укажите положительный Telegram ID или точный @username.";
+  }
+  if (code === "username_target_not_supported") {
+    return "Супермодератором можно назначить только обычного пользователя Telegram.";
+  }
+  if (code === "username_resolution_not_configured") {
+    return (
+      "Поиск по username сейчас не настроен. "
+      + "Можно назначить пользователя по Telegram ID."
+    );
+  }
+  if (code === "username_resolution_unavailable" || code === "telegram_flood_wait") {
+    return "Не удалось найти пользователя в Telegram. Попробуйте ещё раз позже.";
+  }
+  if (code === "telegram_admin_verification_unavailable") {
+    return (
+      "Не удалось подтвердить права администратора Telegram. "
+      + "Попробуйте ещё раз позже."
+    );
+  }
+  return error instanceof Error ? error.message : "Не удалось выполнить операцию.";
+}
+
 function renderContestScreen(bootstrap, state = {}) {
   const { user, chat } = bootstrap.context;
   const chatTitle = chat.title || "этого чата";
@@ -3959,7 +4301,13 @@ function renderContestScreen(bootstrap, state = {}) {
     ? createContestConfirmationCard(bootstrap, state)
     : createContestFormCard(bootstrap, state);
 
-  appContentElement.replaceChildren(contestCard, creationCard);
+  const cards = [contestCard, creationCard];
+  if (bootstrap.access?.can_manage_roles === true) {
+    cards.push(createSupermoderatorManagementCard());
+  } else if (bootstrap.access?.verification_status === "unavailable") {
+    cards.push(createRoleManagementUnavailableCard());
+  }
+  appContentElement.replaceChildren(...cards);
 }
 
 function renderBootstrap(bootstrap) {
@@ -3996,8 +4344,14 @@ async function apiRequest(path, options = {}) {
     const detail = body && typeof body === "object"
       ? body.detail
       : body;
-
-    throw new Error(detail || `HTTP ${response.status}`);
+    const message = detail && typeof detail === "object"
+      ? detail.message
+      : detail;
+    const error = new Error(message || `HTTP ${response.status}`);
+    if (detail && typeof detail === "object") {
+      error.code = detail.code || "";
+    }
+    throw error;
   }
 
   return body;

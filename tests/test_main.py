@@ -32,11 +32,62 @@ def test_tma_locks_champion_settings_after_actual_champion() -> None:
     assert "createContestChampionSection" in card_source
 
 
+def test_tma_exposes_chat_level_supermoderator_management_for_admins() -> None:
+    source = (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
+    management_start = source.index("function createSupermoderatorManagementCard")
+    management_end = source.index(
+        "function renderSupermoderatorAssignments",
+        management_start,
+    )
+    management_source = source[management_start:management_end]
+    assignment_start = management_source.index("async (selectedUser) =>")
+    assignment_source = management_source[assignment_start:]
+    put_index = assignment_source.index("await apiRequest")
+
+    assert "bootstrap.access?.can_manage_roles === true" in source
+    assert '"/api/tma/access/supermoderators"' in source
+    assert '"/api/tma/access/users/resolve"' in source
+    assert "Членство пользователя в Telegram-чате не проверяется." in source
+    assert 'input.addEventListener("input"' in source
+    assert "Telegram ID или точный username" in source
+    assert "JSON.stringify({ target })" in source
+    assert "const selectedUser = Object.freeze({ ...result.user });" in source
+    assert "${selectedUser.telegram_user_id}" in assignment_source
+    assert "getRoleTargetDisplayName(selectedUser)" in assignment_source
+    assert "resolvedUser" not in assignment_source[put_index:]
+    assert "input.disabled = true" in assignment_source[:put_index]
+    assert "findButton.disabled = true" in assignment_source[:put_index]
+    assert "finally" in assignment_source
+    assert "input.disabled = false" in assignment_source
+    assert "findButton.disabled = false" in assignment_source
+
+
+def test_tma_explains_unavailable_telegram_admin_verification() -> None:
+    source = (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
+    screen_start = source.index("function renderContestScreen")
+    screen_end = source.index("function renderBootstrap", screen_start)
+    screen_source = source[screen_start:screen_end]
+
+    assert (
+        'else if (bootstrap.access?.verification_status === "unavailable")'
+        in screen_source
+    )
+    assert "cards.push(createRoleManagementUnavailableCard())" in screen_source
+    assert "Не удалось проверить права администратора Telegram." in source
+    assert "Существующие конкурсы продолжают работать как раньше." in source
+    assert (
+        "cards.push(createSupermoderatorManagementCard());\n"
+        "  } else if (bootstrap.access?.verification_status"
+    ) in screen_source
+
+
 def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None:
     started: list[str] = []
     cancelled: list[str] = []
     startup_steps: list[str] = []
     session_closed = False
+    mtproto_started = False
+    mtproto_closed = False
 
     async def background_task(name: str) -> None:
         started.append(name)
@@ -61,6 +112,18 @@ def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None
         def __init__(self, **_kwargs) -> None:
             self.session = FakeSession()
 
+    class FakeUsernameResolver:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def start(self) -> None:
+            nonlocal mtproto_started
+            mtproto_started = True
+
+        async def close(self) -> None:
+            nonlocal mtproto_closed
+            mtproto_closed = True
+
     async def match_publication_worker(**_kwargs) -> None:
         await background_task("match-publication")
 
@@ -77,6 +140,9 @@ def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None
         lambda: SimpleNamespace(
             bot_token="dummy",
             database_path=Path("unused.db"),
+            telegram_api_id=12345,
+            telegram_api_hash="secret-hash",
+            telegram_mtproto_session_path=Path("unused-session"),
         ),
     )
     monkeypatch.setattr(
@@ -90,6 +156,11 @@ def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None
         lambda **_kwargs: startup_steps.append("restore-legacy-publications"),
     )
     monkeypatch.setattr(main, "Bot", FakeBot)
+    monkeypatch.setattr(
+        main,
+        "TelethonTelegramUsernameResolver",
+        FakeUsernameResolver,
+    )
     monkeypatch.setattr(main, "create_dispatcher", lambda _settings: FakeDispatcher())
     monkeypatch.setattr(
         main,
@@ -112,6 +183,10 @@ def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None
     async def exercise_lifespan() -> None:
         async with app.router.lifespan_context(app):
             assert isinstance(app.state.telegram_bot, FakeBot)
+            assert isinstance(
+                app.state.telegram_username_resolver,
+                FakeUsernameResolver,
+            )
             await asyncio.sleep(0)
 
     asyncio.run(exercise_lifespan())
@@ -124,6 +199,8 @@ def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None
     }
     assert set(cancelled) == set(started)
     assert session_closed is True
+    assert mtproto_started is True
+    assert mtproto_closed is True
     assert startup_steps[:3] == [
         "initialize-database",
         "restore-legacy-publications",

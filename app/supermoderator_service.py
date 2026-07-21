@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.database import database_connection
+from app.user_service import LocalUser
 
 
 class SupermoderatorAssignmentNotFoundError(ValueError):
@@ -20,6 +21,19 @@ class SupermoderatorAssignment:
     assigned_at: str
     revoked_by_user_id: int | None
     revoked_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveSupermoderatorAssignment:
+    assignment: SupermoderatorAssignment
+    user: LocalUser
+    assigned_by: LocalUser
+
+
+@dataclass(frozen=True, slots=True)
+class SupermoderatorAssignmentResult:
+    assignment: SupermoderatorAssignment
+    was_created: bool
 
 
 def get_active_supermoderator_assignment(
@@ -66,6 +80,21 @@ def assign_supermoderator(
     user_id: int,
     assigned_by_user_id: int,
 ) -> SupermoderatorAssignment:
+    return assign_supermoderator_with_status(
+        database_path=database_path,
+        chat_id=chat_id,
+        user_id=user_id,
+        assigned_by_user_id=assigned_by_user_id,
+    ).assignment
+
+
+def assign_supermoderator_with_status(
+    *,
+    database_path: Path,
+    chat_id: int,
+    user_id: int,
+    assigned_by_user_id: int,
+) -> SupermoderatorAssignmentResult:
     with database_connection(database_path) as connection:
         existing_row = _get_active_assignment_row(
             connection,
@@ -73,7 +102,10 @@ def assign_supermoderator(
             user_id=user_id,
         )
         if existing_row is not None:
-            return _assignment_from_row(existing_row)
+            return SupermoderatorAssignmentResult(
+                assignment=_assignment_from_row(existing_row),
+                was_created=False,
+            )
 
         try:
             assignment_id = int(
@@ -97,7 +129,10 @@ def assign_supermoderator(
             )
             if existing_row is None:
                 raise
-            return _assignment_from_row(existing_row)
+            return SupermoderatorAssignmentResult(
+                assignment=_assignment_from_row(existing_row),
+                was_created=False,
+            )
 
         row = connection.execute(
             """
@@ -109,7 +144,74 @@ def assign_supermoderator(
         ).fetchone()
         if row is None:
             raise RuntimeError("Created supermoderator assignment was not found.")
-        return _assignment_from_row(row)
+        return SupermoderatorAssignmentResult(
+            assignment=_assignment_from_row(row),
+            was_created=True,
+        )
+
+
+def list_active_supermoderator_assignments(
+    *,
+    database_path: Path,
+    chat_id: int,
+) -> list[ActiveSupermoderatorAssignment]:
+    with database_connection(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                assignment.*,
+                target.telegram_user_id AS target_telegram_user_id,
+                target.username AS target_username,
+                target.first_name AS target_first_name,
+                target.last_name AS target_last_name,
+                actor.telegram_user_id AS actor_telegram_user_id,
+                actor.username AS actor_username,
+                actor.first_name AS actor_first_name,
+                actor.last_name AS actor_last_name
+            FROM supermoderator_assignments AS assignment
+            JOIN users AS target ON target.id = assignment.user_id
+            JOIN users AS actor ON actor.id = assignment.assigned_by_user_id
+            WHERE assignment.chat_id = ? AND assignment.revoked_at IS NULL
+            ORDER BY assignment.id
+            """,
+            (chat_id,),
+        ).fetchall()
+    return [
+        ActiveSupermoderatorAssignment(
+            assignment=_assignment_from_row(row),
+            user=LocalUser(
+                id=int(row["user_id"]),
+                telegram_user_id=int(row["target_telegram_user_id"]),
+                username=(
+                    str(row["target_username"])
+                    if row["target_username"] is not None
+                    else None
+                ),
+                first_name=str(row["target_first_name"]),
+                last_name=(
+                    str(row["target_last_name"])
+                    if row["target_last_name"] is not None
+                    else None
+                ),
+            ),
+            assigned_by=LocalUser(
+                id=int(row["assigned_by_user_id"]),
+                telegram_user_id=int(row["actor_telegram_user_id"]),
+                username=(
+                    str(row["actor_username"])
+                    if row["actor_username"] is not None
+                    else None
+                ),
+                first_name=str(row["actor_first_name"]),
+                last_name=(
+                    str(row["actor_last_name"])
+                    if row["actor_last_name"] is not None
+                    else None
+                ),
+            ),
+        )
+        for row in rows
+    ]
 
 
 def revoke_supermoderator(

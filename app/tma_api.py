@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -10,7 +11,10 @@ from pydantic import BaseModel
 from app.access_control import (
     AccessDecision,
     TelegramAdministratorsClient,
+    TelegramAdministratorsSnapshot,
+    TelegramAdministratorsUnavailableError,
     determine_access,
+    get_telegram_administrators_snapshot,
 )
 from app.config import load_settings
 from app.contest_service import (
@@ -40,6 +44,31 @@ from app.contest_service import (
     save_match_result,
 )
 from app.tma_context import TmaContext, TmaContextError, build_tma_context
+from app.supermoderator_service import (
+    ActiveSupermoderatorAssignment,
+    SupermoderatorAssignmentNotFoundError,
+    assign_supermoderator_with_status,
+    get_active_supermoderator_assignment,
+    list_active_supermoderator_assignments,
+    revoke_supermoderator,
+)
+from app.telegram_username_resolver import (
+    TelegramUsernameResolver,
+    UsernameFloodWaitError,
+    UsernameInvalidError,
+    UsernameNotFoundError,
+    UsernameResolutionNotConfiguredError,
+    UsernameResolutionUnavailableError,
+    UsernameTargetNotSupportedError,
+)
+from app.user_service import (
+    ChatActor,
+    LocalUser,
+    get_or_create_telegram_user,
+    get_user_by_telegram_id,
+    upsert_chat_actor,
+    upsert_telegram_user,
+)
 
 
 TMA_INIT_DATA_HEADER = "X-Telegram-Init-Data"
@@ -96,6 +125,22 @@ class SaveContestChampionRequest(BaseModel):
     champion_team_id: int
 
 
+class ResolveRoleTargetRequest(BaseModel):
+    target: str | None = None
+    username: str | None = None
+
+
+class TelegramUserIdInvalidError(ValueError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class RoleManagementContext:
+    context: TmaContext
+    administrators: TelegramAdministratorsSnapshot
+    actor: ChatActor
+
+
 def get_telegram_administrators_client(
     request: Request,
 ) -> TelegramAdministratorsClient:
@@ -104,6 +149,15 @@ def get_telegram_administrators_client(
     except AttributeError as error:
         raise RuntimeError(
             "Telegram bot is unavailable outside application lifespan."
+        ) from error
+
+
+def get_telegram_username_resolver(request: Request) -> TelegramUsernameResolver:
+    try:
+        return request.app.state.telegram_username_resolver
+    except AttributeError as error:
+        raise RuntimeError(
+            "Telegram username resolver is unavailable outside application lifespan."
         ) from error
 
 
@@ -147,6 +201,257 @@ async def get_tma_bootstrap(
             _serialize_active_contest(contest) for contest in completed_contests
         ],
     }
+
+
+@router.get("/access/supermoderators")
+async def get_tma_supermoderators(
+    telegram_client: Annotated[
+        TelegramAdministratorsClient,
+        Depends(get_telegram_administrators_client),
+    ],
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> dict[str, object]:
+    management = await _authorize_role_management(
+        x_telegram_init_data=x_telegram_init_data,
+        telegram_client=telegram_client,
+    )
+    settings = load_settings()
+    assignments = list_active_supermoderator_assignments(
+        database_path=settings.database_path,
+        chat_id=management.actor.chat_id,
+    )
+    assignments.sort(
+        key=lambda item: (
+            not management.administrators.contains(item.user.telegram_user_id),
+            _user_display_name(item.user).casefold(),
+            item.user.telegram_user_id,
+        )
+    )
+    return {
+        "assignments": [
+            _serialize_active_assignment(item, management.administrators)
+            for item in assignments
+        ]
+    }
+
+
+@router.post("/access/users/resolve")
+async def resolve_tma_role_target(
+    payload: ResolveRoleTargetRequest,
+    telegram_client: Annotated[
+        TelegramAdministratorsClient,
+        Depends(get_telegram_administrators_client),
+    ],
+    username_resolver: Annotated[
+        TelegramUsernameResolver,
+        Depends(get_telegram_username_resolver),
+    ],
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> dict[str, object]:
+    management = await _authorize_role_management(
+        x_telegram_init_data=x_telegram_init_data,
+        telegram_client=telegram_client,
+    )
+    target = payload.target if payload.target is not None else payload.username
+    if target is None:
+        raise _application_http_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="role_target_invalid",
+            message="Укажите положительный Telegram ID или точный username.",
+        )
+    target = target.strip()
+    if not target:
+        raise _application_http_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="role_target_invalid",
+            message="Укажите положительный Telegram ID или точный username.",
+        )
+    settings = load_settings()
+    try:
+        telegram_user_id = _parse_telegram_user_id_target(target)
+    except TelegramUserIdInvalidError as error:
+        raise _application_http_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="telegram_user_id_invalid",
+            message="Telegram ID должен быть положительным целым числом.",
+        ) from error
+
+    if telegram_user_id is not None:
+        user = get_or_create_telegram_user(
+            database_path=settings.database_path,
+            telegram_user_id=telegram_user_id,
+        )
+        selection_type = "telegram_user_id"
+    else:
+        try:
+            resolved_user = await username_resolver.resolve_username(target)
+        except UsernameInvalidError as error:
+            raise _application_http_error(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="username_invalid",
+                message="Некорректный формат Telegram username.",
+            ) from error
+        except UsernameNotFoundError as error:
+            raise _application_http_error(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="username_not_found",
+                message="Пользователь с таким username не найден.",
+            ) from error
+        except UsernameTargetNotSupportedError as error:
+            raise _application_http_error(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                code="username_target_not_supported",
+                message=(
+                    "Супермодератором можно назначить только обычного "
+                    "пользователя Telegram."
+                ),
+            ) from error
+        except UsernameFloodWaitError as error:
+            raise _application_http_error(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                code="telegram_flood_wait",
+                message="Telegram временно ограничил поиск. Попробуйте ещё раз позже.",
+                headers={"Retry-After": str(error.retry_after)},
+            ) from error
+        except UsernameResolutionNotConfiguredError as error:
+            raise _application_http_error(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                code="username_resolution_not_configured",
+                message=(
+                    "Поиск по username не настроен. "
+                    "Укажите Telegram ID или обратитесь к администратору."
+                ),
+            ) from error
+        except UsernameResolutionUnavailableError as error:
+            raise _application_http_error(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                code="username_resolution_unavailable",
+                message=(
+                    "Не удалось найти пользователя в Telegram. "
+                    "Попробуйте ещё раз позже."
+                ),
+            ) from error
+        user = upsert_telegram_user(
+            database_path=settings.database_path,
+            telegram_user_id=resolved_user.telegram_user_id,
+            username=resolved_user.username,
+            first_name=resolved_user.first_name,
+            last_name=resolved_user.last_name,
+        )
+        selection_type = "username"
+    assignment = get_active_supermoderator_assignment(
+        database_path=settings.database_path,
+        chat_id=management.actor.chat_id,
+        user_id=user.id,
+    )
+    return {
+        "user": _serialize_user(user),
+        "selection_type": selection_type,
+        "has_active_assignment": assignment is not None,
+        "effective_role": _effective_role(
+            user=user,
+            administrators=management.administrators,
+            has_active_assignment=assignment is not None,
+        ),
+        "is_telegram_admin": management.administrators.contains(user.telegram_user_id),
+    }
+
+
+@router.put("/access/supermoderators/{telegram_user_id}")
+async def assign_tma_supermoderator(
+    telegram_user_id: int,
+    telegram_client: Annotated[
+        TelegramAdministratorsClient,
+        Depends(get_telegram_administrators_client),
+    ],
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> dict[str, object]:
+    management = await _authorize_role_management(
+        x_telegram_init_data=x_telegram_init_data,
+        telegram_client=telegram_client,
+    )
+    settings = load_settings()
+    if telegram_user_id <= 0:
+        raise _application_http_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="telegram_user_id_invalid",
+            message="Telegram ID должен быть положительным целым числом.",
+        )
+    user = get_or_create_telegram_user(
+        database_path=settings.database_path,
+        telegram_user_id=telegram_user_id,
+    )
+    result = assign_supermoderator_with_status(
+        database_path=settings.database_path,
+        chat_id=management.actor.chat_id,
+        user_id=user.id,
+        assigned_by_user_id=management.actor.actor_user_id,
+    )
+    return {
+        "created": result.was_created,
+        "assignment": {
+            **_serialize_assignment(result.assignment),
+            "user": _serialize_user(user),
+        },
+    }
+
+
+@router.delete("/access/supermoderators/{telegram_user_id}")
+async def revoke_tma_supermoderator(
+    telegram_user_id: int,
+    telegram_client: Annotated[
+        TelegramAdministratorsClient,
+        Depends(get_telegram_administrators_client),
+    ],
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> dict[str, object]:
+    management = await _authorize_role_management(
+        x_telegram_init_data=x_telegram_init_data,
+        telegram_client=telegram_client,
+    )
+    settings = load_settings()
+    if telegram_user_id <= 0:
+        raise _application_http_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="telegram_user_id_invalid",
+            message="Telegram ID должен быть положительным целым числом.",
+        )
+    user = get_user_by_telegram_id(
+        database_path=settings.database_path,
+        telegram_user_id=telegram_user_id,
+    )
+    if user is None:
+        raise _application_http_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="active_assignment_not_found",
+            message="Активное назначение не найдено.",
+        )
+    try:
+        assignment = revoke_supermoderator(
+            database_path=settings.database_path,
+            chat_id=management.actor.chat_id,
+            user_id=user.id,
+            revoked_by_user_id=management.actor.actor_user_id,
+        )
+    except SupermoderatorAssignmentNotFoundError as error:
+        raise _application_http_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="active_assignment_not_found",
+            message="Активное назначение не найдено.",
+        ) from error
+    return {"assignment": _serialize_assignment(assignment)}
 
 
 @router.post("/contests")
@@ -804,6 +1109,78 @@ def _get_verified_tma_context(
         ) from error
 
 
+async def _authorize_role_management(
+    *,
+    x_telegram_init_data: str | None,
+    telegram_client: TelegramAdministratorsClient,
+) -> RoleManagementContext:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    try:
+        administrators = await get_telegram_administrators_snapshot(
+            telegram_chat_id=context.chat.telegram_chat_id,
+            telegram_client=telegram_client,
+        )
+    except TelegramAdministratorsUnavailableError as error:
+        raise _application_http_error(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="telegram_admin_verification_unavailable",
+            message=(
+                "Не удалось подтвердить права администратора Telegram. "
+                "Попробуйте ещё раз позже."
+            ),
+        ) from error
+    if not administrators.contains(context.user.telegram_user_id):
+        raise _application_http_error(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="telegram_admin_required",
+            message="Управлять супермодераторами может только администратор Telegram.",
+        )
+    settings = load_settings()
+    actor = upsert_chat_actor(
+        database_path=settings.database_path,
+        telegram_chat_id=context.chat.telegram_chat_id,
+        chat_title=context.chat.title,
+        telegram_user_id=context.user.telegram_user_id,
+        username=context.user.username,
+        first_name=context.user.first_name,
+        last_name=context.user.last_name,
+    )
+    return RoleManagementContext(
+        context=context,
+        administrators=administrators,
+        actor=actor,
+    )
+
+
+def _application_http_error(
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+    headers: dict[str, str] | None = None,
+) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message},
+        headers=headers,
+    )
+
+
+def _parse_telegram_user_id_target(target: str) -> int | None:
+    if target.isdecimal():
+        telegram_user_id = int(target)
+        if telegram_user_id <= 0:
+            raise TelegramUserIdInvalidError(
+                "Telegram user id must be a positive integer."
+            )
+        return telegram_user_id
+    if target.startswith(("+", "-")) or target[:1].isdigit():
+        raise TelegramUserIdInvalidError("Telegram user id must be a positive integer.")
+    return None
+
+
 def _serialize_context(context: TmaContext) -> dict[str, object]:
     return {
         "user": {
@@ -828,6 +1205,55 @@ def _serialize_access(access: AccessDecision) -> dict[str, object]:
         "can_manage_roles": access.can_manage_roles,
         "enforcement_enabled": access.enforcement_enabled,
     }
+
+
+def _serialize_user(user: LocalUser) -> dict[str, object]:
+    return {
+        "id": user.id,
+        "telegram_user_id": user.telegram_user_id,
+        "username": user.username,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+    }
+
+
+def _serialize_assignment(assignment) -> dict[str, object]:
+    return {
+        "id": assignment.id,
+        "assigned_at": assignment.assigned_at,
+        "revoked_at": assignment.revoked_at,
+    }
+
+
+def _serialize_active_assignment(
+    item: ActiveSupermoderatorAssignment,
+    administrators: TelegramAdministratorsSnapshot,
+) -> dict[str, object]:
+    is_telegram_admin = administrators.contains(item.user.telegram_user_id)
+    return {
+        **_serialize_assignment(item.assignment),
+        "user": _serialize_user(item.user),
+        "assigned_by": _serialize_user(item.assigned_by),
+        "effective_role": ("telegram_admin" if is_telegram_admin else "supermoderator"),
+        "is_telegram_admin": is_telegram_admin,
+    }
+
+
+def _effective_role(
+    *,
+    user: LocalUser,
+    administrators: TelegramAdministratorsSnapshot,
+    has_active_assignment: bool,
+) -> str:
+    if administrators.contains(user.telegram_user_id):
+        return "telegram_admin"
+    if has_active_assignment:
+        return "supermoderator"
+    return "participant"
+
+
+def _user_display_name(user: LocalUser) -> str:
+    return " ".join(part for part in (user.first_name, user.last_name) if part)
 
 
 def _serialize_active_contest(contest) -> dict[str, object]:
