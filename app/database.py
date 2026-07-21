@@ -25,6 +25,28 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS supermoderator_assignments (
+    id INTEGER PRIMARY KEY,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    assigned_by_user_id INTEGER NOT NULL REFERENCES users(id),
+    assigned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    revoked_by_user_id INTEGER REFERENCES users(id),
+    revoked_at TEXT,
+    CHECK (
+        (revoked_by_user_id IS NULL AND revoked_at IS NULL)
+        OR
+        (revoked_by_user_id IS NOT NULL AND revoked_at IS NOT NULL)
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_supermoderator_assignments_active_chat_user
+    ON supermoderator_assignments(chat_id, user_id)
+    WHERE revoked_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_supermoderator_assignments_chat_user_history
+    ON supermoderator_assignments(chat_id, user_id, assigned_at, id);
+
 CREATE TABLE IF NOT EXISTS contests (
   id INTEGER PRIMARY KEY,
   chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,

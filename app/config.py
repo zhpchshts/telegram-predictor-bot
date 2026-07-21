@@ -19,6 +19,20 @@ class Settings:
     bot_username: str
     database_path: Path
     public_base_url: str | None
+    role_enforcement_enabled: bool
+
+
+def _parse_boolean_environment(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+
+    normalized_value = value.strip().lower()
+    if normalized_value in {"1", "true", "yes", "on"}:
+        return True
+    if normalized_value in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"{name} must be one of: true, false, 1, 0, yes, no, on, off.")
 
 
 def load_settings() -> Settings:
@@ -36,10 +50,15 @@ def load_settings() -> Settings:
     )
 
     public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/") or None
+    role_enforcement_enabled = _parse_boolean_environment(
+        "ROLE_ENFORCEMENT_ENABLED",
+        default=False,
+    )
 
     return Settings(
         bot_token=bot_token,
         bot_username=bot_username,
         database_path=database_path,
         public_base_url=public_base_url,
+        role_enforcement_enabled=role_enforcement_enabled,
     )
