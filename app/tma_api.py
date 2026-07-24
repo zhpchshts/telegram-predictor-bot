@@ -13,9 +13,7 @@ from app.access_control import (
     AccessVerificationStatus,
     TelegramAdministratorsClient,
     TelegramAdministratorsSnapshot,
-    TelegramAdministratorsUnavailableError,
     determine_access,
-    get_telegram_administrators_snapshot,
 )
 from app.config import load_settings
 from app.contest_service import (
@@ -206,6 +204,62 @@ async def _authorize_contest_management(
     )
 
 
+async def _authorize_role_management(
+    telegram_client: Annotated[
+        TelegramAdministratorsClient,
+        Depends(get_telegram_administrators_client),
+    ],
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> RoleManagementContext:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+    access = await determine_access(
+        database_path=settings.database_path,
+        telegram_chat_id=context.chat.telegram_chat_id,
+        telegram_user_id=context.user.telegram_user_id,
+        telegram_client=telegram_client,
+        enforcement_enabled=settings.role_enforcement_enabled,
+    )
+    if not access.can_manage_roles:
+        if access.verification_status is AccessVerificationStatus.UNAVAILABLE:
+            raise _application_http_error(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                code="telegram_admin_verification_unavailable",
+                message=(
+                    "Не удалось подтвердить права администратора Telegram. "
+                    "Попробуйте ещё раз позже."
+                ),
+            )
+        raise _application_http_error(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="telegram_admin_required",
+            message="Управлять супермодераторами может только администратор Telegram.",
+        )
+
+    administrators = access.administrators
+    if administrators is None:
+        raise RuntimeError("Verified role management access has no administrator data.")
+    actor = upsert_chat_actor(
+        database_path=settings.database_path,
+        telegram_chat_id=context.chat.telegram_chat_id,
+        chat_title=context.chat.title,
+        telegram_user_id=context.user.telegram_user_id,
+        username=context.user.username,
+        first_name=context.user.first_name,
+        last_name=context.user.last_name,
+    )
+    return RoleManagementContext(
+        context=context,
+        administrators=administrators,
+        actor=actor,
+    )
+
+
 @router.get("/bootstrap")
 async def get_tma_bootstrap(
     telegram_client: Annotated[
@@ -250,19 +304,8 @@ async def get_tma_bootstrap(
 
 @router.get("/access/supermoderators")
 async def get_tma_supermoderators(
-    telegram_client: Annotated[
-        TelegramAdministratorsClient,
-        Depends(get_telegram_administrators_client),
-    ],
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    management: Annotated[RoleManagementContext, Depends(_authorize_role_management)],
 ) -> dict[str, object]:
-    management = await _authorize_role_management(
-        x_telegram_init_data=x_telegram_init_data,
-        telegram_client=telegram_client,
-    )
     settings = load_settings()
     assignments = list_active_supermoderator_assignments(
         database_path=settings.database_path,
@@ -286,23 +329,12 @@ async def get_tma_supermoderators(
 @router.post("/access/users/resolve")
 async def resolve_tma_role_target(
     payload: ResolveRoleTargetRequest,
-    telegram_client: Annotated[
-        TelegramAdministratorsClient,
-        Depends(get_telegram_administrators_client),
-    ],
     username_resolver: Annotated[
         TelegramUsernameResolver,
         Depends(get_telegram_username_resolver),
     ],
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    management: Annotated[RoleManagementContext, Depends(_authorize_role_management)],
 ) -> dict[str, object]:
-    management = await _authorize_role_management(
-        x_telegram_init_data=x_telegram_init_data,
-        telegram_client=telegram_client,
-    )
     target = payload.target if payload.target is not None else payload.username
     if target is None:
         raise _application_http_error(
@@ -411,19 +443,8 @@ async def resolve_tma_role_target(
 @router.put("/access/supermoderators/{telegram_user_id}")
 async def assign_tma_supermoderator(
     telegram_user_id: int,
-    telegram_client: Annotated[
-        TelegramAdministratorsClient,
-        Depends(get_telegram_administrators_client),
-    ],
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    management: Annotated[RoleManagementContext, Depends(_authorize_role_management)],
 ) -> dict[str, object]:
-    management = await _authorize_role_management(
-        x_telegram_init_data=x_telegram_init_data,
-        telegram_client=telegram_client,
-    )
     settings = load_settings()
     if telegram_user_id <= 0:
         raise _application_http_error(
@@ -453,19 +474,8 @@ async def assign_tma_supermoderator(
 @router.delete("/access/supermoderators/{telegram_user_id}")
 async def revoke_tma_supermoderator(
     telegram_user_id: int,
-    telegram_client: Annotated[
-        TelegramAdministratorsClient,
-        Depends(get_telegram_administrators_client),
-    ],
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    management: Annotated[RoleManagementContext, Depends(_authorize_role_management)],
 ) -> dict[str, object]:
-    management = await _authorize_role_management(
-        x_telegram_init_data=x_telegram_init_data,
-        telegram_client=telegram_client,
-    )
     settings = load_settings()
     if telegram_user_id <= 0:
         raise _application_http_error(
@@ -1097,51 +1107,6 @@ def _get_verified_tma_context(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(error),
         ) from error
-
-
-async def _authorize_role_management(
-    *,
-    x_telegram_init_data: str | None,
-    telegram_client: TelegramAdministratorsClient,
-) -> RoleManagementContext:
-    context = _get_verified_tma_context(
-        x_telegram_init_data=x_telegram_init_data,
-    )
-    try:
-        administrators = await get_telegram_administrators_snapshot(
-            telegram_chat_id=context.chat.telegram_chat_id,
-            telegram_client=telegram_client,
-        )
-    except TelegramAdministratorsUnavailableError as error:
-        raise _application_http_error(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            code="telegram_admin_verification_unavailable",
-            message=(
-                "Не удалось подтвердить права администратора Telegram. "
-                "Попробуйте ещё раз позже."
-            ),
-        ) from error
-    if not administrators.contains(context.user.telegram_user_id):
-        raise _application_http_error(
-            status_code=status.HTTP_403_FORBIDDEN,
-            code="telegram_admin_required",
-            message="Управлять супермодераторами может только администратор Telegram.",
-        )
-    settings = load_settings()
-    actor = upsert_chat_actor(
-        database_path=settings.database_path,
-        telegram_chat_id=context.chat.telegram_chat_id,
-        chat_title=context.chat.title,
-        telegram_user_id=context.user.telegram_user_id,
-        username=context.user.username,
-        first_name=context.user.first_name,
-        last_name=context.user.last_name,
-    )
-    return RoleManagementContext(
-        context=context,
-        administrators=administrators,
-        actor=actor,
-    )
 
 
 def _application_http_error(

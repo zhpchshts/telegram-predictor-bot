@@ -38,6 +38,7 @@ class AccessDecision:
     can_manage_contests: bool
     can_manage_roles: bool
     enforcement_enabled: bool
+    administrators: TelegramAdministratorsSnapshot | None
 
 
 class TelegramAdministratorsUnavailableError(RuntimeError):
@@ -97,6 +98,7 @@ async def determine_access(
             verification_status=AccessVerificationStatus.UNAVAILABLE,
             role=role,
             enforcement_enabled=enforcement_enabled,
+            administrators=None,
         )
 
     is_telegram_admin = administrators.contains(telegram_user_id)
@@ -111,6 +113,7 @@ async def determine_access(
         verification_status=AccessVerificationStatus.VERIFIED,
         role=role,
         enforcement_enabled=enforcement_enabled,
+        administrators=administrators,
     )
 
 
@@ -119,6 +122,7 @@ def _build_access_decision(
     verification_status: AccessVerificationStatus,
     role: AccessRole | None,
     enforcement_enabled: bool,
+    administrators: TelegramAdministratorsSnapshot | None,
 ) -> AccessDecision:
     can_manage_contests = role in {
         AccessRole.TELEGRAM_ADMIN,
@@ -134,4 +138,5 @@ def _build_access_decision(
         can_manage_contests=can_manage_contests,
         can_manage_roles=can_manage_roles,
         enforcement_enabled=enforcement_enabled,
+        administrators=administrators,
     )

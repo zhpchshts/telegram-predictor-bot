@@ -134,6 +134,31 @@ def test_tma_keeps_supermoderator_role_management_separate() -> None:
     )
 
 
+def test_tma_reports_rejected_management_request_without_false_success() -> None:
+    source = (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
+    request_start = source.index("async function apiRequest")
+    request_end = source.index("function handleError", request_start)
+    request_source = source[request_start:request_end]
+    confirmation_start = source.index("function createContestConfirmationCard")
+    confirmation_end = source.index(
+        "function createContestDetailsCard",
+        confirmation_start,
+    )
+    confirmation_source = source[confirmation_start:confirmation_end]
+    catch_start = confirmation_source.index("} catch (error) {")
+    success_source = confirmation_source[:catch_start]
+    rejection_source = confirmation_source[catch_start:]
+
+    assert "if (!response.ok)" in request_source
+    assert "detail.message" in request_source
+    assert "error.code = detail.code" in request_source
+    assert 'formMessageType: "success"' in success_source
+    assert 'confirmationMessageType: "error"' in rejection_source
+    assert "error instanceof Error" in rejection_source
+    assert 'MessageType: "success"' not in rejection_source
+    assert "renderContestScreen(bootstrap" in rejection_source
+
+
 def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None:
     started: list[str] = []
     cancelled: list[str] = []

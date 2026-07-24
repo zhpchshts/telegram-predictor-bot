@@ -10,6 +10,7 @@ from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import GetChatAdministrators
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 
 from app.database import create_connection, initialize_database
 from app.main import create_app as create_application
@@ -24,6 +25,7 @@ from app.telegram_username_resolver import (
 )
 from app.tma_api import (
     _authorize_contest_management,
+    _authorize_role_management,
     get_telegram_administrators_client,
     get_telegram_username_resolver,
 )
@@ -50,6 +52,20 @@ class AdminTelegramAdministratorsClient:
         assert chat_id == TELEGRAM_CHAT_ID
         self.calls += 1
         return [SimpleNamespace(user=SimpleNamespace(id=123))]
+
+
+class MutableTelegramAdministratorsClient:
+    def __init__(self, administrator_ids: list[int]) -> None:
+        self.administrator_ids = administrator_ids
+        self.calls = 0
+
+    async def get_chat_administrators(self, chat_id: int) -> list[object]:
+        assert chat_id == TELEGRAM_CHAT_ID
+        self.calls += 1
+        return [
+            SimpleNamespace(user=SimpleNamespace(id=telegram_user_id))
+            for telegram_user_id in self.administrator_ids
+        ]
 
 
 class FakeUsernameResolver:
@@ -715,6 +731,106 @@ def test_telegram_admin_can_manage_contests_with_enforcement(
     assert telegram_client.calls == 1
 
 
+def test_telegram_admin_gain_and_loss_apply_to_the_next_request(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
+    telegram_client = MutableTelegramAdministratorsClient([])
+    client = TestClient(create_app_with_telegram_client(telegram_client))
+    payload = {"name": "Конкурс с актуальными правами"}
+
+    denied_before_gain = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="admin-rights"),
+        json=payload,
+    )
+    telegram_client.administrator_ids = [123]
+    allowed_after_gain = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="admin-rights"),
+        json=payload,
+    )
+    telegram_client.administrator_ids = []
+    denied_after_loss = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="admin-rights-after-loss"),
+        json={"name": "Второй конкурс"},
+    )
+
+    assert denied_before_gain.status_code == 403
+    assert allowed_after_gain.status_code == 201
+    assert denied_after_loss.status_code == 403
+    assert telegram_client.calls == 3
+    with create_connection(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM contests").fetchone()[0] == 1
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM contest_creation_requests"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_verified_supermoderator_can_manage_contests_with_enforcement(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    assign_current_user_as_supermoderator(database_path)
+    monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="verified-supermoderator"),
+        json={"name": "Конкурс супермодератора"},
+    )
+
+    assert response.status_code == 201
+
+
+def test_supermoderator_assignment_from_another_chat_does_not_grant_access(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    actor = upsert_chat_actor(
+        database_path=database_path,
+        telegram_chat_id=-1009876543210,
+        chat_title="Другой чат",
+        telegram_user_id=123,
+        username="evsab",
+        first_name="Eugene",
+        last_name="Sabir",
+    )
+    assign_supermoderator(
+        database_path=database_path,
+        chat_id=actor.chat_id,
+        user_id=actor.actor_user_id,
+        assigned_by_user_id=actor.actor_user_id,
+    )
+    monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="other-chat-supermoderator"),
+        json={"name": "Недоступный конкурс"},
+    )
+
+    assert response.status_code == 403
+    with create_connection(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM contests").fetchone()[0] == 0
+
+
 def test_participant_cannot_manage_contests_or_create_idempotency_record(
     monkeypatch,
     tmp_path: Path,
@@ -878,44 +994,111 @@ def test_supermoderator_assignment_and_revocation_apply_to_next_request(
         )
 
 
-def test_supermoderator_still_cannot_manage_roles(
+@pytest.mark.parametrize("is_supermoderator", [False, True])
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("GET", "/api/tma/access/supermoderators", None),
+        ("POST", "/api/tma/access/users/resolve", {"target": "456"}),
+        ("PUT", "/api/tma/access/supermoderators/456", None),
+        ("DELETE", "/api/tma/access/supermoderators/456", None),
+    ],
+)
+def test_participants_and_supermoderators_cannot_use_role_management_routes(
     monkeypatch,
     tmp_path: Path,
+    is_supermoderator: bool,
+    method: str,
+    path: str,
+    payload: dict[str, str] | None,
 ) -> None:
     database_path = tmp_path / "predictor.db"
     initialize_database(database_path)
     configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
-    assign_current_user_as_supermoderator(database_path)
+    if is_supermoderator:
+        assign_current_user_as_supermoderator(database_path)
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
-    client = TestClient(create_app())
+    client = TestClient(
+        create_role_management_app(
+            telegram_client=FakeTelegramAdministratorsClient,
+            username_resolver=FakeUsernameResolver(),
+        )
+    )
+    with create_connection(database_path) as connection:
+        counts_before = tuple(
+            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("chats", "users", "supermoderator_assignments")
+        )
 
-    response = client.get(
-        "/api/tma/access/supermoderators",
+    response = client.request(
+        method,
+        path,
         headers=build_tma_headers(),
+        json=payload,
     )
 
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "telegram_admin_required"
+    with create_connection(database_path) as connection:
+        counts_after = tuple(
+            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("chats", "users", "supermoderator_assignments")
+        )
+    assert counts_after == counts_before
 
 
-def test_all_administrative_routes_use_centralized_contest_authorization() -> None:
-    administrative_routes = {
-        ("POST", "/api/tma/contests"),
-        ("DELETE", "/api/tma/contests/{contest_id}"),
-        ("POST", "/api/tma/contests/{contest_id}/complete"),
-        ("POST", "/api/tma/contests/{contest_id}/matches"),
-        ("DELETE", "/api/tma/contests/{contest_id}/matches/{match_id}"),
-        ("PUT", "/api/tma/contests/{contest_id}/matches/{match_id}/result"),
+def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> None:
+    expected_routes = {
+        ("GET", "/api/tma/bootstrap"): "read",
+        ("GET", "/api/tma/access/supermoderators"): "role_management",
+        ("POST", "/api/tma/access/users/resolve"): "role_management",
+        (
+            "PUT",
+            "/api/tma/access/supermoderators/{telegram_user_id}",
+        ): "role_management",
+        (
+            "DELETE",
+            "/api/tma/access/supermoderators/{telegram_user_id}",
+        ): "role_management",
+        ("POST", "/api/tma/contests"): "contest_management",
+        (
+            "DELETE",
+            "/api/tma/contests/{contest_id}/matches/{match_id}",
+        ): "contest_management",
+        ("GET", "/api/tma/contests/{contest_id}"): "read",
+        (
+            "POST",
+            "/api/tma/contests/{contest_id}/complete",
+        ): "contest_management",
+        ("DELETE", "/api/tma/contests/{contest_id}"): "contest_management",
+        (
+            "POST",
+            "/api/tma/contests/{contest_id}/matches",
+        ): "contest_management",
+        (
+            "PUT",
+            "/api/tma/contests/{contest_id}/matches/{match_id}/prediction",
+        ): "prediction",
+        (
+            "PUT",
+            "/api/tma/contests/{contest_id}/matches/{match_id}/result",
+        ): "contest_management",
         (
             "PUT",
             "/api/tma/contests/{contest_id}/match-prediction-publication/settings",
-        ),
-        ("PUT", "/api/tma/contests/{contest_id}/champion-prediction/settings"),
-        ("PUT", "/api/tma/contests/{contest_id}/champion"),
-    }
-    prediction_routes = {
-        ("PUT", "/api/tma/contests/{contest_id}/matches/{match_id}/prediction"),
-        ("PUT", "/api/tma/contests/{contest_id}/champion-prediction"),
+        ): "contest_management",
+        (
+            "PUT",
+            "/api/tma/contests/{contest_id}/champion-prediction/settings",
+        ): "contest_management",
+        (
+            "PUT",
+            "/api/tma/contests/{contest_id}/champion-prediction",
+        ): "prediction",
+        (
+            "PUT",
+            "/api/tma/contests/{contest_id}/champion",
+        ): "contest_management",
     }
     app = create_application()
     route_dependencies = {
@@ -925,14 +1108,18 @@ def test_all_administrative_routes_use_centralized_contest_authorization() -> No
         for route in app.routes
         if hasattr(route, "dependant")
         for method in route.methods
+        if route.path.startswith("/api/tma/")
     }
 
-    assert administrative_routes <= route_dependencies.keys()
-    assert prediction_routes <= route_dependencies.keys()
-    for route in administrative_routes:
-        assert _authorize_contest_management in route_dependencies[route]
-    for route in prediction_routes:
-        assert _authorize_contest_management not in route_dependencies[route]
+    assert route_dependencies.keys() == expected_routes.keys()
+    for route, category in expected_routes.items():
+        dependencies = route_dependencies[route]
+        assert (_authorize_contest_management in dependencies) is (
+            category == "contest_management"
+        )
+        assert (_authorize_role_management in dependencies) is (
+            category == "role_management"
+        )
 
 
 def test_participant_predictions_remain_available_with_enforcement(
@@ -992,6 +1179,124 @@ def test_participant_predictions_remain_available_with_enforcement(
 
     assert match_prediction_response.status_code == 201
     assert champion_prediction_response.status_code == 200
+
+
+def test_prediction_payload_cannot_replace_the_verified_author(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(create_app())
+    contest = create_tma_contest(client, idempotency_key="spoofed-author-contest")
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="spoofed-author-match"),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2030-06-11T18:00:00Z",
+        },
+    )
+    assert match_response.status_code == 201
+    match = match_response.json()["match"]
+    monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
+
+    response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match['id']}/prediction",
+        headers=build_tma_headers(),
+        json={
+            "predicted_home_score": 1,
+            "predicted_away_score": 0,
+            "predicted_advancing_team_id": match["home_team_id"],
+            "telegram_user_id": 999,
+            "user_id": 999,
+            "contest_id": 999,
+            "match_id": 999,
+        },
+    )
+
+    assert response.status_code == 201
+    with create_connection(database_path) as connection:
+        authors = connection.execute(
+            """
+            SELECT users.telegram_user_id
+            FROM match_predictions
+            JOIN users ON users.id = match_predictions.user_id
+            """
+        ).fetchall()
+    assert [row["telegram_user_id"] for row in authors] == [123]
+
+
+def test_denied_administrative_operations_do_not_mutate_multiple_domain_areas(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(create_app())
+    contest = create_tma_contest(client, idempotency_key="denied-mutations-contest")
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="denied-mutations-match"),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2030-06-11T18:00:00Z",
+        },
+    )
+    assert match_response.status_code == 201
+    match = match_response.json()["match"]
+    monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
+
+    result_response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match['id']}/result",
+        headers=build_tma_headers(),
+        json={
+            "home_score": 1,
+            "away_score": 0,
+            "advancing_team_id": match["home_team_id"],
+        },
+    )
+    settings_response = client.put(
+        (f"/api/tma/contests/{contest['id']}/match-prediction-publication/settings"),
+        headers=build_tma_headers(),
+        json={"enabled": True},
+    )
+    deletion_response = client.delete(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert result_response.status_code == 403
+    assert settings_response.status_code == 403
+    assert deletion_response.status_code == 403
+    with create_connection(database_path) as connection:
+        contest_row = connection.execute(
+            """
+            SELECT match_prediction_publication_enabled
+            FROM contests
+            WHERE id = ?
+            """,
+            (contest["id"],),
+        ).fetchone()
+        assert contest_row is not None
+        assert contest_row["match_prediction_publication_enabled"] == 0
+        stored_match = connection.execute(
+            """
+            SELECT matches.status,
+                   matches.home_score_final,
+                   matches.away_score_final,
+                   ties.advancing_team_id
+            FROM matches
+            JOIN ties ON ties.id = matches.tie_id
+            WHERE matches.id = ?
+            """,
+            (match["id"],),
+        ).fetchone()
+        assert tuple(stored_match) == ("scheduled", None, None, None)
 
 
 def test_participant_can_read_contest_matches_and_leaderboard_with_enforcement(
