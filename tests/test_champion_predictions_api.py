@@ -5,10 +5,12 @@ import time
 from pathlib import Path
 from urllib.parse import urlencode
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.database import create_connection, database_connection, initialize_database
-from app.main import create_app
+from app.main import create_app as create_application
+from app.tma_api import get_telegram_administrators_client
 from app.tma_auth import calculate_init_data_hash
 from app.tma_launch import create_tma_launch_token
 
@@ -18,6 +20,20 @@ TELEGRAM_CHAT_ID = -1001234567890
 CHAT_TITLE = "Футбольные прогнозы"
 FUTURE_DEADLINE = "2035-01-01T12:00:00Z"
 PAST_DEADLINE = "2020-01-01T12:00:00Z"
+
+
+class FakeTelegramAdministratorsClient:
+    async def get_chat_administrators(self, chat_id: int) -> list[object]:
+        assert chat_id == TELEGRAM_CHAT_ID
+        return []
+
+
+def create_app() -> FastAPI:
+    app = create_application()
+    app.dependency_overrides[get_telegram_administrators_client] = (
+        FakeTelegramAdministratorsClient
+    )
+    return app
 
 
 def build_signed_init_data(fields: dict[str, str]) -> str:
@@ -33,6 +49,7 @@ def configure_test_environment(*, monkeypatch, database_path: Path) -> None:
     monkeypatch.setenv("BOT_TOKEN", BOT_TOKEN)
     monkeypatch.setenv("BOT_USERNAME", "ZhpchshtsPredictorBot")
     monkeypatch.setenv("DATABASE_PATH", str(database_path))
+    monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "false")
 
 
 def build_tma_headers() -> dict[str, str]:

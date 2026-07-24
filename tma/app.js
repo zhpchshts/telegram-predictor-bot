@@ -281,7 +281,7 @@ function createContestsCard(
     return createInfoCard(
       "В этом чате пока нет конкурсов",
       [
-        "Создай первый конкурс прогнозов на Чемпионат мира 2026.",
+        "Когда будет создан конкурс, он появится здесь.",
         "Позже здесь можно будет вести несколько параллельных конкурсов.",
       ],
       "contest-list-card",
@@ -296,10 +296,7 @@ function createContestsCard(
     createContestListCard(
       "Активные конкурсы",
       normalizedActiveContests.length > 0
-        ? (
-          "Открой конкурс, чтобы делать прогнозы, смотреть рейтинг "
-          + "и управлять матчами."
-        )
+        ? "Открой конкурс, чтобы делать прогнозы и смотреть рейтинг."
         : "Здесь будут конкурсы, в которых ещё можно участвовать.",
       normalizedActiveContests,
       onOpenContest,
@@ -1630,7 +1627,13 @@ function ensurePredictionProgressSummary(section) {
   updatePredictionProgress(summary);
 }
 
-function createMatchResultSection(contest, match, state, onResultSaved) {
+function createMatchResultSection(
+  contest,
+  match,
+  state,
+  onResultSaved,
+  canManageResults,
+) {
   const result = match.result;
   const section = createElement("div", {
     className: "match-result-section",
@@ -1640,7 +1643,7 @@ function createMatchResultSection(contest, match, state, onResultSaved) {
     text: "Результат матча",
   });
 
-  if (contest.is_active === false) {
+  if (contest.is_active === false || !canManageResults) {
     const readOnlyMessage = createElement("p", {
       className: "match-prediction-closed",
       text: result
@@ -1649,7 +1652,9 @@ function createMatchResultSection(contest, match, state, onResultSaved) {
           + `Победитель противостояния: `
           + `${getTeamNameById(match, result.advancing_team_id)}.`
         )
-        : "Конкурс завершён. Результаты доступны только для просмотра.",
+        : contest.is_active === false
+          ? "Конкурс завершён. Результаты доступны только для просмотра."
+          : "Результат пока не внесён.",
     });
 
     section.append(heading, readOnlyMessage);
@@ -3327,7 +3332,7 @@ function createMatchListItem(
   state,
   onResultSaved,
   onMatchDeletionStateChange,
-  { showPredictions, showResults },
+  { showPredictions, showResults, canManageResults = true },
 ) {
   const item = createElement("li", {
     className: "match-list-item",
@@ -3361,7 +3366,13 @@ function createMatchListItem(
 
   if (showResults) {
     sections.push(
-      createMatchResultSection(contest, match, state, onResultSaved),
+      createMatchResultSection(
+        contest,
+        match,
+        state,
+        onResultSaved,
+        canManageResults,
+      ),
     );
   }
 
@@ -3429,6 +3440,7 @@ function createMatchesCard(
     emptyMessages,
     showPredictions,
     showResults,
+    canManageResults = true,
     leadingItems = [],
     listItems = null,
   },
@@ -3485,6 +3497,7 @@ function createMatchesCard(
             {
               showPredictions,
               showResults,
+              canManageResults,
             },
           ),
         );
@@ -3528,7 +3541,7 @@ function createMatchFormCard(bootstrap, contest, state) {
   });
   const description = createElement("p", {
     className: "subtitle",
-    text: "Любой участник этого чата может добавить матч в конкурс.",
+    text: "Укажите команды и время начала матча.",
   });
   const form = createElement("form", {
     className: "form-fields",
@@ -3808,6 +3821,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
     : [];
   const activeTab = getActiveContestTab(state.activeTab);
   const isActive = contest.is_active !== false;
+  const canManage = canManageContests(bootstrap);
   const cards = [
     createContestDetailsCard(contest, () => {
       renderContestScreen(bootstrap);
@@ -3834,7 +3848,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
         contest,
         matches,
         state,
-        (resultState) => {
+        canManage ? (resultState) => {
           void openContest(bootstrap, contest.id, {
             ...state,
             activeTab: "matches",
@@ -3842,22 +3856,25 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
             resultMessage: resultState.message,
             resultMessageType: resultState.type,
           });
-        },
-        (deletionState) => {
+        } : null,
+        canManage ? (deletionState) => {
           void openContest(bootstrap, contest.id, {
             ...state,
             activeTab: "matches",
             ...deletionState,
           });
-        },
+        } : null,
         {
           title: "Матчи",
           emptyMessages: isActive
-            ? ["Матчей пока нет.", "Добавьте первый матч ниже."]
+            ? canManage
+              ? ["Матчей пока нет.", "Добавьте первый матч ниже."]
+              : ["Матчей пока нет."]
             : ["Матчей нет."],
           showPredictions: false,
           showResults: true,
-          leadingItems: isActive
+          canManageResults: canManage,
+          leadingItems: isActive && canManage
             ? [
               createMatchPredictionPublicationAdministrationCard(
                 contest,
@@ -3884,13 +3901,15 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
       ),
     );
 
-	if (isActive) {
-	  cards.push(
-		createMatchFormCard(bootstrap, contest, state),
-		createContestCompletionCard(bootstrap, contest, state),
-		createContestDeletionCard(bootstrap, contest, state),
-	  );
-	}
+    if (isActive && canManage) {
+      cards.push(
+        createMatchFormCard(bootstrap, contest, state),
+        createContestCompletionCard(bootstrap, contest, state),
+        createContestDeletionCard(bootstrap, contest, state),
+      );
+    } else if (isActive && isContestManagementVerificationUnavailable(bootstrap)) {
+      cards.push(createContestManagementUnavailableCard());
+    }
   } else {
     cards.push(
       createContestRulesCard(contest.champion_prediction),
@@ -4229,9 +4248,48 @@ function createRoleManagementUnavailableCard() {
     [
       "Не удалось проверить права администратора Telegram.",
       "Поэтому управление супермодераторами временно недоступно. "
-        + "Существующие конкурсы продолжают работать как раньше.",
+        + "Доступ к управлению конкурсами определяется отдельно. "
+        + "Просмотр и прогнозирование продолжают работать.",
     ],
     "role-management-unavailable-card",
+  );
+}
+
+function canManageContests(bootstrap) {
+  return (
+    bootstrap.access?.enforcement_enabled !== true
+    || bootstrap.access?.can_manage_contests === true
+  );
+}
+
+function isContestManagementVerificationUnavailable(bootstrap) {
+  return (
+    bootstrap.access?.enforcement_enabled === true
+    && bootstrap.access?.can_manage_contests !== true
+    && bootstrap.access?.verification_status === "unavailable"
+  );
+}
+
+function createContestManagementUnavailableCard() {
+  return createInfoCard(
+    "Управление конкурсами временно недоступно",
+    [
+      "Не удалось проверить права администратора Telegram. "
+        + "Управление конкурсами временно недоступно. "
+        + "Просмотр и прогнозирование продолжают работать.",
+    ],
+    "contest-management-unavailable-card",
+  );
+}
+
+function createContestManagementRestrictedCard() {
+  return createInfoCard(
+    "Управление конкурсами",
+    [
+      "Создавать и настраивать конкурсы могут администраторы чата "
+        + "и супермодераторы.",
+    ],
+    "contest-management-restricted-card",
   );
 }
 
@@ -4297,9 +4355,16 @@ function renderContestScreen(bootstrap, state = {}) {
       void openContest(bootstrap, contestId);
     },
   );
-  const creationCard = state.mode === "confirm"
-    ? createContestConfirmationCard(bootstrap, state)
-    : createContestFormCard(bootstrap, state);
+  let creationCard;
+  if (canManageContests(bootstrap)) {
+    creationCard = state.mode === "confirm"
+      ? createContestConfirmationCard(bootstrap, state)
+      : createContestFormCard(bootstrap, state);
+  } else if (isContestManagementVerificationUnavailable(bootstrap)) {
+    creationCard = createContestManagementUnavailableCard();
+  } else {
+    creationCard = createContestManagementRestrictedCard();
+  }
 
   const cards = [contestCard, creationCard];
   if (bootstrap.access?.can_manage_roles === true) {

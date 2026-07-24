@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.access_control import (
     AccessDecision,
+    AccessVerificationStatus,
     TelegramAdministratorsClient,
     TelegramAdministratorsSnapshot,
     TelegramAdministratorsUnavailableError,
@@ -159,6 +160,50 @@ def get_telegram_username_resolver(request: Request) -> TelegramUsernameResolver
         raise RuntimeError(
             "Telegram username resolver is unavailable outside application lifespan."
         ) from error
+
+
+async def _authorize_contest_management(
+    telegram_client: Annotated[
+        TelegramAdministratorsClient,
+        Depends(get_telegram_administrators_client),
+    ],
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> TmaContext:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+    if not settings.role_enforcement_enabled:
+        return context
+
+    access = await determine_access(
+        database_path=settings.database_path,
+        telegram_chat_id=context.chat.telegram_chat_id,
+        telegram_user_id=context.user.telegram_user_id,
+        telegram_client=telegram_client,
+        enforcement_enabled=True,
+    )
+    if access.can_manage_contests:
+        return context
+    if access.verification_status is AccessVerificationStatus.UNAVAILABLE:
+        raise _application_http_error(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="contest_management_verification_unavailable",
+            message=(
+                "Не удалось проверить права администратора Telegram. "
+                "Управление конкурсами временно недоступно."
+            ),
+        )
+    raise _application_http_error(
+        status_code=status.HTTP_403_FORBIDDEN,
+        code="contest_management_forbidden",
+        message=(
+            "Управлять конкурсами могут только администраторы чата и супермодераторы."
+        ),
+    )
 
 
 @router.get("/bootstrap")
@@ -457,18 +502,12 @@ async def revoke_tma_supermoderator(
 @router.post("/contests")
 async def create_tma_contest(
     payload: CreateContestRequest,
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
     idempotency_key: Annotated[
         str | None,
         Header(alias=IDEMPOTENCY_KEY_HEADER),
     ] = None,
 ) -> JSONResponse:
-    context = _get_verified_tma_context(
-        x_telegram_init_data=x_telegram_init_data,
-    )
     if not idempotency_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -518,14 +557,8 @@ async def create_tma_contest(
 async def delete_tma_match(
     contest_id: int,
     match_id: int,
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
 ) -> Response:
-    context = _get_verified_tma_context(
-        x_telegram_init_data=x_telegram_init_data,
-    )
     settings = load_settings()
 
     try:
@@ -590,15 +623,8 @@ async def get_tma_contest(
 @router.post("/contests/{contest_id}/complete")
 async def complete_tma_contest(
     contest_id: int,
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
 ) -> JSONResponse:
-    context = _get_verified_tma_context(
-        x_telegram_init_data=x_telegram_init_data,
-    )
-
     settings = load_settings()
     now_utc = _utc_now()
 
@@ -646,14 +672,8 @@ async def complete_tma_contest(
 )
 async def delete_tma_contest(
     contest_id: int,
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
 ) -> Response:
-    context = _get_verified_tma_context(
-        x_telegram_init_data=x_telegram_init_data,
-    )
     settings = load_settings()
 
     try:
@@ -680,18 +700,12 @@ async def delete_tma_contest(
 async def create_tma_match(
     contest_id: int,
     payload: CreateMatchRequest,
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
     idempotency_key: Annotated[
         str | None,
         Header(alias=IDEMPOTENCY_KEY_HEADER),
     ] = None,
 ) -> JSONResponse:
-    context = _get_verified_tma_context(
-        x_telegram_init_data=x_telegram_init_data,
-    )
     if not idempotency_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -820,14 +834,8 @@ async def save_tma_match_result(
     contest_id: int,
     match_id: int,
     payload: SaveMatchResultRequest,
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
 ) -> JSONResponse:
-    context = _get_verified_tma_context(
-        x_telegram_init_data=x_telegram_init_data,
-    )
     settings = load_settings()
     try:
         result = save_match_result(
@@ -880,14 +888,8 @@ async def save_tma_match_result(
 async def save_tma_match_prediction_publication_settings(
     contest_id: int,
     payload: SaveMatchPredictionPublicationSettingsRequest,
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
 ) -> JSONResponse:
-    context = _get_verified_tma_context(
-        x_telegram_init_data=x_telegram_init_data,
-    )
     settings = load_settings()
     try:
         save_match_prediction_publication_settings(
@@ -938,14 +940,8 @@ async def save_tma_match_prediction_publication_settings(
 async def save_tma_champion_prediction_settings(
     contest_id: int,
     payload: SaveChampionPredictionSettingsRequest,
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
 ) -> JSONResponse:
-    context = _get_verified_tma_context(
-        x_telegram_init_data=x_telegram_init_data,
-    )
     settings = load_settings()
     try:
         save_champion_prediction_settings(
@@ -1044,14 +1040,8 @@ async def save_tma_champion_prediction(
 async def save_tma_contest_champion(
     contest_id: int,
     payload: SaveContestChampionRequest,
-    x_telegram_init_data: Annotated[
-        str | None,
-        Header(alias=TMA_INIT_DATA_HEADER),
-    ] = None,
+    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
 ) -> JSONResponse:
-    context = _get_verified_tma_context(
-        x_telegram_init_data=x_telegram_init_data,
-    )
     settings = load_settings()
     try:
         champion = save_contest_champion(
