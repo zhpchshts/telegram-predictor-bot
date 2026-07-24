@@ -74,11 +74,64 @@ def test_tma_explains_unavailable_telegram_admin_verification() -> None:
     )
     assert "cards.push(createRoleManagementUnavailableCard())" in screen_source
     assert "Не удалось проверить права администратора Telegram." in source
-    assert "Существующие конкурсы продолжают работать как раньше." in source
+    assert "Доступ к управлению конкурсами определяется отдельно." in source
+    assert "Просмотр и прогнозирование продолжают работать." in source
     assert (
         "cards.push(createSupermoderatorManagementCard());\n"
         "  } else if (bootstrap.access?.verification_status"
     ) in screen_source
+
+
+def test_tma_hides_contest_management_without_access() -> None:
+    source = (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
+    details_start = source.index("function renderContestDetailsScreen")
+    details_end = source.index("async function openContest", details_start)
+    details_source = source[details_start:details_end]
+    screen_start = source.index("function renderContestScreen")
+    screen_end = source.index("function renderBootstrap", screen_start)
+    screen_source = source[screen_start:screen_end]
+
+    assert "bootstrap.access?.enforcement_enabled !== true" in source
+    assert "bootstrap.access?.can_manage_contests === true" in source
+    assert "Создавать и настраивать конкурсы могут администраторы чата" in source
+    assert "Когда будет создан конкурс, он появится здесь." in source
+    assert "Открой конкурс, чтобы делать прогнозы и смотреть рейтинг." in source
+    assert "Укажите команды и время начала матча." in source
+    assert "Любой участник этого чата может добавить матч" not in source
+    assert "и управлять матчами." not in source
+    assert "creationCard = createContestManagementRestrictedCard()" in screen_source
+    assert "creationCard = createContestManagementUnavailableCard()" in screen_source
+    assert "canManage ? (resultState)" in details_source
+    assert "canManage ? (deletionState)" in details_source
+    assert "leadingItems: isActive && canManage" in details_source
+    assert (
+        '? canManage\n              ? ["Матчей пока нет.", '
+        '"Добавьте первый матч ниже."]\n'
+        '              : ["Матчей пока нет."]'
+    ) in details_source
+    assert "if (isActive && canManage)" in details_source
+    assert "createMatchFormCard(bootstrap, contest, state)" in details_source
+    assert "createContestCompletionCard(bootstrap, contest, state)" in details_source
+    assert "createContestDeletionCard(bootstrap, contest, state)" in details_source
+    assert "Результат пока не внесён." in source
+    assert "createMatchPredictionSection(contest, match)" in source
+    assert "createLeaderboardCard(leaderboard, contest.champion_prediction)" in source
+
+
+def test_tma_keeps_supermoderator_role_management_separate() -> None:
+    source = (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
+    screen_start = source.index("function renderContestScreen")
+    screen_end = source.index("function renderBootstrap", screen_start)
+    screen_source = source[screen_start:screen_end]
+
+    assert "if (bootstrap.access?.can_manage_roles === true)" in screen_source
+    assert "cards.push(createSupermoderatorManagementCard())" in screen_source
+    assert (
+        "can_manage_contests"
+        not in screen_source[
+            screen_source.index("if (bootstrap.access?.can_manage_roles === true)") :
+        ]
+    )
 
 
 def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None:
