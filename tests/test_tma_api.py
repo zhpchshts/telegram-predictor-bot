@@ -10,6 +10,7 @@ from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import GetChatAdministrators
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import BaseModel, ValidationError
 import pytest
 
 from app.database import create_connection, initialize_database
@@ -24,8 +25,15 @@ from app.telegram_username_resolver import (
     UnavailableTelegramUsernameResolver,
 )
 from app.tma_api import (
+    SaveChampionPredictionRequest,
+    SaveChampionPredictionSettingsRequest,
+    SaveContestChampionRequest,
+    SaveMatchPredictionRequest,
+    SaveMatchResultRequest,
+    TelegramUserIdInvalidError,
     _authorize_contest_management,
     _authorize_role_management,
+    _parse_telegram_user_id_target,
     get_telegram_administrators_client,
     get_telegram_username_resolver,
 )
@@ -219,6 +227,88 @@ def create_role_management_app(
             username_resolver
         )
     return app
+
+
+@pytest.mark.parametrize(
+    ("model_class", "payload", "field_names"),
+    [
+        (
+            SaveMatchPredictionRequest,
+            {
+                "predicted_home_score": 1,
+                "predicted_away_score": 0,
+                "predicted_advancing_team_id": 1,
+            },
+            (
+                "predicted_home_score",
+                "predicted_away_score",
+                "predicted_advancing_team_id",
+            ),
+        ),
+        (
+            SaveMatchResultRequest,
+            {
+                "home_score": 1,
+                "away_score": 0,
+                "advancing_team_id": 1,
+            },
+            ("home_score", "away_score", "advancing_team_id"),
+        ),
+        (
+            SaveChampionPredictionSettingsRequest,
+            {
+                "enabled": False,
+                "deadline_at": None,
+                "points": 5,
+            },
+            ("points",),
+        ),
+        (
+            SaveChampionPredictionRequest,
+            {"predicted_team_id": 1},
+            ("predicted_team_id",),
+        ),
+        (
+            SaveContestChampionRequest,
+            {"champion_team_id": 1},
+            ("champion_team_id",),
+        ),
+    ],
+)
+@pytest.mark.parametrize("invalid_value", [True, 2**63, -(2**63) - 1])
+def test_integer_request_fields_reject_boolean_and_oversized_values(
+    model_class: type[BaseModel],
+    payload: dict[str, object],
+    field_names: tuple[str, ...],
+    invalid_value: object,
+) -> None:
+    for field_name in field_names:
+        with pytest.raises(ValidationError):
+            model_class.model_validate(
+                {
+                    **payload,
+                    field_name: invalid_value,
+                }
+            )
+
+
+def test_integer_request_fields_preserve_numeric_string_coercion() -> None:
+    payload = SaveMatchPredictionRequest.model_validate(
+        {
+            "predicted_home_score": "2",
+            "predicted_away_score": "1",
+            "predicted_advancing_team_id": "3",
+        }
+    )
+
+    assert payload.predicted_home_score == 2
+    assert payload.predicted_away_score == 1
+    assert payload.predicted_advancing_team_id == 3
+
+
+def test_telegram_user_id_target_rejects_value_outside_sqlite_range() -> None:
+    with pytest.raises(TelegramUserIdInvalidError):
+        _parse_telegram_user_id_target(str(2**63))
 
 
 def test_telegram_admin_resolves_assigns_lists_and_revokes_supermoderator(
@@ -710,6 +800,40 @@ def test_contest_management_is_allowed_without_enforcement_or_telegram_check(
     assert response.status_code == 201
 
 
+def test_unenforced_local_supermoderator_is_recorded_in_audit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class UnexpectedTelegramAdministratorsClient:
+        async def get_chat_administrators(self, chat_id: int) -> list[object]:
+            raise AssertionError(f"Unexpected Telegram request for chat {chat_id}")
+
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    assign_current_user_as_supermoderator(database_path)
+    client = TestClient(
+        create_app_with_telegram_client(UnexpectedTelegramAdministratorsClient())
+    )
+
+    response = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="unenforced-supermoderator"),
+        json={"name": "Конкурс локального супермодератора"},
+    )
+
+    assert response.status_code == 201
+    with create_connection(database_path) as connection:
+        actor_role = connection.execute(
+            """
+            SELECT actor_role
+            FROM audit_events
+            WHERE event_type = 'contest_created'
+            """
+        ).fetchone()["actor_role"]
+    assert actor_role == "supermoderator"
+
+
 def test_telegram_admin_can_manage_contests_with_enforcement(
     monkeypatch,
     tmp_path: Path,
@@ -944,6 +1068,15 @@ def test_local_supermoderator_can_manage_when_telegram_is_unavailable(
     )
 
     assert response.status_code == 201
+    with create_connection(database_path) as connection:
+        actor_role = connection.execute(
+            """
+            SELECT actor_role
+            FROM audit_events
+            WHERE event_type = 'contest_created'
+            """
+        ).fetchone()["actor_role"]
+    assert actor_role == "supermoderator"
 
 
 def test_supermoderator_assignment_and_revocation_apply_to_next_request(
@@ -1375,6 +1508,28 @@ def test_create_contest_rejects_missing_init_data(
     }
 
 
+@pytest.mark.parametrize("contest_id", [2**63, -(2**63) - 1])
+def test_contest_route_rejects_id_outside_sqlite_range(
+    monkeypatch,
+    tmp_path: Path,
+    contest_id: int,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+
+    response = client.get(
+        f"/api/tma/contests/{contest_id}",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 422
+
+
 def test_create_contest_requires_idempotency_key(
     monkeypatch,
     tmp_path: Path,
@@ -1447,12 +1602,20 @@ def test_create_contest_creates_world_cup_2026_contest(
         requests_count = connection.execute(
             "SELECT COUNT(*) FROM contest_creation_requests"
         ).fetchone()[0]
+        audit_actor_role = connection.execute(
+            """
+            SELECT actor_role
+            FROM audit_events
+            WHERE event_type = 'contest_created'
+            """
+        ).fetchone()["actor_role"]
 
     assert contests_count == 1
     assert competitions_count == 1
     assert scoring_rule_sets_count == 1
     assert events_count == 1
     assert requests_count == 1
+    assert audit_actor_role == "unverified"
 
 
 def test_create_contest_reuses_result_for_same_idempotency_key(
@@ -2090,6 +2253,57 @@ def test_save_match_prediction_rejects_negative_score(
     assert response.json() == {
         "detail": "Прогноз первой команды не может быть отрицательным.",
     }
+
+
+def test_save_match_prediction_rejects_boolean_and_oversized_values_before_write(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="create-validated-match"),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Бразилия",
+            "starts_at_utc": "2030-06-11T18:00:00Z",
+        },
+    )
+    assert match_response.status_code == 201
+    match = match_response.json()["match"]
+
+    responses = [
+        client.put(
+            (f"/api/tma/contests/{contest['id']}/matches/{match['id']}/prediction"),
+            headers=build_tma_headers(),
+            json={
+                "predicted_home_score": invalid_value,
+                "predicted_away_score": 0,
+                "predicted_advancing_team_id": match["home_team_id"],
+            },
+        )
+        for invalid_value in (True, 2**63, -(2**63) - 1)
+    ]
+
+    assert [response.status_code for response in responses] == [422, 422, 422]
+    with create_connection(database_path) as connection:
+        match_prediction_count = connection.execute(
+            "SELECT COUNT(*) FROM match_predictions WHERE match_id = ?",
+            (match["id"],),
+        ).fetchone()[0]
+        tie_prediction_count = connection.execute(
+            "SELECT COUNT(*) FROM tie_predictions WHERE tie_id = ?",
+            (match["tie_id"],),
+        ).fetchone()[0]
+    assert match_prediction_count == 0
+    assert tie_prediction_count == 0
 
 
 def test_save_match_result_creates_updates_and_returns_result(

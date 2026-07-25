@@ -52,6 +52,27 @@ def test_launch_token_works_without_chat_title() -> None:
     assert context.chat_title is None
 
 
+def test_launch_token_omits_title_when_it_would_exceed_limit() -> None:
+    token = create_tma_launch_token(
+        chat_id=-1001234567890,
+        chat_type="supergroup",
+        chat_title="Я" * 128,
+        secret=SECRET,
+        now=NOW,
+    )
+
+    context = validate_tma_launch_token(
+        token,
+        secret=SECRET,
+        now=NOW,
+    )
+
+    assert len(token) <= 512
+    assert context.chat_id == -1001234567890
+    assert context.chat_type == "supergroup"
+    assert context.chat_title is None
+
+
 def test_launch_token_rejects_wrong_secret() -> None:
     token = create_tma_launch_token(
         chat_id=-1001234567890,

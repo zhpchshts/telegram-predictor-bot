@@ -159,7 +159,9 @@ def test_tma_reports_rejected_management_request_without_false_success() -> None
     assert "renderContestScreen(bootstrap" in rejection_source
 
 
-def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None:
+def test_lifespan_cleans_up_after_a_background_task_failure(
+    monkeypatch,
+) -> None:
     started: list[str] = []
     cancelled: list[str] = []
     startup_steps: list[str] = []
@@ -176,7 +178,11 @@ def test_lifespan_starts_and_cancels_match_lifecycle_worker(monkeypatch) -> None
 
     class FakeDispatcher:
         async def start_polling(self, *_args, **_kwargs) -> None:
-            await background_task("polling")
+            started.append("polling")
+            try:
+                raise RuntimeError("synthetic polling failure")
+            finally:
+                cancelled.append("polling")
 
         def resolve_used_update_types(self) -> list[str]:
             return []

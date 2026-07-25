@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from queue import Queue
+from threading import Event, local
 
 import pytest
 
@@ -1794,6 +1798,135 @@ def test_complete_contest_rejects_unfinished_match(
             database_path=database_path,
             contest_id=contest.id,
         )
+
+
+def test_concurrent_match_creation_and_completion_preserve_active_invariant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+
+    operation_context = local()
+    creation_checked_active = Event()
+    release_creation = Event()
+    release_completion = Event()
+    completion_checkpoint: Queue[str] = Queue()
+    original_database_connection = contest_service.database_connection
+    original_get_active_contest_row = contest_service._get_active_contest_row
+
+    @contextmanager
+    def coordinated_database_connection(path: Path):
+        with original_database_connection(path) as connection:
+            begin_was_reported = False
+
+            def trace_statement(statement: str) -> None:
+                nonlocal begin_was_reported
+                if (
+                    getattr(operation_context, "name", None) == "complete"
+                    and statement.strip().upper() == "BEGIN IMMEDIATE"
+                    and not begin_was_reported
+                ):
+                    begin_was_reported = True
+                    completion_checkpoint.put("begin_immediate")
+                    release_completion.wait(timeout=5)
+
+            connection.set_trace_callback(trace_statement)
+            yield connection
+
+    def coordinated_get_active_contest_row(*args, **kwargs):
+        row = original_get_active_contest_row(*args, **kwargs)
+        operation_name = getattr(operation_context, "name", None)
+        if operation_name == "create":
+            creation_checked_active.set()
+            if not release_creation.wait(timeout=5):
+                raise RuntimeError("Timed out while coordinating match creation.")
+        elif operation_name == "complete":
+            completion_checkpoint.put("active_check")
+            if not release_completion.wait(timeout=5):
+                raise RuntimeError("Timed out while coordinating contest completion.")
+        return row
+
+    monkeypatch.setattr(
+        contest_service,
+        "database_connection",
+        coordinated_database_connection,
+    )
+    monkeypatch.setattr(
+        contest_service,
+        "_get_active_contest_row",
+        coordinated_get_active_contest_row,
+    )
+
+    def create_racing_match() -> Exception | None:
+        operation_context.name = "create"
+        try:
+            create_test_match(
+                database_path=database_path,
+                contest_id=contest.id,
+                starts_at_utc="2099-06-11T18:00:00Z",
+            )
+        except Exception as error:
+            return error
+        return None
+
+    def complete_racing_contest() -> Exception | None:
+        operation_context.name = "complete"
+        try:
+            complete_test_contest(
+                database_path=database_path,
+                contest_id=contest.id,
+            )
+        except Exception as error:
+            return error
+        return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        creation_future = executor.submit(create_racing_match)
+        assert creation_checked_active.wait(timeout=5)
+        completion_future = executor.submit(complete_racing_contest)
+        checkpoint = completion_checkpoint.get(timeout=5)
+
+        if checkpoint == "begin_immediate":
+            release_creation.set()
+            creation_error = creation_future.result(timeout=5)
+            release_completion.set()
+            completion_error = completion_future.result(timeout=5)
+        else:
+            # This branch deterministically recreates the old TOCTOU ordering:
+            # completion passes the active check while creation is still paused.
+            release_completion.set()
+            completion_error = completion_future.result(timeout=5)
+            release_creation.set()
+            creation_error = creation_future.result(timeout=5)
+
+    with create_connection(database_path) as connection:
+        is_active = bool(
+            connection.execute(
+                "SELECT is_active FROM contests WHERE id = ?",
+                (contest.id,),
+            ).fetchone()["is_active"]
+        )
+        match_statuses = [
+            str(row["status"])
+            for row in connection.execute(
+                """
+                SELECT matches.status
+                FROM matches
+                JOIN stages ON stages.id = matches.stage_id
+                JOIN competitions ON competitions.id = stages.competition_id
+                WHERE competitions.contest_id = ?
+                ORDER BY matches.id ASC
+                """,
+                (contest.id,),
+            ).fetchall()
+        ]
+
+    assert creation_error is None
+    assert isinstance(completion_error, ContestCompletionUnavailableError)
+    assert is_active is True
+    assert match_statuses == ["scheduled"]
 
 
 def test_complete_contest_requires_actual_champion_when_enabled(

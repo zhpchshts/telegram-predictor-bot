@@ -56,19 +56,11 @@ def create_tma_launch_token(
     if chat_title:
         payload["chat_title"] = chat_title
 
-    signature = _sign_payload(payload, secret=secret)
+    token = _encode_launch_token(payload, secret=secret)
 
-    token = _base32_encode(
-        json.dumps(
-            {
-                "payload": payload,
-                "signature": signature,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode()
-    )
+    if len(token) > MAX_TMA_LAUNCH_TOKEN_LENGTH and "chat_title" in payload:
+        payload.pop("chat_title")
+        token = _encode_launch_token(payload, secret=secret)
 
     if len(token) > MAX_TMA_LAUNCH_TOKEN_LENGTH:
         raise TmaLaunchTokenError("TMA launch token is too long.")
@@ -168,6 +160,20 @@ def _sign_payload(payload: dict[str, Any], *, secret: str) -> str:
             msg=payload_json,
             digestmod=hashlib.sha256,
         ).digest()
+    )
+
+
+def _encode_launch_token(payload: dict[str, Any], *, secret: str) -> str:
+    return _base32_encode(
+        json.dumps(
+            {
+                "payload": payload,
+                "signature": _sign_payload(payload, secret=secret),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
     )
 
 

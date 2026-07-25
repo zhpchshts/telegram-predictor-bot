@@ -117,6 +117,29 @@ async def determine_access(
     )
 
 
+def determine_unenforced_access(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    telegram_user_id: int,
+) -> AccessDecision:
+    local_assignment = get_active_supermoderator_assignment_by_telegram_ids(
+        database_path=database_path,
+        telegram_chat_id=telegram_chat_id,
+        telegram_user_id=telegram_user_id,
+    )
+    return _build_access_decision(
+        verification_status=AccessVerificationStatus.UNAVAILABLE,
+        role=(
+            AccessRole.SUPERMODERATOR
+            if local_assignment is not None
+            else AccessRole.PARTICIPANT
+        ),
+        enforcement_enabled=False,
+        administrators=None,
+    )
+
+
 def _build_access_decision(
     *,
     verification_status: AccessVerificationStatus,

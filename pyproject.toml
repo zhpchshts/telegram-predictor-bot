@@ -4,6 +4,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 88
 src = ["app", "tests"]
+extend-exclude = ["tmp"]
 
 [tool.ruff.format]
 quote-style = "double"

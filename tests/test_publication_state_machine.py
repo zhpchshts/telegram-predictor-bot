@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
 import sqlite3
+from threading import Event
 
 from aiogram.exceptions import (
     TelegramBadRequest,
@@ -16,7 +19,7 @@ from aiogram.methods import SendMessage
 from aiogram.types import InputRichMessage
 import pytest
 
-from app import publication_delivery, publication_worker
+from app import publication_delivery, publication_outbox, publication_worker
 from app.database import database_connection, initialize_database
 from app.publication_delivery import (
     ClaimLostError,
@@ -369,6 +372,128 @@ def test_temporary_retry_and_permanent_terminal_failure(tmp_path: Path) -> None:
             """
         ).fetchone()
     assert tuple(terminal) == ("terminal_failed", 1, None, "forbidden")
+
+
+def test_failure_of_old_revision_does_not_overwrite_new_revision_retry_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id = _seed_publications(database_path)
+    claim = claim_next_publication(database_path=database_path, now_utc=NOW)
+    assert claim is not None
+
+    failure_write_transaction_started = Event()
+    failure_selected_state = Event()
+    allow_failure_update = Event()
+    revision_update_attempted = Event()
+    original_database_connection = publication_outbox.database_connection
+
+    class PausingConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self.connection = connection
+
+        def execute(self, sql: str, parameters=()):
+            cursor = self.connection.execute(sql, parameters)
+            if sql.strip().upper() == "BEGIN IMMEDIATE":
+                failure_write_transaction_started.set()
+            if "SELECT desired_revision, attempt_count" not in sql:
+                return cursor
+
+            row = cursor.fetchone()
+            cursor.close()
+            failure_selected_state.set()
+            if not allow_failure_update.wait(timeout=5):
+                raise RuntimeError("Timed out while pausing publication failure.")
+
+            class SelectedRow:
+                def fetchone(self):
+                    return row
+
+            return SelectedRow()
+
+    @contextmanager
+    def pausing_database_connection(path: Path):
+        with original_database_connection(path) as connection:
+            yield PausingConnection(connection)
+
+    class SignalingConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self.connection = connection
+
+        def execute(self, sql: str, parameters=()):
+            if "UPDATE contest_publications" in sql:
+                revision_update_attempted.set()
+            return self.connection.execute(sql, parameters)
+
+    monkeypatch.setattr(
+        publication_outbox,
+        "database_connection",
+        pausing_database_connection,
+    )
+
+    def finish_old_revision() -> bool:
+        return finish_publication_failure(
+            database_path=database_path,
+            publication=claim,
+            error="old revision failure",
+            permanent=False,
+            retry_after_seconds=60,
+            now_utc=NOW,
+        )
+
+    def create_new_revision() -> bool:
+        with database_connection(database_path) as connection:
+            return revise_existing_publication(
+                SignalingConnection(connection),
+                contest_id=contest_id,
+                publication_type="contest_completed",
+                entity_id=1,
+                event_id=2,
+                desired_action="publish",
+                now_utc=NOW,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        failure = executor.submit(finish_old_revision)
+        try:
+            assert failure_selected_state.wait(timeout=5)
+            assert failure_write_transaction_started.is_set()
+            revision = executor.submit(create_new_revision)
+            assert revision_update_attempted.wait(timeout=5)
+            assert not revision.done()
+        finally:
+            allow_failure_update.set()
+
+        assert failure.result(timeout=5)
+        assert revision.result(timeout=5)
+
+    with database_connection(database_path) as connection:
+        publication = connection.execute(
+            """
+            SELECT
+                desired_revision,
+                settled_revision,
+                delivery_status,
+                attempt_count,
+                next_attempt_at,
+                last_error,
+                claim_token
+            FROM contest_publications
+            WHERE id = ?
+            """,
+            (claim.id,),
+        ).fetchone()
+
+    assert tuple(publication) == (
+        2,
+        0,
+        "pending",
+        0,
+        serialize_service_time(NOW),
+        None,
+        None,
+    )
 
 
 def test_contest_queue_is_held_during_retry_and_released_after_terminal(

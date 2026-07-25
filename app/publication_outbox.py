@@ -1047,6 +1047,7 @@ def finish_publication_failure(
     now = resolve_service_time(now_utc)
     now_value = serialize_service_time(now)
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
             """
             SELECT desired_revision, attempt_count

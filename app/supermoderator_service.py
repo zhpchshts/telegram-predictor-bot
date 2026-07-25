@@ -4,6 +4,12 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.audit_service import (
+    AuditActor,
+    AuditEntityType,
+    AuditEventType,
+    record_audit_event,
+)
 from app.database import database_connection
 from app.user_service import LocalUser
 
@@ -94,8 +100,10 @@ def assign_supermoderator_with_status(
     chat_id: int,
     user_id: int,
     assigned_by_user_id: int,
+    audit_actor: AuditActor | None = None,
 ) -> SupermoderatorAssignmentResult:
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         existing_row = _get_active_assignment_row(
             connection,
             chat_id=chat_id,
@@ -144,8 +152,33 @@ def assign_supermoderator_with_status(
         ).fetchone()
         if row is None:
             raise RuntimeError("Created supermoderator assignment was not found.")
+        assignment = _assignment_from_row(row)
+        if audit_actor is not None:
+            _validate_audit_actor_chat(
+                connection,
+                chat_id=chat_id,
+                audit_actor=audit_actor,
+            )
+            target_telegram_user_id = _get_telegram_user_id(
+                connection,
+                user_id=user_id,
+            )
+            record_audit_event(
+                connection,
+                actor=audit_actor,
+                event_type=AuditEventType.SUPERMODERATOR_ASSIGNED,
+                entity_type=AuditEntityType.SUPERMODERATOR_ASSIGNMENT,
+                entity_id=assignment.id,
+                contest_id=None,
+                before_state=None,
+                after_state=_assignment_snapshot(
+                    assignment,
+                    target_telegram_user_id=target_telegram_user_id,
+                ),
+                metadata={"target_telegram_user_id": target_telegram_user_id},
+            )
         return SupermoderatorAssignmentResult(
-            assignment=_assignment_from_row(row),
+            assignment=assignment,
             was_created=True,
         )
 
@@ -220,19 +253,30 @@ def revoke_supermoderator(
     chat_id: int,
     user_id: int,
     revoked_by_user_id: int,
+    audit_actor: AuditActor | None = None,
 ) -> SupermoderatorAssignment:
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        previous_row = _get_active_assignment_row(
+            connection,
+            chat_id=chat_id,
+            user_id=user_id,
+        )
+        if previous_row is None:
+            raise SupermoderatorAssignmentNotFoundError(
+                "Active supermoderator assignment was not found."
+            )
+        previous_assignment = _assignment_from_row(previous_row)
         cursor = connection.execute(
             """
             UPDATE supermoderator_assignments
             SET
                 revoked_by_user_id = ?,
                 revoked_at = CURRENT_TIMESTAMP
-            WHERE chat_id = ?
-              AND user_id = ?
+            WHERE id = ?
               AND revoked_at IS NULL
             """,
-            (revoked_by_user_id, chat_id, user_id),
+            (revoked_by_user_id, previous_assignment.id),
         )
         if cursor.rowcount != 1:
             raise SupermoderatorAssignmentNotFoundError(
@@ -243,15 +287,41 @@ def revoke_supermoderator(
             """
             SELECT *
             FROM supermoderator_assignments
-            WHERE chat_id = ? AND user_id = ?
-            ORDER BY id DESC
-            LIMIT 1
+            WHERE id = ?
             """,
-            (chat_id, user_id),
+            (previous_assignment.id,),
         ).fetchone()
         if row is None:
             raise RuntimeError("Revoked supermoderator assignment was not found.")
-        return _assignment_from_row(row)
+        assignment = _assignment_from_row(row)
+        if audit_actor is not None:
+            _validate_audit_actor_chat(
+                connection,
+                chat_id=chat_id,
+                audit_actor=audit_actor,
+            )
+            target_telegram_user_id = _get_telegram_user_id(
+                connection,
+                user_id=user_id,
+            )
+            record_audit_event(
+                connection,
+                actor=audit_actor,
+                event_type=AuditEventType.SUPERMODERATOR_REVOKED,
+                entity_type=AuditEntityType.SUPERMODERATOR_ASSIGNMENT,
+                entity_id=assignment.id,
+                contest_id=None,
+                before_state=_assignment_snapshot(
+                    previous_assignment,
+                    target_telegram_user_id=target_telegram_user_id,
+                ),
+                after_state=_assignment_snapshot(
+                    assignment,
+                    target_telegram_user_id=target_telegram_user_id,
+                ),
+                metadata={"target_telegram_user_id": target_telegram_user_id},
+            )
+        return assignment
 
 
 def _get_active_assignment_row(
@@ -286,3 +356,48 @@ def _assignment_from_row(row: sqlite3.Row) -> SupermoderatorAssignment:
         ),
         revoked_at=str(row["revoked_at"]) if row["revoked_at"] is not None else None,
     )
+
+
+def _assignment_snapshot(
+    assignment: SupermoderatorAssignment,
+    *,
+    target_telegram_user_id: int,
+) -> dict[str, object]:
+    return {
+        "assigned_at": assignment.assigned_at,
+        "assigned_by_user_id": assignment.assigned_by_user_id,
+        "assignment_id": assignment.id,
+        "chat_id": assignment.chat_id,
+        "revoked_at": assignment.revoked_at,
+        "revoked_by_user_id": assignment.revoked_by_user_id,
+        "target_telegram_user_id": target_telegram_user_id,
+        "user_id": assignment.user_id,
+    }
+
+
+def _get_telegram_user_id(
+    connection: sqlite3.Connection,
+    *,
+    user_id: int,
+) -> int:
+    row = connection.execute(
+        "SELECT telegram_user_id FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Supermoderator target user was not found.")
+    return int(row["telegram_user_id"])
+
+
+def _validate_audit_actor_chat(
+    connection: sqlite3.Connection,
+    *,
+    chat_id: int,
+    audit_actor: AuditActor,
+) -> None:
+    row = connection.execute(
+        "SELECT telegram_chat_id FROM chats WHERE id = ?",
+        (chat_id,),
+    ).fetchone()
+    if row is None or int(row["telegram_chat_id"]) != audit_actor.telegram_chat_id:
+        raise ValueError("Audit actor chat does not match assignment chat.")

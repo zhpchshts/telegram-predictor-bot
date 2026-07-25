@@ -8,6 +8,12 @@ from pathlib import Path
 import secrets
 from typing import Literal
 
+from app.audit_service import (
+    AuditActor,
+    AuditEntityType,
+    AuditEventType,
+    record_audit_event,
+)
 from app.database import database_connection
 from app.match_lifecycle import start_due_matches
 from app.publication_outbox import (
@@ -750,10 +756,12 @@ def complete_contest(
     last_name: str | None,
     username: str | None,
     now_utc: datetime | None = None,
+    audit_actor: AuditActor | None = None,
 ) -> None:
     resolved_now_utc = _resolve_now_utc(now_utc)
 
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -828,6 +836,22 @@ def complete_contest(
             raise ContestCompletedError(
                 "Конкурс завершён. Изменения в нём больше недоступны."
             )
+        completed_contest_row = _get_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        _record_audit(
+            connection,
+            audit_actor=audit_actor,
+            telegram_chat_id=telegram_chat_id,
+            event_type=AuditEventType.CONTEST_FINISHED,
+            entity_type=AuditEntityType.CONTEST,
+            entity_id=contest_id,
+            contest_id=contest_id,
+            before_state=_contest_snapshot(contest_row),
+            after_state=_contest_snapshot(completed_contest_row),
+        )
 
         event_payload = json.dumps(
             {"is_active": False},
@@ -871,21 +895,15 @@ def delete_contest(
     database_path: Path,
     telegram_chat_id: int,
     contest_id: int,
+    audit_actor: AuditActor | None = None,
 ) -> None:
     with database_connection(database_path) as connection:
-        contest_row = connection.execute(
-            """
-            SELECT contests.id, contests.is_active
-            FROM contests
-            JOIN chats ON chats.id = contests.chat_id
-            WHERE chats.telegram_chat_id = ?
-            AND contests.id = ?
-            """,
-            (telegram_chat_id, contest_id),
-        ).fetchone()
-
-        if contest_row is None:
-            raise ContestNotFoundError("Конкурс не найден.")
+        connection.execute("BEGIN IMMEDIATE")
+        contest_row = _get_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
 
         if not bool(contest_row["is_active"]):
             raise ContestCompletedError("Завершённый конкурс удалить нельзя.")
@@ -903,6 +921,17 @@ def delete_contest(
             raise ContestCompletedError(
                 "Конкурс завершён. Изменения в нём больше недоступны."
             )
+        _record_audit(
+            connection,
+            audit_actor=audit_actor,
+            telegram_chat_id=telegram_chat_id,
+            event_type=AuditEventType.CONTEST_DELETED,
+            entity_type=AuditEntityType.CONTEST,
+            entity_id=contest_id,
+            contest_id=contest_id,
+            before_state=_contest_snapshot(contest_row),
+            after_state=None,
+        )
 
 
 def create_match(
@@ -918,6 +947,7 @@ def create_match(
     away_team_name: str,
     starts_at_utc: str,
     idempotency_key: str,
+    audit_actor: AuditActor | None = None,
 ) -> MatchCreationResult:
     normalized_home_team_name = _normalize_team_name(
         home_team_name,
@@ -939,6 +969,7 @@ def create_match(
     )
 
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -1138,6 +1169,19 @@ def create_match(
             contest_id=contest_id,
             match_id=match_id,
         )
+        if match_row is None:
+            raise RuntimeError("Не удалось создать матч.")
+        _record_audit(
+            connection,
+            audit_actor=audit_actor,
+            telegram_chat_id=telegram_chat_id,
+            event_type=AuditEventType.MATCH_CREATED,
+            entity_type=AuditEntityType.MATCH,
+            entity_id=match_id,
+            contest_id=contest_id,
+            before_state=None,
+            after_state=_match_snapshot(match_row),
+        )
 
     if match_row is None:
         raise RuntimeError("Не удалось создать матч.")
@@ -1158,8 +1202,10 @@ def delete_match(
     first_name: str,
     last_name: str | None,
     username: str | None,
+    audit_actor: AuditActor | None = None,
 ) -> None:
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -1283,6 +1329,17 @@ def delete_match(
                     """,
                     (tie_id,),
                 )
+        _record_audit(
+            connection,
+            audit_actor=audit_actor,
+            telegram_chat_id=telegram_chat_id,
+            event_type=AuditEventType.MATCH_DELETED,
+            entity_type=AuditEntityType.MATCH,
+            entity_id=match_id,
+            contest_id=contest_id,
+            before_state=_match_snapshot(match_row),
+            after_state=None,
+        )
 
 
 def save_match_prediction(
@@ -1315,6 +1372,7 @@ def save_match_prediction(
     resolved_now_utc = _resolve_now_utc(now_utc)
 
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -1437,6 +1495,7 @@ def save_match_result(
     away_score: int,
     advancing_team_id: int,
     now_utc: datetime | None = None,
+    audit_actor: AuditActor | None = None,
 ) -> MatchResultSaveResult:
     normalized_home_score = _normalize_match_result_score(
         home_score,
@@ -1453,6 +1512,7 @@ def save_match_result(
     resolved_now_utc = _resolve_now_utc(now_utc)
 
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -1595,6 +1655,39 @@ def save_match_result(
             was_created=previous_result is None,
             now_utc=resolved_now_utc,
         )
+        saved_match_row = _get_match_row(
+            connection,
+            contest_id=contest_id,
+            match_id=match_id,
+        )
+        if saved_match_row is None:
+            raise RuntimeError("Не удалось повторно прочитать результат матча.")
+        previous_result_state = _match_result_snapshot(previous_result)
+        saved_result_state = _match_result_snapshot(
+            MatchResult(
+                home_score=normalized_home_score,
+                away_score=normalized_away_score,
+                advancing_team_id=normalized_advancing_team_id,
+            )
+        )
+        if previous_result_state != saved_result_state:
+            _record_audit(
+                connection,
+                audit_actor=audit_actor,
+                telegram_chat_id=telegram_chat_id,
+                event_type=(
+                    AuditEventType.MATCH_RESULT_SET
+                    if previous_result is None
+                    else AuditEventType.MATCH_RESULT_CHANGED
+                ),
+                entity_type=AuditEntityType.MATCH,
+                entity_id=match_id,
+                contest_id=contest_id,
+                before_state=(
+                    _match_snapshot(match_row) if previous_result is not None else None
+                ),
+                after_state=_match_snapshot(saved_match_row),
+            )
 
         return MatchResultSaveResult(
             result=MatchResult(
@@ -1617,6 +1710,7 @@ def save_match_prediction_publication_settings(
     username: str | None,
     enabled: bool,
     now_utc: datetime | None = None,
+    audit_actor: AuditActor | None = None,
 ) -> None:
     if not isinstance(enabled, bool):
         raise ValueError(
@@ -1626,6 +1720,7 @@ def save_match_prediction_publication_settings(
     resolved_now_utc = _resolve_now_utc(now_utc)
 
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -1685,6 +1780,23 @@ def save_match_prediction_publication_settings(
             event_id=settings_event_id,
             now_utc=resolved_now_utc,
         )
+        updated_contest_row = _get_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        _record_audit(
+            connection,
+            audit_actor=audit_actor,
+            telegram_chat_id=telegram_chat_id,
+            event_type=AuditEventType.CONTEST_UPDATED,
+            entity_type=AuditEntityType.CONTEST,
+            entity_id=contest_id,
+            contest_id=contest_id,
+            before_state=_contest_snapshot(contest_row),
+            after_state=_contest_snapshot(updated_contest_row),
+            metadata={"changed_section": "match_prediction_publication"},
+        )
 
 
 def save_champion_prediction_settings(
@@ -1700,12 +1812,13 @@ def save_champion_prediction_settings(
     deadline_at: str | None,
     points: int,
     now_utc: datetime | None = None,
+    audit_actor: AuditActor | None = None,
 ) -> None:
     resolved_now_utc = _resolve_now_utc(now_utc)
 
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
-        _get_active_contest_row(
+        contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
@@ -1800,6 +1913,24 @@ def save_champion_prediction_settings(
                 event_id=settings_event_id,
                 now_utc=resolved_now_utc,
             )
+        updated_contest_row = _get_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        if _contest_snapshot(contest_row) != _contest_snapshot(updated_contest_row):
+            _record_audit(
+                connection,
+                audit_actor=audit_actor,
+                telegram_chat_id=telegram_chat_id,
+                event_type=AuditEventType.CONTEST_UPDATED,
+                entity_type=AuditEntityType.CONTEST,
+                entity_id=contest_id,
+                contest_id=contest_id,
+                before_state=_contest_snapshot(contest_row),
+                after_state=_contest_snapshot(updated_contest_row),
+                metadata={"changed_section": "champion_prediction"},
+            )
 
 
 def save_champion_prediction(
@@ -1821,6 +1952,7 @@ def save_champion_prediction(
     resolved_now_utc = _resolve_now_utc(now_utc)
 
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -1931,6 +2063,7 @@ def save_contest_champion(
     username: str | None,
     champion_team_id: int,
     now_utc: datetime | None = None,
+    audit_actor: AuditActor | None = None,
 ) -> TeamSummary:
     normalized_team_id = _normalize_champion_team_id(
         champion_team_id,
@@ -1941,7 +2074,7 @@ def save_contest_champion(
 
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
-        _get_active_contest_row(
+        contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
@@ -2024,6 +2157,26 @@ def save_contest_champion(
             was_created=previous_champion_team_id is None,
             now_utc=resolved_now_utc,
         )
+        updated_contest_row = _get_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        _record_audit(
+            connection,
+            audit_actor=audit_actor,
+            telegram_chat_id=telegram_chat_id,
+            event_type=(
+                AuditEventType.CONTEST_CHAMPION_SET
+                if previous_champion_team_id is None
+                else AuditEventType.CONTEST_CHAMPION_CHANGED
+            ),
+            entity_type=AuditEntityType.CONTEST,
+            entity_id=contest_id,
+            contest_id=contest_id,
+            before_state=_contest_snapshot(contest_row),
+            after_state=_contest_snapshot(updated_contest_row),
+        )
 
         return _team_summary_from_row(team_row)
 
@@ -2039,12 +2192,14 @@ def create_world_cup_2026_contest(
     username: str | None,
     contest_name: str,
     idempotency_key: str,
+    audit_actor: AuditActor | None = None,
 ) -> ContestCreationResult:
     normalized_contest_name = _normalize_contest_name(contest_name)
     normalized_idempotency_key = _normalize_idempotency_key(idempotency_key)
     request_fingerprint = _build_request_fingerprint(normalized_contest_name)
 
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         chat_id = _upsert_chat(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -2222,6 +2377,24 @@ def create_world_cup_2026_contest(
             """,
             (contest_id,),
         ).fetchone()
+        if contest_row is None:
+            raise RuntimeError("Не удалось создать конкурс.")
+        audit_contest_row = _get_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        _record_audit(
+            connection,
+            audit_actor=audit_actor,
+            telegram_chat_id=telegram_chat_id,
+            event_type=AuditEventType.CONTEST_CREATED,
+            entity_type=AuditEntityType.CONTEST,
+            entity_id=contest_id,
+            contest_id=contest_id,
+            before_state=None,
+            after_state=_contest_snapshot(audit_contest_row),
+        )
 
     if contest_row is None:
         raise RuntimeError("Не удалось создать конкурс.")
@@ -2340,6 +2513,103 @@ def _get_contest_row(
         raise ContestNotFoundError("Конкурс не найден.")
 
     return contest_row
+
+
+def _record_audit(
+    connection,
+    *,
+    audit_actor: AuditActor | None,
+    telegram_chat_id: int,
+    event_type: AuditEventType,
+    entity_type: AuditEntityType,
+    entity_id: int | None,
+    contest_id: int | None,
+    before_state: dict[str, object] | None,
+    after_state: dict[str, object] | None,
+    metadata: dict[str, object] | None = None,
+) -> None:
+    if audit_actor is None:
+        return
+    if audit_actor.telegram_chat_id != telegram_chat_id:
+        raise ValueError("Audit actor chat does not match the administrative action.")
+    record_audit_event(
+        connection,
+        actor=audit_actor,
+        event_type=event_type,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        contest_id=contest_id,
+        before_state=before_state,
+        after_state=after_state,
+        metadata=metadata,
+    )
+
+
+def _contest_snapshot(row) -> dict[str, object]:
+    return {
+        "champion_prediction_deadline_at": row["champion_prediction_deadline_at"],
+        "champion_prediction_enabled": bool(row["champion_prediction_enabled"]),
+        "champion_prediction_points": int(row["champion_prediction_points"]),
+        "champion_team_id": (
+            int(row["champion_team_id"])
+            if row["champion_team_id"] is not None
+            else None
+        ),
+        "created_at": str(row["created_at"]),
+        "id": int(row["id"]),
+        "is_active": bool(row["is_active"]),
+        "match_prediction_publication_enabled": bool(
+            row["match_prediction_publication_enabled"]
+        ),
+        "match_prediction_publication_enabled_at": row[
+            "match_prediction_publication_enabled_at"
+        ],
+        "name": str(row["name"]),
+        "slug": str(row["slug"]),
+    }
+
+
+def _match_snapshot(row) -> dict[str, object]:
+    keys = set(row.keys())
+    return {
+        "advancing_team_id": (
+            int(row["advancing_team_id"])
+            if "advancing_team_id" in keys and row["advancing_team_id"] is not None
+            else None
+        ),
+        "away_score": (
+            int(row["away_score_final"])
+            if "away_score_final" in keys and row["away_score_final"] is not None
+            else None
+        ),
+        "away_team": {
+            "id": int(row["away_team_id"]),
+            "name": str(row["away_team_name"]),
+        },
+        "home_score": (
+            int(row["home_score_final"])
+            if "home_score_final" in keys and row["home_score_final"] is not None
+            else None
+        ),
+        "home_team": {
+            "id": int(row["home_team_id"]),
+            "name": str(row["home_team_name"]),
+        },
+        "id": int(row["id"]),
+        "starts_at_utc": str(row["starts_at_utc"]),
+        "status": str(row["status"]),
+        "tie_id": int(row["tie_id"]) if row["tie_id"] is not None else None,
+    }
+
+
+def _match_result_snapshot(result: MatchResult | None) -> dict[str, int] | None:
+    if result is None:
+        return None
+    return {
+        "advancing_team_id": result.advancing_team_id,
+        "away_score": result.away_score,
+        "home_score": result.home_score,
+    }
 
 
 def _get_active_contest_row(

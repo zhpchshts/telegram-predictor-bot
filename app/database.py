@@ -47,6 +47,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_supermoderator_assignments_active_chat_use
 CREATE INDEX IF NOT EXISTS idx_supermoderator_assignments_chat_user_history
     ON supermoderator_assignments(chat_id, user_id, assigned_at, id);
 
+CREATE TABLE IF NOT EXISTS audit_events (
+    id INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    actor_user_id INTEGER NOT NULL,
+    actor_role TEXT NOT NULL CHECK (
+        actor_role IN (
+            'telegram_admin',
+            'supermoderator',
+            'participant',
+            'unverified'
+        )
+    ),
+    event_type TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id INTEGER,
+    contest_id INTEGER,
+    before_state TEXT,
+    after_state TEXT,
+    metadata TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_chat_created
+    ON audit_events(chat_id, created_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_contest_created
+    ON audit_events(contest_id, created_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_event_type
+    ON audit_events(event_type);
+
 CREATE TABLE IF NOT EXISTS contests (
   id INTEGER PRIMARY KEY,
   chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,

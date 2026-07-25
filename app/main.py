@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
@@ -29,6 +29,25 @@ from app.telegram_username_resolver import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TMA_DIRECTORY = PROJECT_ROOT / "tma"
 logger = logging.getLogger(__name__)
+
+
+async def _cancel_background_tasks(
+    tasks: tuple[asyncio.Task[None], ...],
+) -> None:
+    for task in tasks:
+        task.cancel()
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for task, result in zip(tasks, results, strict=True):
+        if isinstance(result, BaseException) and not isinstance(
+            result,
+            asyncio.CancelledError,
+        ):
+            logger.error(
+                "Background task %s stopped with an error: %r",
+                task.get_name(),
+                result,
+            )
 
 
 def create_app() -> FastAPI:
@@ -73,48 +92,48 @@ def create_app() -> FastAPI:
             dispatcher.start_polling(
                 bot,
                 allowed_updates=dispatcher.resolve_used_update_types(),
-            )
+            ),
+            name="telegram-polling",
         )
         publication_task = asyncio.create_task(
             run_match_prediction_publication_worker(
                 bot=bot,
                 database_path=settings.database_path,
-            )
+            ),
+            name="match-prediction-publications",
         )
         contest_publication_task = asyncio.create_task(
             run_contest_publication_worker(
                 bot=bot,
                 database_path=settings.database_path,
-            )
+            ),
+            name="contest-publications",
         )
         match_lifecycle_task = asyncio.create_task(
-            run_match_lifecycle_worker(database_path=settings.database_path)
+            run_match_lifecycle_worker(database_path=settings.database_path),
+            name="match-lifecycle",
         )
 
         try:
             yield
         finally:
-            match_lifecycle_task.cancel()
-            contest_publication_task.cancel()
-            publication_task.cancel()
-            polling_task.cancel()
+            await _cancel_background_tasks(
+                (
+                    match_lifecycle_task,
+                    contest_publication_task,
+                    publication_task,
+                    polling_task,
+                )
+            )
 
-            with suppress(asyncio.CancelledError):
-                await match_lifecycle_task
-
-            with suppress(asyncio.CancelledError):
-                await contest_publication_task
-
-            with suppress(asyncio.CancelledError):
-                await publication_task
-
-            with suppress(asyncio.CancelledError):
-                await polling_task
-
-            await bot.session.close()
-            await username_resolver.close()
-            del app.state.telegram_bot
-            del app.state.telegram_username_resolver
+            try:
+                await bot.session.close()
+            finally:
+                try:
+                    await username_resolver.close()
+                finally:
+                    del app.state.telegram_bot
+                    del app.state.telegram_username_resolver
 
     app = FastAPI(
         title="Клевер",

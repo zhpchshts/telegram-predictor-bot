@@ -6,15 +6,18 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator, Field
 
 from app.access_control import (
     AccessDecision,
+    AccessRole,
     AccessVerificationStatus,
     TelegramAdministratorsClient,
     TelegramAdministratorsSnapshot,
     determine_access,
+    determine_unenforced_access,
 )
+from app.audit_service import AuditActor, AuditActorRole
 from app.config import load_settings
 from app.contest_service import (
     ChampionPredictionSettingsLockedError,
@@ -72,10 +75,41 @@ from app.user_service import (
 
 TMA_INIT_DATA_HEADER = "X-Telegram-Init-Data"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+SQLITE_SIGNED_64_MIN = -(2**63)
+SQLITE_SIGNED_64_MAX = 2**63 - 1
+
+
+def _reject_boolean_integer(value: object) -> object:
+    if isinstance(value, bool):
+        raise ValueError("Boolean values are not valid integers.")
+    return value
+
+
+SqliteInteger = Annotated[
+    int,
+    BeforeValidator(_reject_boolean_integer),
+    Field(ge=SQLITE_SIGNED_64_MIN, le=SQLITE_SIGNED_64_MAX),
+]
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _audit_actor(context: TmaContext, access: AccessDecision) -> AuditActor:
+    if access.role is AccessRole.SUPERMODERATOR:
+        role = AuditActorRole.SUPERMODERATOR
+    elif access.verification_status is AccessVerificationStatus.UNAVAILABLE:
+        role = AuditActorRole.UNVERIFIED
+    elif access.role is None:
+        raise RuntimeError("Verified contest access has no effective role.")
+    else:
+        role = AuditActorRole(access.role.value)
+    return AuditActor(
+        telegram_chat_id=context.chat.telegram_chat_id,
+        telegram_user_id=context.user.telegram_user_id,
+        role=role,
+    )
 
 
 router = APIRouter(
@@ -95,21 +129,21 @@ class CreateMatchRequest(BaseModel):
 
 
 class SaveMatchPredictionRequest(BaseModel):
-    predicted_home_score: int
-    predicted_away_score: int
-    predicted_advancing_team_id: int
+    predicted_home_score: SqliteInteger
+    predicted_away_score: SqliteInteger
+    predicted_advancing_team_id: SqliteInteger
 
 
 class SaveMatchResultRequest(BaseModel):
-    home_score: int
-    away_score: int
-    advancing_team_id: int
+    home_score: SqliteInteger
+    away_score: SqliteInteger
+    advancing_team_id: SqliteInteger
 
 
 class SaveChampionPredictionSettingsRequest(BaseModel):
     enabled: bool
     deadline_at: str | None = None
-    points: int
+    points: SqliteInteger
 
 
 class SaveMatchPredictionPublicationSettingsRequest(BaseModel):
@@ -117,11 +151,11 @@ class SaveMatchPredictionPublicationSettingsRequest(BaseModel):
 
 
 class SaveChampionPredictionRequest(BaseModel):
-    predicted_team_id: int
+    predicted_team_id: SqliteInteger
 
 
 class SaveContestChampionRequest(BaseModel):
-    champion_team_id: int
+    champion_team_id: SqliteInteger
 
 
 class ResolveRoleTargetRequest(BaseModel):
@@ -136,8 +170,23 @@ class TelegramUserIdInvalidError(ValueError):
 @dataclass(frozen=True, slots=True)
 class RoleManagementContext:
     context: TmaContext
+    access: AccessDecision
     administrators: TelegramAdministratorsSnapshot
     actor: ChatActor
+
+
+@dataclass(frozen=True, slots=True)
+class ContestManagementContext:
+    context: TmaContext
+    access: AccessDecision
+
+    @property
+    def user(self):
+        return self.context.user
+
+    @property
+    def chat(self):
+        return self.context.chat
 
 
 def get_telegram_administrators_client(
@@ -169,23 +218,28 @@ async def _authorize_contest_management(
         str | None,
         Header(alias=TMA_INIT_DATA_HEADER),
     ] = None,
-) -> TmaContext:
+) -> ContestManagementContext:
     context = _get_verified_tma_context(
         x_telegram_init_data=x_telegram_init_data,
     )
     settings = load_settings()
     if not settings.role_enforcement_enabled:
-        return context
+        access = determine_unenforced_access(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            telegram_user_id=context.user.telegram_user_id,
+        )
+        return ContestManagementContext(context=context, access=access)
 
     access = await determine_access(
         database_path=settings.database_path,
         telegram_chat_id=context.chat.telegram_chat_id,
         telegram_user_id=context.user.telegram_user_id,
         telegram_client=telegram_client,
-        enforcement_enabled=True,
+        enforcement_enabled=settings.role_enforcement_enabled,
     )
     if access.can_manage_contests:
-        return context
+        return ContestManagementContext(context=context, access=access)
     if access.verification_status is AccessVerificationStatus.UNAVAILABLE:
         raise _application_http_error(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -255,6 +309,7 @@ async def _authorize_role_management(
     )
     return RoleManagementContext(
         context=context,
+        access=access,
         administrators=administrators,
         actor=actor,
     )
@@ -442,7 +497,7 @@ async def resolve_tma_role_target(
 
 @router.put("/access/supermoderators/{telegram_user_id}")
 async def assign_tma_supermoderator(
-    telegram_user_id: int,
+    telegram_user_id: SqliteInteger,
     management: Annotated[RoleManagementContext, Depends(_authorize_role_management)],
 ) -> dict[str, object]:
     settings = load_settings()
@@ -461,6 +516,7 @@ async def assign_tma_supermoderator(
         chat_id=management.actor.chat_id,
         user_id=user.id,
         assigned_by_user_id=management.actor.actor_user_id,
+        audit_actor=_audit_actor(management.context, management.access),
     )
     return {
         "created": result.was_created,
@@ -473,7 +529,7 @@ async def assign_tma_supermoderator(
 
 @router.delete("/access/supermoderators/{telegram_user_id}")
 async def revoke_tma_supermoderator(
-    telegram_user_id: int,
+    telegram_user_id: SqliteInteger,
     management: Annotated[RoleManagementContext, Depends(_authorize_role_management)],
 ) -> dict[str, object]:
     settings = load_settings()
@@ -499,6 +555,7 @@ async def revoke_tma_supermoderator(
             chat_id=management.actor.chat_id,
             user_id=user.id,
             revoked_by_user_id=management.actor.actor_user_id,
+            audit_actor=_audit_actor(management.context, management.access),
         )
     except SupermoderatorAssignmentNotFoundError as error:
         raise _application_http_error(
@@ -512,7 +569,9 @@ async def revoke_tma_supermoderator(
 @router.post("/contests")
 async def create_tma_contest(
     payload: CreateContestRequest,
-    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
     idempotency_key: Annotated[
         str | None,
         Header(alias=IDEMPOTENCY_KEY_HEADER),
@@ -536,6 +595,7 @@ async def create_tma_contest(
             username=context.user.username,
             contest_name=payload.name,
             idempotency_key=idempotency_key,
+            audit_actor=_audit_actor(context.context, context.access),
         )
     except ContestCreationConflictError as error:
         raise HTTPException(
@@ -565,9 +625,11 @@ async def create_tma_contest(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def delete_tma_match(
-    contest_id: int,
-    match_id: int,
-    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
+    contest_id: SqliteInteger,
+    match_id: SqliteInteger,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
 ) -> Response:
     settings = load_settings()
 
@@ -581,6 +643,7 @@ async def delete_tma_match(
             first_name=context.user.first_name,
             last_name=context.user.last_name,
             username=context.user.username,
+            audit_actor=_audit_actor(context.context, context.access),
         )
     except ContestNotFoundError as error:
         raise HTTPException(
@@ -603,7 +666,7 @@ async def delete_tma_match(
 
 @router.get("/contests/{contest_id}")
 async def get_tma_contest(
-    contest_id: int,
+    contest_id: SqliteInteger,
     x_telegram_init_data: Annotated[
         str | None,
         Header(alias=TMA_INIT_DATA_HEADER),
@@ -632,8 +695,10 @@ async def get_tma_contest(
 
 @router.post("/contests/{contest_id}/complete")
 async def complete_tma_contest(
-    contest_id: int,
-    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
+    contest_id: SqliteInteger,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
 ) -> JSONResponse:
     settings = load_settings()
     now_utc = _utc_now()
@@ -648,6 +713,7 @@ async def complete_tma_contest(
             last_name=context.user.last_name,
             username=context.user.username,
             now_utc=now_utc,
+            audit_actor=_audit_actor(context.context, context.access),
         )
 
         contest = get_contest_details(
@@ -681,8 +747,10 @@ async def complete_tma_contest(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def delete_tma_contest(
-    contest_id: int,
-    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
+    contest_id: SqliteInteger,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
 ) -> Response:
     settings = load_settings()
 
@@ -691,6 +759,7 @@ async def delete_tma_contest(
             database_path=settings.database_path,
             telegram_chat_id=context.chat.telegram_chat_id,
             contest_id=contest_id,
+            audit_actor=_audit_actor(context.context, context.access),
         )
     except ContestNotFoundError as error:
         raise HTTPException(
@@ -708,9 +777,11 @@ async def delete_tma_contest(
 
 @router.post("/contests/{contest_id}/matches")
 async def create_tma_match(
-    contest_id: int,
+    contest_id: SqliteInteger,
     payload: CreateMatchRequest,
-    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
     idempotency_key: Annotated[
         str | None,
         Header(alias=IDEMPOTENCY_KEY_HEADER),
@@ -737,6 +808,7 @@ async def create_tma_match(
             away_team_name=payload.away_team_name,
             starts_at_utc=payload.starts_at_utc,
             idempotency_key=idempotency_key,
+            audit_actor=_audit_actor(context.context, context.access),
         )
         contest = get_contest_details(
             database_path=settings.database_path,
@@ -780,8 +852,8 @@ async def create_tma_match(
 
 @router.put("/contests/{contest_id}/matches/{match_id}/prediction")
 async def save_tma_match_prediction(
-    contest_id: int,
-    match_id: int,
+    contest_id: SqliteInteger,
+    match_id: SqliteInteger,
     payload: SaveMatchPredictionRequest,
     x_telegram_init_data: Annotated[
         str | None,
@@ -841,10 +913,12 @@ async def save_tma_match_prediction(
 
 @router.put("/contests/{contest_id}/matches/{match_id}/result")
 async def save_tma_match_result(
-    contest_id: int,
-    match_id: int,
+    contest_id: SqliteInteger,
+    match_id: SqliteInteger,
     payload: SaveMatchResultRequest,
-    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
 ) -> JSONResponse:
     settings = load_settings()
     try:
@@ -860,6 +934,7 @@ async def save_tma_match_result(
             home_score=payload.home_score,
             away_score=payload.away_score,
             advancing_team_id=payload.advancing_team_id,
+            audit_actor=_audit_actor(context.context, context.access),
         )
     except ContestNotFoundError as error:
         raise HTTPException(
@@ -896,9 +971,11 @@ async def save_tma_match_result(
 
 @router.put("/contests/{contest_id}/match-prediction-publication/settings")
 async def save_tma_match_prediction_publication_settings(
-    contest_id: int,
+    contest_id: SqliteInteger,
     payload: SaveMatchPredictionPublicationSettingsRequest,
-    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
 ) -> JSONResponse:
     settings = load_settings()
     try:
@@ -911,6 +988,7 @@ async def save_tma_match_prediction_publication_settings(
             last_name=context.user.last_name,
             username=context.user.username,
             enabled=payload.enabled,
+            audit_actor=_audit_actor(context.context, context.access),
         )
         contest = get_contest_details(
             database_path=settings.database_path,
@@ -948,9 +1026,11 @@ async def save_tma_match_prediction_publication_settings(
 
 @router.put("/contests/{contest_id}/champion-prediction/settings")
 async def save_tma_champion_prediction_settings(
-    contest_id: int,
+    contest_id: SqliteInteger,
     payload: SaveChampionPredictionSettingsRequest,
-    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
 ) -> JSONResponse:
     settings = load_settings()
     try:
@@ -965,6 +1045,7 @@ async def save_tma_champion_prediction_settings(
             enabled=payload.enabled,
             deadline_at=payload.deadline_at,
             points=payload.points,
+            audit_actor=_audit_actor(context.context, context.access),
         )
         contest = get_contest_details(
             database_path=settings.database_path,
@@ -1003,7 +1084,7 @@ async def save_tma_champion_prediction_settings(
 
 @router.put("/contests/{contest_id}/champion-prediction")
 async def save_tma_champion_prediction(
-    contest_id: int,
+    contest_id: SqliteInteger,
     payload: SaveChampionPredictionRequest,
     x_telegram_init_data: Annotated[
         str | None,
@@ -1048,9 +1129,11 @@ async def save_tma_champion_prediction(
 
 @router.put("/contests/{contest_id}/champion")
 async def save_tma_contest_champion(
-    contest_id: int,
+    contest_id: SqliteInteger,
     payload: SaveContestChampionRequest,
-    context: Annotated[TmaContext, Depends(_authorize_contest_management)],
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
 ) -> JSONResponse:
     settings = load_settings()
     try:
@@ -1063,6 +1146,7 @@ async def save_tma_contest_champion(
             last_name=context.user.last_name,
             username=context.user.username,
             champion_team_id=payload.champion_team_id,
+            audit_actor=_audit_actor(context.context, context.access),
             now_utc=_utc_now(),
         )
     except ContestNotFoundError as error:
@@ -1125,8 +1209,13 @@ def _application_http_error(
 
 def _parse_telegram_user_id_target(target: str) -> int | None:
     if target.isdecimal():
-        telegram_user_id = int(target)
-        if telegram_user_id <= 0:
+        significant_digits = target.lstrip("0")
+        if not significant_digits or len(significant_digits) > 19:
+            raise TelegramUserIdInvalidError(
+                "Telegram user id must be a positive integer."
+            )
+        telegram_user_id = int(significant_digits)
+        if telegram_user_id <= 0 or telegram_user_id > SQLITE_SIGNED_64_MAX:
             raise TelegramUserIdInvalidError(
                 "Telegram user id must be a positive integer."
             )
