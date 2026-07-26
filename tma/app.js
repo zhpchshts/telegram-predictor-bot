@@ -10,6 +10,62 @@ const CONTEST_TABS = [
   { id: "leaderboard", label: "Рейтинг" },
   { id: "matches", label: "Матчи" },
 ];
+const AUDIT_EVENT_PRESENTATIONS = Object.freeze({
+  contest_created: Object.freeze({
+    label: "Создан конкурс",
+    group: "Конкурсы",
+  }),
+  contest_updated: Object.freeze({
+    label: "Изменены настройки конкурса",
+    group: "Конкурсы",
+  }),
+  contest_finished: Object.freeze({
+    label: "Конкурс завершён",
+    group: "Конкурсы",
+  }),
+  contest_deleted: Object.freeze({
+    label: "Удалён конкурс",
+    group: "Конкурсы",
+  }),
+  match_created: Object.freeze({
+    label: "Создан матч",
+    group: "Матчи",
+  }),
+  match_deleted: Object.freeze({
+    label: "Удалён матч",
+    group: "Матчи",
+  }),
+  match_result_set: Object.freeze({
+    label: "Внесён результат матча",
+    group: "Результаты",
+  }),
+  match_result_changed: Object.freeze({
+    label: "Изменён результат матча",
+    group: "Результаты",
+  }),
+  contest_champion_set: Object.freeze({
+    label: "Указан чемпион",
+    group: "Чемпион",
+  }),
+  contest_champion_changed: Object.freeze({
+    label: "Изменён чемпион",
+    group: "Чемпион",
+  }),
+  supermoderator_assigned: Object.freeze({
+    label: "Назначен супермодератор",
+    group: "Доступ",
+  }),
+  supermoderator_revoked: Object.freeze({
+    label: "Отозвана роль супермодератора",
+    group: "Доступ",
+  }),
+});
+const AUDIT_ROLE_LABELS = Object.freeze({
+  telegram_admin: "Администратор Telegram",
+  supermoderator: "Супермодератор",
+  participant: "Участник",
+});
+const AUDIT_PAGE_SIZE = 30;
 
 const chatSummaryElement = document.querySelector("#chat-summary");
 const appContentElement = document.querySelector("#app-content");
@@ -3967,6 +4023,852 @@ async function openContest(bootstrap, contestId, state = {}) {
   }
 }
 
+function getAuditEventPresentation(eventType) {
+  return AUDIT_EVENT_PRESENTATIONS[eventType] || {
+    label: "Действие",
+    group: "Другие действия",
+  };
+}
+
+function getAuditEventTitle(event) {
+  if (event.event_type === "contest_updated") {
+    const before = event.before_state || {};
+    const after = event.after_state || {};
+    const changedSection = event.metadata?.changed_section;
+    if (
+      changedSection === "match_prediction_publication"
+      && before.match_prediction_publication_enabled === false
+      && after.match_prediction_publication_enabled === true
+    ) {
+      return "Включена публикация прогнозов";
+    }
+    if (
+      changedSection === "match_prediction_publication"
+      && before.match_prediction_publication_enabled === true
+      && after.match_prediction_publication_enabled === false
+    ) {
+      return "Выключена публикация прогнозов";
+    }
+  }
+  return getAuditEventPresentation(event.event_type).label;
+}
+
+function formatAuditDateTime(value) {
+  const normalizedValue = (
+    typeof value === "string"
+    && !/(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+  )
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+  const date = new Date(normalizedValue);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat("ru-RU", {
+    dateStyle: "long",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function getAuditRoleLabel(role) {
+  return AUDIT_ROLE_LABELS[role] || role || "Роль не указана";
+}
+
+function formatAuditUserIdentity(user, telegramUserId) {
+  const fullName = user
+    ? [user.first_name, user.last_name].filter(Boolean).join(" ")
+    : "";
+  const username = user?.username ? `@${user.username}` : "";
+  let primary = "";
+
+  if (fullName && username) {
+    primary = `${fullName} (${username})`;
+  } else {
+    primary = fullName || username;
+  }
+
+  return [
+    primary,
+    telegramUserId ? `Telegram ID ${telegramUserId}` : "",
+  ].filter(Boolean).join(" · ") || "Исполнитель не указан";
+}
+
+function getAuditEntityName(event) {
+  return event.entity?.display_name
+    || event.contest?.name
+    || (
+      event.entity_id !== null && event.entity_id !== undefined
+        ? `${event.entity_type} #${event.entity_id}`
+        : "Связанная сущность не указана"
+    );
+}
+
+function getAuditContestName(event) {
+  return event.contest?.name || "";
+}
+
+function getAuditTeamName(event, teamId) {
+  if (teamId === null || teamId === undefined) {
+    return "не указана";
+  }
+  const relatedTeam = Array.isArray(event.related_teams)
+    ? event.related_teams.find((team) => team.id === teamId)
+    : null;
+  if (relatedTeam?.name) {
+    return relatedTeam.name;
+  }
+  for (const state of [event.after_state, event.before_state]) {
+    for (const key of ["home_team", "away_team"]) {
+      if (state?.[key]?.id === teamId && state[key].name) {
+        return state[key].name;
+      }
+    }
+  }
+  return `Команда #${teamId}`;
+}
+
+function formatAuditScore(state) {
+  if (
+    !state
+    || !Number.isInteger(state.home_score)
+    || !Number.isInteger(state.away_score)
+  ) {
+    return "не указан";
+  }
+  return `${state.home_score}:${state.away_score}`;
+}
+
+function getAuditMatchStatusLabel(status) {
+  const labels = {
+    scheduled: "запланирован",
+    started: "начался",
+    finished: "завершён",
+    cancelled: "отменён",
+  };
+  return labels[status] || status || "не указан";
+}
+
+function formatAuditBoolean(value, enabledLabel = "включено", disabledLabel = "выключено") {
+  if (value === true) {
+    return enabledLabel;
+  }
+  if (value === false) {
+    return disabledLabel;
+  }
+  return "не задано";
+}
+
+function addAuditTransition(
+  lines,
+  label,
+  beforeValue,
+  afterValue,
+  formatter = (value) => String(value),
+) {
+  if (beforeValue === afterValue) {
+    return;
+  }
+  lines.push(
+    `${label}: ${formatter(beforeValue)} → ${formatter(afterValue)}`,
+  );
+}
+
+function buildContestAuditChanges(event) {
+  const before = event.before_state || {};
+  const after = event.after_state || {};
+  const lines = [];
+
+  addAuditTransition(
+    lines,
+    "Публикация прогнозов",
+    before.match_prediction_publication_enabled,
+    after.match_prediction_publication_enabled,
+    (value) => formatAuditBoolean(value, "включена", "выключена"),
+  );
+  addAuditTransition(
+    lines,
+    "Прогноз на чемпиона",
+    before.champion_prediction_enabled,
+    after.champion_prediction_enabled,
+    (value) => formatAuditBoolean(value, "включён", "выключен"),
+  );
+  addAuditTransition(
+    lines,
+    "Дедлайн прогноза на чемпиона",
+    before.champion_prediction_deadline_at,
+    after.champion_prediction_deadline_at,
+    (value) => value ? formatAuditDateTime(value) : "не задан",
+  );
+  addAuditTransition(
+    lines,
+    "Баллы за чемпиона",
+    before.champion_prediction_points,
+    after.champion_prediction_points,
+    (value) => value === null || value === undefined ? "не заданы" : String(value),
+  );
+
+  return lines;
+}
+
+function buildMatchResultAuditChanges(event) {
+  const before = event.before_state || {};
+  const after = event.after_state || {};
+  const lines = [];
+  const beforeScore = formatAuditScore(before);
+  const afterScore = formatAuditScore(after);
+
+  if (beforeScore !== afterScore) {
+    lines.push(`Результат: ${beforeScore} → ${afterScore}`);
+  }
+  if (before.advancing_team_id !== after.advancing_team_id) {
+    const afterTeam = getAuditTeamName(event, after.advancing_team_id);
+    if (before.advancing_team_id === null || before.advancing_team_id === undefined) {
+      lines.push(`Прошла дальше: ${afterTeam}`);
+    } else {
+      lines.push(
+        "Прошла дальше: "
+        + `${getAuditTeamName(event, before.advancing_team_id)} → ${afterTeam}`,
+      );
+    }
+  }
+  if (before.status !== after.status) {
+    lines.push(
+      "Статус: "
+      + `${getAuditMatchStatusLabel(before.status)} → `
+      + getAuditMatchStatusLabel(after.status),
+    );
+  }
+  return lines;
+}
+
+function buildAuditSummaryLines(event) {
+  const entityName = getAuditEntityName(event);
+  const before = event.before_state || {};
+  const after = event.after_state || {};
+
+  switch (event.event_type) {
+    case "contest_created":
+      return [`Создан конкурс «${entityName}».`];
+    case "contest_updated":
+      return buildContestAuditChanges(event);
+    case "contest_finished":
+      return [`Конкурс «${entityName}» завершён.`];
+    case "contest_deleted":
+      return [`Удалён конкурс «${entityName}».`];
+    case "match_created":
+      return [`Создан матч «${entityName}».`];
+    case "match_deleted":
+      return [`Удалён матч «${entityName}».`];
+    case "match_result_set":
+    case "match_result_changed":
+      return buildMatchResultAuditChanges(event);
+    case "contest_champion_set":
+      return [
+        `Указан чемпион: ${getAuditTeamName(event, after.champion_team_id)}.`,
+      ];
+    case "contest_champion_changed":
+      return [
+        "Чемпион изменён: "
+        + `${getAuditTeamName(event, before.champion_team_id)} → `
+        + `${getAuditTeamName(event, after.champion_team_id)}.`,
+      ];
+    case "supermoderator_assigned":
+      return [`Пользователю ${entityName} назначена роль супермодератора.`];
+    case "supermoderator_revoked":
+      return [`У пользователя ${entityName} отозвана роль супермодератора.`];
+    default:
+      return ["Сохранено административное действие."];
+  }
+}
+
+function formatAuditStateValue(key, value, event) {
+  if (value === null || value === undefined || value === "") {
+    return "не задано";
+  }
+  if (key === "status") {
+    return getAuditMatchStatusLabel(value);
+  }
+  if (key === "champion_team_id" || key === "advancing_team_id") {
+    return getAuditTeamName(event, value);
+  }
+  if (key === "is_active") {
+    return formatAuditBoolean(value, "активен", "завершён");
+  }
+  if (key === "champion_prediction_enabled") {
+    return formatAuditBoolean(value, "включён", "выключен");
+  }
+  if (key === "match_prediction_publication_enabled") {
+    return formatAuditBoolean(value, "включена", "выключена");
+  }
+  if (
+    key.endsWith("_at")
+    || key.endsWith("_utc")
+  ) {
+    return formatAuditDateTime(value);
+  }
+  if (
+    (key === "home_team" || key === "away_team")
+    && typeof value === "object"
+  ) {
+    return value.name || (
+      value.id !== undefined ? `Команда #${value.id}` : "не указана"
+    );
+  }
+  if (typeof value === "boolean") {
+    return value ? "да" : "нет";
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value, null, 2);
+  }
+  return String(value);
+}
+
+function getAuditStateFieldLabel(key) {
+  const labels = {
+    id: "ID",
+    name: "Название",
+    slug: "Короткий адрес",
+    is_active: "Статус конкурса",
+    created_at: "Создан",
+    champion_prediction_enabled: "Прогноз на чемпиона",
+    champion_prediction_deadline_at: "Дедлайн прогноза на чемпиона",
+    champion_prediction_points: "Баллы за чемпиона",
+    champion_team_id: "Чемпион",
+    match_prediction_publication_enabled: "Публикация прогнозов",
+    match_prediction_publication_enabled_at: "Публикация включена",
+    home_team: "Хозяева",
+    away_team: "Гости",
+    home_score: "Счёт хозяев",
+    away_score: "Счёт гостей",
+    advancing_team_id: "Прошла дальше",
+    starts_at_utc: "Начало матча",
+    status: "Статус матча",
+    tie_id: "ID противостояния",
+    assignment_id: "ID назначения",
+    target_telegram_user_id: "Пользователь",
+    assigned_at: "Назначен",
+    assigned_by_user_id: "Назначил, локальный ID",
+    revoked_at: "Отозван",
+    revoked_by_user_id: "Отозвал, локальный ID",
+    chat_id: "Локальный ID чата",
+    user_id: "Локальный ID пользователя",
+  };
+  return labels[key] || key.replaceAll("_", " ");
+}
+
+function getAuditStateEntries(event, state) {
+  if (!state || typeof state !== "object") {
+    return [];
+  }
+  const preferredOrder = event.entity_type === "contest"
+    ? [
+      "id",
+      "name",
+      "is_active",
+      "match_prediction_publication_enabled",
+      "match_prediction_publication_enabled_at",
+      "champion_prediction_enabled",
+      "champion_prediction_deadline_at",
+      "champion_prediction_points",
+      "champion_team_id",
+      "created_at",
+      "slug",
+    ]
+    : event.entity_type === "match"
+      ? [
+        "id",
+        "home_team",
+        "away_team",
+        "starts_at_utc",
+        "status",
+        "home_score",
+        "away_score",
+        "advancing_team_id",
+        "tie_id",
+      ]
+      : [
+        "assignment_id",
+        "target_telegram_user_id",
+        "assigned_at",
+        "revoked_at",
+        "assigned_by_user_id",
+        "revoked_by_user_id",
+        "chat_id",
+        "user_id",
+      ];
+  const keys = [
+    ...preferredOrder.filter((key) => Object.hasOwn(state, key)),
+    ...Object.keys(state).filter((key) => !preferredOrder.includes(key)).sort(),
+  ];
+  return keys.map((key) => ({
+    label: getAuditStateFieldLabel(key),
+    value: key === "target_telegram_user_id"
+      ? formatAuditUserIdentity(event.entity?.target_user, state[key])
+      : formatAuditStateValue(key, state[key], event),
+  }));
+}
+
+function createAuditStatePanel(title, event, state, emptyMessage) {
+  const panel = createElement("section", {
+    className: "audit-state-panel",
+  });
+  panel.append(createElement("h4", { text: title }));
+  const entries = getAuditStateEntries(event, state);
+  if (entries.length === 0) {
+    panel.append(
+      createElement("p", {
+        className: "audit-state-empty",
+        text: emptyMessage,
+      }),
+    );
+    return panel;
+  }
+  const list = createElement("dl", {
+    className: "audit-state-list",
+  });
+  for (const entry of entries) {
+    list.append(
+      createElement("dt", { text: entry.label }),
+      createElement("dd", { text: entry.value }),
+    );
+  }
+  panel.append(list);
+  return panel;
+}
+
+function createAuditEventCard(event) {
+  const item = createElement("li", {
+    className: "audit-event-item",
+  });
+  const article = createElement("article", {
+    className: "audit-event-card",
+  });
+  const heading = createElement("h3", {
+    text: getAuditEventTitle(event),
+  });
+  const time = createElement("time", {
+    className: "audit-event-time",
+    text: formatAuditDateTime(event.created_at),
+  });
+  time.dateTime = event.created_at;
+  const actor = createElement("p", {
+    className: "audit-event-meta",
+    text: (
+      "Исполнитель: "
+      + formatAuditUserIdentity(event.actor, event.actor_user_id)
+    ),
+  });
+  const role = createElement("p", {
+    className: "audit-event-meta",
+    text: `Роль: ${getAuditRoleLabel(event.actor_role)}`,
+  });
+  const entityParts = [`Связано: ${getAuditEntityName(event)}`];
+  const contestName = getAuditContestName(event);
+  if (contestName && event.entity_type !== "contest") {
+    entityParts.push(`Конкурс: ${contestName}`);
+  }
+  if (event.contest?.is_deleted) {
+    entityParts.push("конкурс удалён");
+  }
+  const entity = createElement("p", {
+    className: "audit-event-entity",
+    text: entityParts.join(" · "),
+  });
+  const summaryLines = buildAuditSummaryLines(event);
+  const summary = createElement("p", {
+    className: "audit-event-summary",
+    text: summaryLines.length > 0
+      ? summaryLines.join("\n")
+      : "Изменения сохранены.",
+  });
+  const details = createElement("details", {
+    className: "audit-event-details",
+  });
+  const detailsSummary = createElement("summary", {
+    text: "Показать подробности",
+  });
+  const states = createElement("div", {
+    className: "audit-state-grid",
+  });
+  states.append(
+    createAuditStatePanel(
+      "До",
+      event,
+      event.before_state,
+      "Сущность не существовала.",
+    ),
+    createAuditStatePanel(
+      "После",
+      event,
+      event.after_state,
+      "Сущность удалена.",
+    ),
+  );
+  details.append(detailsSummary, states);
+  article.append(heading, time, actor, role, entity, summary, details);
+  item.append(article);
+  return item;
+}
+
+function createAuditFilterSelect(name, labelText) {
+  const field = createElement("label", {
+    className: "form-field audit-filter-field",
+  });
+  const label = createElement("span", {
+    className: "form-field-label",
+    text: labelText,
+  });
+  const select = createElement("select", {
+    className: "text-input audit-filter-select",
+  });
+  select.name = name;
+  field.append(label, select);
+  return { field, select };
+}
+
+function appendAuditOption(select, value, label) {
+  const option = createElement("option", { text: label });
+  option.value = value;
+  select.append(option);
+}
+
+function createAuditFiltersCard(bootstrap, state) {
+  const card = createElement("section", {
+    className: "info-card audit-filters-card",
+  });
+  const heading = createElement("h2", { text: "Фильтры" });
+  const fields = createElement("div", {
+    className: "audit-filter-grid",
+  });
+  const contestFilter = createAuditFilterSelect("contest", "Конкурс");
+  const eventFilter = createAuditFilterSelect("event-type", "Тип действия");
+  const actorFilter = createAuditFilterSelect("actor", "Исполнитель");
+
+  appendAuditOption(contestFilter.select, "", "Все конкурсы");
+  appendAuditOption(contestFilter.select, "none", "Без конкурса");
+  for (const contest of state.filterOptions.contests) {
+    appendAuditOption(
+      contestFilter.select,
+      String(contest.id),
+      `${contest.name}${contest.is_deleted ? " · удалён" : ""}`,
+    );
+  }
+  contestFilter.select.value = state.filters.contestId;
+
+  appendAuditOption(eventFilter.select, "", "Все действия");
+  const groups = new Map();
+  for (const [eventType, presentation] of Object.entries(
+    AUDIT_EVENT_PRESENTATIONS,
+  )) {
+    if (!groups.has(presentation.group)) {
+      groups.set(presentation.group, []);
+    }
+    groups.get(presentation.group).push({
+      eventType,
+      label: presentation.label,
+    });
+  }
+  for (const [groupLabel, options] of groups) {
+    const group = document.createElement("optgroup");
+    group.label = groupLabel;
+    for (const optionData of options) {
+      const option = createElement("option", { text: optionData.label });
+      option.value = optionData.eventType;
+      group.append(option);
+    }
+    eventFilter.select.append(group);
+  }
+  eventFilter.select.value = state.filters.eventType;
+
+  appendAuditOption(actorFilter.select, "", "Все исполнители");
+  for (const actor of state.filterOptions.actors) {
+    appendAuditOption(
+      actorFilter.select,
+      String(actor.telegram_user_id),
+      formatAuditUserIdentity(actor, actor.telegram_user_id),
+    );
+  }
+  actorFilter.select.value = state.filters.actorUserId;
+
+  const applyFilters = () => {
+    state.filters = {
+      contestId: contestFilter.select.value,
+      eventType: eventFilter.select.value,
+      actorUserId: actorFilter.select.value,
+    };
+    void loadAuditEvents(bootstrap, state, false);
+  };
+  for (const select of [
+    contestFilter.select,
+    eventFilter.select,
+    actorFilter.select,
+  ]) {
+    select.disabled = state.loading;
+    select.addEventListener("change", applyFilters);
+  }
+
+  fields.append(
+    contestFilter.field,
+    eventFilter.field,
+    actorFilter.field,
+  );
+  card.append(heading, fields);
+  return card;
+}
+
+function hasActiveAuditFilters(state) {
+  return Boolean(
+    state.filters.contestId
+    || state.filters.eventType
+    || state.filters.actorUserId,
+  );
+}
+
+function getAuditErrorMessage(error) {
+  if (error?.code === "audit_cursor_invalid") {
+    return "Не удалось продолжить загрузку истории. Обновите список.";
+  }
+  if (error?.code === "audit_data_invalid") {
+    return (
+      "Одна из записей истории повреждена. "
+      + "Попробуйте ещё раз позже."
+    );
+  }
+  if (error?.code === "contest_management_forbidden") {
+    return "История действий доступна администраторам и супермодераторам.";
+  }
+  return "Не удалось загрузить историю действий. Попробуйте ещё раз.";
+}
+
+function createAuditListCard(bootstrap, state) {
+  const card = createElement("section", {
+    className: "info-card audit-list-card",
+  });
+  card.append(createElement("h2", { text: "События" }));
+
+  if (state.loading && !state.initialized) {
+    card.append(
+      createStatusCard(
+        "Загружаем историю",
+        "Получаем последние административные действия этого чата…",
+      ),
+    );
+    return card;
+  }
+
+  if (state.error && state.events.length === 0) {
+    const message = createElement("p", {
+      className: "form-message is-error",
+      text: state.error,
+    });
+    const retryButton = createActionButton(
+      "Попробовать снова",
+      "secondary-action-button",
+    );
+    retryButton.addEventListener("click", () => {
+      void loadAuditEvents(bootstrap, state, false);
+    });
+    card.append(message, retryButton);
+    return card;
+  }
+
+  if (state.events.length === 0) {
+    card.append(
+      createElement("p", {
+        className: "subtitle",
+        text: hasActiveAuditFilters(state)
+          ? "По выбранным фильтрам действий нет."
+          : "История действий пока пуста.",
+      }),
+    );
+    return card;
+  }
+
+  const list = createElement("ol", {
+    className: "audit-event-list",
+  });
+  for (const event of state.events) {
+    list.append(createAuditEventCard(event));
+  }
+  card.append(list);
+
+  if (state.error) {
+    const errorPanel = createElement("div", {
+      className: "audit-load-more-error",
+    });
+    const message = createElement("p", {
+      className: "form-message is-error",
+      text: state.error,
+    });
+    const retryButton = createActionButton(
+      "Повторить загрузку",
+      "secondary-action-button",
+    );
+    retryButton.addEventListener("click", () => {
+      void loadAuditEvents(bootstrap, state, true);
+    });
+    errorPanel.append(message, retryButton);
+    card.append(errorPanel);
+  } else if (state.nextCursor) {
+    const loadMoreButton = createActionButton(
+      state.loading ? "Загружаем…" : "Показать ещё",
+      "secondary-action-button audit-load-more-button",
+    );
+    loadMoreButton.disabled = state.loading;
+    loadMoreButton.addEventListener("click", () => {
+      void loadAuditEvents(bootstrap, state, true);
+    });
+    card.append(loadMoreButton);
+  }
+
+  return card;
+}
+
+function createAuditHeaderCard(bootstrap) {
+  const card = createElement("section", {
+    className: "info-card audit-header-card",
+  });
+  const heading = createElement("h2", { text: "История действий" });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: (
+      "Административные действия этого Telegram-чата — "
+      + "от новых к старым."
+    ),
+  });
+  const backButton = createActionButton(
+    "К конкурсам",
+    "secondary-action-button",
+  );
+  backButton.addEventListener("click", () => {
+    renderContestScreen(bootstrap);
+  });
+  card.append(heading, description, backButton);
+  return card;
+}
+
+function renderAuditScreen(bootstrap, state) {
+  const { user, chat } = bootstrap.context;
+  const chatTitle = chat.title || "этого чата";
+  const userName = getUserDisplayName(user);
+  chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
+  appContentElement.replaceChildren(
+    createAuditHeaderCard(bootstrap),
+    createAuditFiltersCard(bootstrap, state),
+    createAuditListCard(bootstrap, state),
+  );
+}
+
+function buildAuditRequestPath(state, append) {
+  const parameters = new URLSearchParams();
+  parameters.set("limit", String(AUDIT_PAGE_SIZE));
+  if (state.filters.contestId === "none") {
+    parameters.set("entity_type", "supermoderator_assignment");
+  } else if (state.filters.contestId) {
+    parameters.set("contest_id", state.filters.contestId);
+  }
+  if (state.filters.eventType) {
+    parameters.set("event_type", state.filters.eventType);
+  }
+  if (state.filters.actorUserId) {
+    parameters.set("actor_user_id", state.filters.actorUserId);
+  }
+  if (append && state.nextCursor) {
+    parameters.set("cursor", state.nextCursor);
+  }
+  return `/api/tma/audit-events?${parameters.toString()}`;
+}
+
+async function loadAuditEvents(bootstrap, state, append) {
+  if (state.loading) {
+    return;
+  }
+  state.loading = true;
+  state.error = "";
+  if (!append) {
+    state.events = [];
+    state.nextCursor = null;
+    state.initialized = false;
+  }
+  renderAuditScreen(bootstrap, state);
+
+  try {
+    const result = await apiRequest(buildAuditRequestPath(state, append));
+    const incomingEvents = Array.isArray(result.events) ? result.events : [];
+    const combined = append ? [...state.events, ...incomingEvents] : incomingEvents;
+    const seenEventIds = new Set();
+    state.events = combined.filter((event) => {
+      if (seenEventIds.has(event.id)) {
+        return false;
+      }
+      seenEventIds.add(event.id);
+      return true;
+    });
+    state.nextCursor = result.next_cursor || null;
+    const filterOptions = result.filter_options || {};
+    state.filterOptions = {
+      contests: Array.isArray(filterOptions.contests)
+        ? filterOptions.contests
+        : state.filterOptions.contests,
+      actors: Array.isArray(filterOptions.actors)
+        ? filterOptions.actors
+        : state.filterOptions.actors,
+    };
+    state.initialized = true;
+  } catch (error) {
+    state.error = getAuditErrorMessage(error);
+    state.initialized = true;
+  } finally {
+    state.loading = false;
+    renderAuditScreen(bootstrap, state);
+  }
+}
+
+function openAuditHistory(bootstrap) {
+  const state = {
+    events: [],
+    nextCursor: null,
+    filters: {
+      contestId: "",
+      eventType: "",
+      actorUserId: "",
+    },
+    filterOptions: {
+      contests: [],
+      actors: [],
+    },
+    loading: false,
+    initialized: false,
+    error: "",
+  };
+  void loadAuditEvents(bootstrap, state, false);
+}
+
+function createAuditNavigationCard(bootstrap) {
+  const card = createElement("section", {
+    className: "info-card audit-navigation-card",
+  });
+  const heading = createElement("h2", { text: "История действий" });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: (
+      "Посмотрите, кто создавал и изменял конкурсы, матчи, "
+      + "результаты и назначения ролей."
+    ),
+  });
+  const openButton = createActionButton(
+    "Открыть историю",
+    "secondary-action-button",
+  );
+  openButton.addEventListener("click", () => {
+    openAuditHistory(bootstrap);
+  });
+  card.append(heading, description, openButton);
+  return card;
+}
+
 function createSupermoderatorManagementCard() {
   const card = createElement("section", {
     className: "info-card role-management-card",
@@ -4367,6 +5269,9 @@ function renderContestScreen(bootstrap, state = {}) {
   }
 
   const cards = [contestCard, creationCard];
+  if (canManageContests(bootstrap)) {
+    cards.push(createAuditNavigationCard(bootstrap));
+  }
   if (bootstrap.access?.can_manage_roles === true) {
     cards.push(createSupermoderatorManagementCard());
   } else if (bootstrap.access?.verification_status === "unavailable") {

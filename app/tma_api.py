@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, BeforeValidator, Field
 
@@ -16,7 +16,17 @@ from app.access_control import (
     determine_access,
     determine_unenforced_access,
 )
-from app.audit_service import AuditActor, AuditActorRole
+from app.audit_read_service import (
+    AuditCursorInvalidError,
+    AuditDataIntegrityError,
+    read_audit_events,
+)
+from app.audit_service import (
+    AuditActor,
+    AuditActorRole,
+    AuditEntityType,
+    AuditEventType,
+)
 from app.config import load_settings
 from app.contest_service import (
     ChampionPredictionSettingsLockedError,
@@ -371,6 +381,62 @@ async def get_tma_supermoderators(
             _serialize_active_assignment(item, management.administrators)
             for item in assignments
         ]
+    }
+
+
+@router.get("/audit-events")
+async def get_tma_audit_events(
+    management: Annotated[
+        ContestManagementContext,
+        Depends(_authorize_contest_management),
+    ],
+    contest_id: Annotated[
+        int | None,
+        Query(gt=0, le=SQLITE_SIGNED_64_MAX),
+    ] = None,
+    event_type: AuditEventType | None = None,
+    entity_type: AuditEntityType | None = None,
+    actor_user_id: Annotated[
+        int | None,
+        Query(gt=0, le=SQLITE_SIGNED_64_MAX),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        page = read_audit_events(
+            database_path=settings.database_path,
+            telegram_chat_id=management.chat.telegram_chat_id,
+            contest_id=contest_id,
+            event_type=event_type,
+            entity_type=entity_type,
+            actor_user_id=actor_user_id,
+            cursor=cursor,
+            limit=limit,
+        )
+    except AuditCursorInvalidError as error:
+        raise _application_http_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="audit_cursor_invalid",
+            message="Курсор истории действий некорректен.",
+        ) from error
+    except AuditDataIntegrityError as error:
+        raise _application_http_error(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            code="audit_data_invalid",
+            message=(
+                "Не удалось прочитать одну из записей истории действий. "
+                "Попробуйте ещё раз позже."
+            ),
+        ) from error
+    return {
+        "events": page.events,
+        "next_cursor": page.next_cursor,
+        "filter_options": {
+            "contests": page.contest_options,
+            "actors": page.actor_options,
+        },
     }
 
 

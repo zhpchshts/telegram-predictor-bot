@@ -1319,6 +1319,7 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
     expected_routes = {
         ("GET", "/api/tma/bootstrap"): "read",
         ("GET", "/api/tma/access/supermoderators"): "role_management",
+        ("GET", "/api/tma/audit-events"): "contest_management",
         ("POST", "/api/tma/access/users/resolve"): "role_management",
         (
             "PUT",
