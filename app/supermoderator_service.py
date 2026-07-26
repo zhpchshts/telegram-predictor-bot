@@ -85,12 +85,14 @@ def assign_supermoderator(
     chat_id: int,
     user_id: int,
     assigned_by_user_id: int,
+    audit_actor: AuditActor,
 ) -> SupermoderatorAssignment:
     return assign_supermoderator_with_status(
         database_path=database_path,
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=assigned_by_user_id,
+        audit_actor=audit_actor,
     ).assignment
 
 
@@ -100,7 +102,7 @@ def assign_supermoderator_with_status(
     chat_id: int,
     user_id: int,
     assigned_by_user_id: int,
-    audit_actor: AuditActor | None = None,
+    audit_actor: AuditActor,
 ) -> SupermoderatorAssignmentResult:
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -153,30 +155,29 @@ def assign_supermoderator_with_status(
         if row is None:
             raise RuntimeError("Created supermoderator assignment was not found.")
         assignment = _assignment_from_row(row)
-        if audit_actor is not None:
-            _validate_audit_actor_chat(
-                connection,
-                chat_id=chat_id,
-                audit_actor=audit_actor,
-            )
-            target_telegram_user_id = _get_telegram_user_id(
-                connection,
-                user_id=user_id,
-            )
-            record_audit_event(
-                connection,
-                actor=audit_actor,
-                event_type=AuditEventType.SUPERMODERATOR_ASSIGNED,
-                entity_type=AuditEntityType.SUPERMODERATOR_ASSIGNMENT,
-                entity_id=assignment.id,
-                contest_id=None,
-                before_state=None,
-                after_state=_assignment_snapshot(
-                    assignment,
-                    target_telegram_user_id=target_telegram_user_id,
-                ),
-                metadata={"target_telegram_user_id": target_telegram_user_id},
-            )
+        _validate_audit_actor_chat(
+            connection,
+            chat_id=chat_id,
+            audit_actor=audit_actor,
+        )
+        target_telegram_user_id = _get_telegram_user_id(
+            connection,
+            user_id=user_id,
+        )
+        record_audit_event(
+            connection,
+            actor=audit_actor,
+            event_type=AuditEventType.SUPERMODERATOR_ASSIGNED,
+            entity_type=AuditEntityType.SUPERMODERATOR_ASSIGNMENT,
+            entity_id=assignment.id,
+            contest_id=None,
+            before_state=None,
+            after_state=_assignment_snapshot(
+                assignment,
+                target_telegram_user_id=target_telegram_user_id,
+            ),
+            metadata={"target_telegram_user_id": target_telegram_user_id},
+        )
         return SupermoderatorAssignmentResult(
             assignment=assignment,
             was_created=True,
@@ -253,7 +254,7 @@ def revoke_supermoderator(
     chat_id: int,
     user_id: int,
     revoked_by_user_id: int,
-    audit_actor: AuditActor | None = None,
+    audit_actor: AuditActor,
 ) -> SupermoderatorAssignment:
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -294,33 +295,32 @@ def revoke_supermoderator(
         if row is None:
             raise RuntimeError("Revoked supermoderator assignment was not found.")
         assignment = _assignment_from_row(row)
-        if audit_actor is not None:
-            _validate_audit_actor_chat(
-                connection,
-                chat_id=chat_id,
-                audit_actor=audit_actor,
-            )
-            target_telegram_user_id = _get_telegram_user_id(
-                connection,
-                user_id=user_id,
-            )
-            record_audit_event(
-                connection,
-                actor=audit_actor,
-                event_type=AuditEventType.SUPERMODERATOR_REVOKED,
-                entity_type=AuditEntityType.SUPERMODERATOR_ASSIGNMENT,
-                entity_id=assignment.id,
-                contest_id=None,
-                before_state=_assignment_snapshot(
-                    previous_assignment,
-                    target_telegram_user_id=target_telegram_user_id,
-                ),
-                after_state=_assignment_snapshot(
-                    assignment,
-                    target_telegram_user_id=target_telegram_user_id,
-                ),
-                metadata={"target_telegram_user_id": target_telegram_user_id},
-            )
+        _validate_audit_actor_chat(
+            connection,
+            chat_id=chat_id,
+            audit_actor=audit_actor,
+        )
+        target_telegram_user_id = _get_telegram_user_id(
+            connection,
+            user_id=user_id,
+        )
+        record_audit_event(
+            connection,
+            actor=audit_actor,
+            event_type=AuditEventType.SUPERMODERATOR_REVOKED,
+            entity_type=AuditEntityType.SUPERMODERATOR_ASSIGNMENT,
+            entity_id=assignment.id,
+            contest_id=None,
+            before_state=_assignment_snapshot(
+                previous_assignment,
+                target_telegram_user_id=target_telegram_user_id,
+            ),
+            after_state=_assignment_snapshot(
+                assignment,
+                target_telegram_user_id=target_telegram_user_id,
+            ),
+            metadata={"target_telegram_user_id": target_telegram_user_id},
+        )
         return assignment
 
 

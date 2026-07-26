@@ -20,6 +20,12 @@ from app.supermoderator_service import (
     revoke_supermoderator,
 )
 
+AUDIT_ACTOR = AuditActor(
+    telegram_chat_id=-100123,
+    telegram_user_id=456,
+    role=AuditActorRole.TELEGRAM_ADMIN,
+)
+
 
 def _create_chat_and_users(database_path: Path) -> tuple[int, int, int]:
     with create_connection(database_path) as connection:
@@ -57,12 +63,14 @@ def test_assignment_lifecycle_is_idempotent_and_preserves_history(
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
+        audit_actor=AUDIT_ACTOR,
     )
     repeated = assign_supermoderator(
         database_path=database_path,
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
+        audit_actor=AUDIT_ACTOR,
     )
 
     assert repeated == first
@@ -80,6 +88,7 @@ def test_assignment_lifecycle_is_idempotent_and_preserves_history(
         chat_id=chat_id,
         user_id=user_id,
         revoked_by_user_id=actor_id,
+        audit_actor=AUDIT_ACTOR,
     )
     assert revoked.id == first.id
     assert revoked.revoked_by_user_id == actor_id
@@ -98,6 +107,7 @@ def test_assignment_lifecycle_is_idempotent_and_preserves_history(
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
+        audit_actor=AUDIT_ACTOR,
     )
     assert second.id != first.id
 
@@ -133,6 +143,7 @@ def test_concurrent_assignment_returns_single_active_record(
             chat_id=chat_id,
             user_id=user_id,
             assigned_by_user_id=actor_id,
+            audit_actor=AUDIT_ACTOR,
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -164,6 +175,7 @@ def test_concurrent_revoke_and_reassignment_keep_audit_snapshots_consistent(
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
+        audit_actor=AUDIT_ACTOR,
     )
     audit_actor = AuditActor(
         telegram_chat_id=-100123,
@@ -282,16 +294,17 @@ def test_concurrent_revoke_and_reassignment_keep_audit_snapshots_consistent(
         (second_result.assignment.id, True),
     ]
     assert [event["event_type"] for event in events] == [
+        "supermoderator_assigned",
         "supermoderator_revoked",
         "supermoderator_assigned",
     ]
-    revoked_before = json.loads(events[0]["before_state"])
-    revoked_after = json.loads(events[0]["after_state"])
-    assigned_after = json.loads(events[1]["after_state"])
-    assert events[0]["entity_id"] == initial_assignment.id
+    revoked_before = json.loads(events[1]["before_state"])
+    revoked_after = json.loads(events[1]["after_state"])
+    assigned_after = json.loads(events[2]["after_state"])
+    assert events[1]["entity_id"] == initial_assignment.id
     assert revoked_before["assignment_id"] == initial_assignment.id
     assert revoked_after["assignment_id"] == initial_assignment.id
-    assert events[1]["entity_id"] == second_result.assignment.id
+    assert events[2]["entity_id"] == second_result.assignment.id
     assert assigned_after["assignment_id"] == second_result.assignment.id
 
 
@@ -347,4 +360,5 @@ def test_revoke_missing_assignment_has_predictable_error(tmp_path: Path) -> None
             chat_id=chat_id,
             user_id=user_id,
             revoked_by_user_id=actor_id,
+            audit_actor=AUDIT_ACTOR,
         )

@@ -11,6 +11,7 @@ from threading import Event, local
 import pytest
 
 from app import contest_service
+from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
     ContestCreationConflictError,
     ContestNotFoundError,
@@ -37,6 +38,11 @@ from app.database import create_connection, initialize_database
 
 TELEGRAM_CHAT_ID = -1001234567890
 TELEGRAM_USER_ID = 123
+AUDIT_ACTOR = AuditActor(
+    telegram_chat_id=TELEGRAM_CHAT_ID,
+    telegram_user_id=TELEGRAM_USER_ID,
+    role=AuditActorRole.TELEGRAM_ADMIN,
+)
 
 
 def create_contest(
@@ -55,6 +61,7 @@ def create_contest(
         username="evsab",
         contest_name=contest_name,
         idempotency_key=idempotency_key,
+        audit_actor=AUDIT_ACTOR,
     )
 
 
@@ -79,6 +86,7 @@ def create_test_match(
         away_team_name=away_team_name,
         starts_at_utc=starts_at_utc,
         idempotency_key=idempotency_key,
+        audit_actor=AUDIT_ACTOR,
     )
 
 
@@ -97,6 +105,7 @@ def delete_test_match(
         first_name="Eugene",
         last_name="Sabir",
         username="evsab",
+        audit_actor=AUDIT_ACTOR,
     )
 
 
@@ -156,6 +165,7 @@ def save_test_result(
         away_score=away_score,
         advancing_team_id=advancing_team_id,
         now_utc=now_utc,
+        audit_actor=AUDIT_ACTOR,
     )
 
 
@@ -172,6 +182,7 @@ def complete_test_contest(
         first_name="Eugene",
         last_name="Sabir",
         username="evsab",
+        audit_actor=AUDIT_ACTOR,
     )
 
 
@@ -2060,6 +2071,7 @@ def test_delete_contest_deletes_active_contest_and_all_dependent_data(
         database_path=database_path,
         telegram_chat_id=TELEGRAM_CHAT_ID,
         contest_id=contest.id,
+        audit_actor=AUDIT_ACTOR,
     )
 
     assert (
@@ -2131,6 +2143,7 @@ def test_delete_contest_rejects_completed_contest(
             database_path=database_path,
             telegram_chat_id=TELEGRAM_CHAT_ID,
             contest_id=contest.id,
+            audit_actor=AUDIT_ACTOR,
         )
 
     with create_connection(database_path) as connection:
@@ -2160,6 +2173,7 @@ def test_delete_contest_rejects_contest_from_other_chat(
             database_path=database_path,
             telegram_chat_id=TELEGRAM_CHAT_ID - 1,
             contest_id=contest.id,
+            audit_actor=AUDIT_ACTOR,
         )
 
     assert get_active_contests(
@@ -2462,6 +2476,7 @@ def test_match_prediction_publication_settings_are_disabled_by_default_and_updat
         username="evsab",
         enabled=True,
         now_utc=enabled_at,
+        audit_actor=AUDIT_ACTOR,
     )
 
     enabled_details = get_contest_details(
@@ -2511,6 +2526,7 @@ def test_match_prediction_publication_settings_are_disabled_by_default_and_updat
         username="evsab",
         enabled=False,
         now_utc=enabled_at,
+        audit_actor=AUDIT_ACTOR,
     )
 
     disabled_details = get_contest_details(

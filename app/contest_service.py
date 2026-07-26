@@ -755,8 +755,8 @@ def complete_contest(
     first_name: str,
     last_name: str | None,
     username: str | None,
+    audit_actor: AuditActor,
     now_utc: datetime | None = None,
-    audit_actor: AuditActor | None = None,
 ) -> None:
     resolved_now_utc = _resolve_now_utc(now_utc)
 
@@ -895,7 +895,7 @@ def delete_contest(
     database_path: Path,
     telegram_chat_id: int,
     contest_id: int,
-    audit_actor: AuditActor | None = None,
+    audit_actor: AuditActor,
 ) -> None:
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -947,7 +947,7 @@ def create_match(
     away_team_name: str,
     starts_at_utc: str,
     idempotency_key: str,
-    audit_actor: AuditActor | None = None,
+    audit_actor: AuditActor,
 ) -> MatchCreationResult:
     normalized_home_team_name = _normalize_team_name(
         home_team_name,
@@ -1202,7 +1202,7 @@ def delete_match(
     first_name: str,
     last_name: str | None,
     username: str | None,
-    audit_actor: AuditActor | None = None,
+    audit_actor: AuditActor,
 ) -> None:
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -1494,8 +1494,8 @@ def save_match_result(
     home_score: int,
     away_score: int,
     advancing_team_id: int,
+    audit_actor: AuditActor,
     now_utc: datetime | None = None,
-    audit_actor: AuditActor | None = None,
 ) -> MatchResultSaveResult:
     normalized_home_score = _normalize_match_result_score(
         home_score,
@@ -1683,9 +1683,7 @@ def save_match_result(
                 entity_type=AuditEntityType.MATCH,
                 entity_id=match_id,
                 contest_id=contest_id,
-                before_state=(
-                    _match_snapshot(match_row) if previous_result is not None else None
-                ),
+                before_state=_match_snapshot(match_row),
                 after_state=_match_snapshot(saved_match_row),
             )
 
@@ -1709,8 +1707,8 @@ def save_match_prediction_publication_settings(
     last_name: str | None,
     username: str | None,
     enabled: bool,
+    audit_actor: AuditActor,
     now_utc: datetime | None = None,
-    audit_actor: AuditActor | None = None,
 ) -> None:
     if not isinstance(enabled, bool):
         raise ValueError(
@@ -1811,8 +1809,8 @@ def save_champion_prediction_settings(
     enabled: bool,
     deadline_at: str | None,
     points: int,
+    audit_actor: AuditActor,
     now_utc: datetime | None = None,
-    audit_actor: AuditActor | None = None,
 ) -> None:
     resolved_now_utc = _resolve_now_utc(now_utc)
 
@@ -2062,8 +2060,8 @@ def save_contest_champion(
     last_name: str | None,
     username: str | None,
     champion_team_id: int,
+    audit_actor: AuditActor,
     now_utc: datetime | None = None,
-    audit_actor: AuditActor | None = None,
 ) -> TeamSummary:
     normalized_team_id = _normalize_champion_team_id(
         champion_team_id,
@@ -2192,7 +2190,7 @@ def create_world_cup_2026_contest(
     username: str | None,
     contest_name: str,
     idempotency_key: str,
-    audit_actor: AuditActor | None = None,
+    audit_actor: AuditActor,
 ) -> ContestCreationResult:
     normalized_contest_name = _normalize_contest_name(contest_name)
     normalized_idempotency_key = _normalize_idempotency_key(idempotency_key)
@@ -2518,7 +2516,7 @@ def _get_contest_row(
 def _record_audit(
     connection,
     *,
-    audit_actor: AuditActor | None,
+    audit_actor: AuditActor,
     telegram_chat_id: int,
     event_type: AuditEventType,
     entity_type: AuditEntityType,
@@ -2528,8 +2526,6 @@ def _record_audit(
     after_state: dict[str, object] | None,
     metadata: dict[str, object] | None = None,
 ) -> None:
-    if audit_actor is None:
-        return
     if audit_actor.telegram_chat_id != telegram_chat_id:
         raise ValueError("Audit actor chat does not match the administrative action.")
     record_audit_event(

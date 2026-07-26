@@ -33,7 +33,6 @@ class AuditActorRole(StrEnum):
     TELEGRAM_ADMIN = "telegram_admin"
     SUPERMODERATOR = "supermoderator"
     PARTICIPANT = "participant"
-    UNVERIFIED = "unverified"
 
 
 @dataclass(frozen=True, slots=True)

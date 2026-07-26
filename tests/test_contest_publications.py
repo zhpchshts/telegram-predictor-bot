@@ -12,6 +12,7 @@ import pytest
 from aiogram.types import InputRichMessage
 
 from app import contest_publications
+from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
     ChampionPredictionSettingsLockedError,
     ContestCompletionUnavailableError,
@@ -49,6 +50,11 @@ from app.publication_worker import process_due_contest_publications
 
 CHAT_ID = -1001234567890
 USER_ID = 123456789
+AUDIT_ACTOR = AuditActor(
+    telegram_chat_id=CHAT_ID,
+    telegram_user_id=USER_ID,
+    role=AuditActorRole.TELEGRAM_ADMIN,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +323,7 @@ def test_champion_predictions_follow_deadline_and_render_current_sorted_list(
         deadline_at="2026-06-11T11:00:00Z",
         points=7,
         now_utc=_datetime(9),
+        audit_actor=AUDIT_ACTOR,
     )
     for telegram_user_id, first_name, team_id in (
         (USER_ID + 1, "Борис", match.home_team_id),
@@ -427,6 +434,7 @@ def test_champion_predictions_renderer_has_empty_state(tmp_path: Path) -> None:
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
     claim = claim_next_publication(
         database_path=database_path,
@@ -466,6 +474,7 @@ def test_champion_predictions_future_deadline_move_does_not_add_revision(
             deadline_at=deadline,
             points=5,
             now_utc=_datetime(9),
+            audit_actor=AUDIT_ACTOR,
         )
     with database_connection(database_path) as connection:
         row = connection.execute(
@@ -500,6 +509,7 @@ def test_master_switch_after_deadline_has_no_backfill_but_explicit_save_does(
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
     save_match_prediction_publication_settings(
         database_path=database_path,
@@ -511,6 +521,7 @@ def test_master_switch_after_deadline_has_no_backfill_but_explicit_save_does(
         username="anna",
         enabled=True,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
     with database_connection(database_path) as connection:
         assert (
@@ -535,6 +546,7 @@ def test_master_switch_after_deadline_has_no_backfill_but_explicit_save_does(
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
     with database_connection(database_path) as connection:
         row = connection.execute(
@@ -565,6 +577,7 @@ def test_master_switch_disable_and_reenable_restores_future_reconciliation(
         deadline_at="2099-01-01T00:00:00Z",
         points=5,
         now_utc=_datetime(9),
+        audit_actor=AUDIT_ACTOR,
     )
     _disable_publications(database_path, contest_id=contest_id)
     with database_connection(database_path) as connection:
@@ -612,6 +625,7 @@ def test_reopened_champion_predictions_are_withdrawn_and_republished(
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
         now_utc=_datetime(9),
+        audit_actor=AUDIT_ACTOR,
     )
     save_champion_prediction(
         database_path=database_path,
@@ -636,6 +650,7 @@ def test_reopened_champion_predictions_are_withdrawn_and_republished(
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
     bot = RecordingBot()
     claim = claim_next_publication(database_path=database_path, now_utc=_datetime(12))
@@ -673,6 +688,7 @@ def test_reopened_champion_predictions_are_withdrawn_and_republished(
         deadline_at=future_deadline,
         points=5,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
     withdrawal = claim_next_publication(
         database_path=database_path, now_utc=_datetime(12)
@@ -745,6 +761,7 @@ def test_reopened_champion_predictions_are_withdrawn_and_republished(
         deadline_at=None,
         points=5,
         now_utc=datetime(2099, 1, 1, 2, tzinfo=timezone.utc),
+        audit_actor=AUDIT_ACTOR,
     )
     with database_connection(database_path) as connection:
         row = connection.execute(
@@ -775,6 +792,7 @@ def test_recording_actual_champion_does_not_revise_champion_predictions(
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
     _save_result(database_path, contest_id=contest_id, match=match)
     with database_connection(database_path) as connection:
@@ -796,6 +814,7 @@ def test_recording_actual_champion_does_not_revise_champion_predictions(
         last_name="Иванова",
         username="anna",
         champion_team_id=match.home_team_id,
+        audit_actor=AUDIT_ACTOR,
     )
     with database_connection(database_path) as connection:
         after = tuple(
@@ -841,6 +860,7 @@ def test_match_result_publication_is_sent_and_corrected(tmp_path: Path) -> None:
         away_score=1,
         advancing_team_id=match.home_team_id,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
 
     bot = RecordingBot()
@@ -878,6 +898,7 @@ def test_match_result_publication_is_sent_and_corrected(tmp_path: Path) -> None:
         away_score=0,
         advancing_team_id=match.home_team_id,
         now_utc=_datetime(13),
+        audit_actor=AUDIT_ACTOR,
     )
     assert (
         asyncio.run(
@@ -905,6 +926,7 @@ def test_match_result_publication_is_sent_and_corrected(tmp_path: Path) -> None:
         away_score=1,
         advancing_team_id=match.home_team_id,
         now_utc=_datetime(14),
+        audit_actor=AUDIT_ACTOR,
     )
     assert (
         asyncio.run(
@@ -1026,6 +1048,7 @@ def test_deleted_published_match_id_can_be_reused_in_same_contest(
         away_team_name="Аргентина",
         starts_at_utc="2026-06-11T12:00:00Z",
         idempotency_key="match-2",
+        audit_actor=AUDIT_ACTOR,
     ).match
     assert second_match.id == first_match.id
     _save_result(
@@ -1121,6 +1144,7 @@ def test_final_actions_are_published_in_domain_order(tmp_path: Path) -> None:
         enabled=True,
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
+        audit_actor=AUDIT_ACTOR,
     )
     save_champion_prediction(
         database_path=database_path,
@@ -1143,6 +1167,7 @@ def test_final_actions_are_published_in_domain_order(tmp_path: Path) -> None:
         last_name="Иванова",
         username="anna",
         champion_team_id=match.home_team_id,
+        audit_actor=AUDIT_ACTOR,
     )
     complete_contest(
         database_path=database_path,
@@ -1152,6 +1177,7 @@ def test_final_actions_are_published_in_domain_order(tmp_path: Path) -> None:
         first_name="Анна",
         last_name="Иванова",
         username="anna",
+        audit_actor=AUDIT_ACTOR,
     )
 
     bot = RecordingBot()
@@ -1208,6 +1234,7 @@ def test_completion_publication_names_exactly_one_winner_for_tied_points(
         first_name="Анна",
         last_name=None,
         username="anna",
+        audit_actor=AUDIT_ACTOR,
     )
 
     details = get_contest_details(
@@ -1398,6 +1425,7 @@ def _create_contest_and_match(database_path: Path):
         username="anna",
         contest_name="ЧМ-2026",
         idempotency_key="contest-1",
+        audit_actor=AUDIT_ACTOR,
     ).contest
     match = create_match(
         database_path=database_path,
@@ -1411,6 +1439,7 @@ def _create_contest_and_match(database_path: Path):
         away_team_name="Испания",
         starts_at_utc="2026-06-11T12:00:00Z",
         idempotency_key="match-1",
+        audit_actor=AUDIT_ACTOR,
     ).match
     return contest.id, match
 
@@ -1428,6 +1457,7 @@ def _create_replacement_match(database_path: Path, *, contest_id: int):
         away_team_name="Аргентина",
         starts_at_utc="2026-06-11T12:00:00Z",
         idempotency_key="replacement-match",
+        audit_actor=AUDIT_ACTOR,
     ).match
 
 
@@ -2065,6 +2095,7 @@ def test_champion_result_is_published_immediately_corrected_and_not_republished(
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
         now_utc=_datetime(10),
+        audit_actor=AUDIT_ACTOR,
     )
     save_champion_prediction(
         database_path=database_path,
@@ -2093,6 +2124,7 @@ def test_champion_result_is_published_immediately_corrected_and_not_republished(
         username="anna",
         champion_team_id=match.home_team_id,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
     with database_connection(database_path) as connection:
         initial_publication = tuple(
@@ -2135,6 +2167,7 @@ def test_champion_result_is_published_immediately_corrected_and_not_republished(
         username="anna",
         champion_team_id=match.home_team_id,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
     with database_connection(database_path) as connection:
         same_publication = tuple(
@@ -2176,6 +2209,7 @@ def test_champion_result_is_published_immediately_corrected_and_not_republished(
         username="anna",
         champion_team_id=match.away_team_id,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
     assert (
         asyncio.run(
@@ -2214,6 +2248,7 @@ def test_champion_result_is_published_immediately_corrected_and_not_republished(
         first_name="Анна",
         last_name="Иванова",
         username="anna",
+        audit_actor=AUDIT_ACTOR,
     )
     with database_connection(database_path) as connection:
         revisions_after_completion = {
@@ -2318,6 +2353,7 @@ def test_champion_settings_are_locked_without_side_effects_after_result(
             deadline_at=deadline_at,
             points=points,
             now_utc=_datetime(12),
+            audit_actor=AUDIT_ACTOR,
         )
 
     with database_connection(database_path) as connection:
@@ -2381,6 +2417,7 @@ def test_champion_renderer_rejects_open_deadline_for_completed_contest(
         enabled=True,
         deadline_at="2099-01-01T00:00:00Z",
         points=5,
+        audit_actor=AUDIT_ACTOR,
     )
     save_champion_prediction(
         database_path=database_path,
@@ -2514,6 +2551,7 @@ def test_master_switch_enabled_before_deadline_restores_future_publication(
         enabled=True,
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
+        audit_actor=AUDIT_ACTOR,
     )
     save_champion_prediction(
         database_path=database_path,
@@ -2546,6 +2584,7 @@ def test_master_switch_enabled_before_deadline_restores_future_publication(
         last_name="Иванова",
         username="anna",
         champion_team_id=match.home_team_id,
+        audit_actor=AUDIT_ACTOR,
     )
     bot = RecordingBot()
     assert (
@@ -2570,6 +2609,7 @@ def test_completion_while_master_disabled_sends_nothing(tmp_path: Path) -> None:
         first_name="Анна",
         last_name="Иванова",
         username="anna",
+        audit_actor=AUDIT_ACTOR,
     )
     bot = RecordingBot()
     assert (
@@ -2597,6 +2637,7 @@ def test_completion_without_champion_prediction_creates_no_prediction_publicatio
         first_name="Анна",
         last_name="Иванова",
         username="anna",
+        audit_actor=AUDIT_ACTOR,
     )
 
     with database_connection(database_path) as connection:
@@ -2629,6 +2670,7 @@ def test_master_reenable_does_not_backfill_champion_result(
         enabled=True,
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
+        audit_actor=AUDIT_ACTOR,
     )
     save_champion_prediction(
         database_path=database_path,
@@ -2651,6 +2693,7 @@ def test_master_reenable_does_not_backfill_champion_result(
         last_name="Иванова",
         username="anna",
         champion_team_id=match.home_team_id,
+        audit_actor=AUDIT_ACTOR,
     )
     with database_connection(database_path) as connection:
         assert (
@@ -2671,6 +2714,7 @@ def test_master_reenable_does_not_backfill_champion_result(
         username="anna",
         champion_team_id=match.away_team_id,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
     with database_connection(database_path) as connection:
         assert (
@@ -2691,6 +2735,7 @@ def test_master_reenable_does_not_backfill_champion_result(
         first_name="Анна",
         last_name="Иванова",
         username="anna",
+        audit_actor=AUDIT_ACTOR,
     )
     bot = RecordingBot()
     assert (
@@ -2720,6 +2765,7 @@ def test_completed_contest_final_dependencies_override_adverse_event_order(
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
         now_utc=_datetime(10),
+        audit_actor=AUDIT_ACTOR,
     )
     save_champion_prediction(
         database_path=database_path,
@@ -2743,6 +2789,7 @@ def test_completed_contest_final_dependencies_override_adverse_event_order(
         username="anna",
         enabled=True,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
     save_contest_champion(
         database_path=database_path,
@@ -2753,6 +2800,7 @@ def test_completed_contest_final_dependencies_override_adverse_event_order(
         last_name="Иванова",
         username="anna",
         champion_team_id=match.home_team_id,
+        audit_actor=AUDIT_ACTOR,
     )
     with database_connection(database_path) as connection:
         event_id = connection.execute(
@@ -2790,6 +2838,7 @@ def test_completed_contest_final_dependencies_override_adverse_event_order(
         first_name="Анна",
         last_name="Иванова",
         username="anna",
+        audit_actor=AUDIT_ACTOR,
     )
     bot = RecordingBot()
     assert (
@@ -2821,6 +2870,7 @@ def test_legacy_champion_result_reconciliation_is_restored_and_published(
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
         now_utc=_datetime(9),
+        audit_actor=AUDIT_ACTOR,
     )
     save_champion_prediction(
         database_path=database_path,
@@ -2999,6 +3049,7 @@ def test_legacy_champion_result_reconciliation_is_restored_and_published(
         last_name="Иванова",
         username="anna",
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
 
     final_bot = RecordingBot()
@@ -3032,6 +3083,7 @@ def test_legacy_reconciliation_does_not_create_missing_champion_result(
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
         now_utc=_datetime(9),
+        audit_actor=AUDIT_ACTOR,
     )
     _save_result(database_path, contest_id=contest_id, match=match)
     with database_connection(database_path) as connection:
@@ -3077,6 +3129,7 @@ def test_completion_before_champion_deadline_rejects_legacy_champion(
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
         now_utc=_datetime(9),
+        audit_actor=AUDIT_ACTOR,
     )
     _save_result(database_path, contest_id=contest_id, match=match)
     with database_connection(database_path) as connection:
@@ -3098,6 +3151,7 @@ def test_completion_before_champion_deadline_rejects_legacy_champion(
             last_name="Иванова",
             username="anna",
             now_utc=_datetime(10),
+            audit_actor=AUDIT_ACTOR,
         )
 
     with database_connection(database_path) as connection:
@@ -3128,6 +3182,7 @@ def _enable_publications(database_path: Path, *, contest_id: int) -> None:
         username="anna",
         enabled=True,
         now_utc=_datetime(9),
+        audit_actor=AUDIT_ACTOR,
     )
 
 
@@ -3142,6 +3197,7 @@ def _disable_publications(database_path: Path, *, contest_id: int) -> None:
         username="anna",
         enabled=False,
         now_utc=_datetime(13),
+        audit_actor=AUDIT_ACTOR,
     )
 
 
@@ -3159,6 +3215,7 @@ def _prepare_champion_result(database_path: Path):
         enabled=True,
         deadline_at="2026-06-11T11:00:00Z",
         points=5,
+        audit_actor=AUDIT_ACTOR,
     )
     save_champion_prediction(
         database_path=database_path,
@@ -3181,6 +3238,7 @@ def _prepare_champion_result(database_path: Path):
         last_name="Иванова",
         username="anna",
         champion_team_id=match.home_team_id,
+        audit_actor=AUDIT_ACTOR,
     )
     return contest_id, match
 
@@ -3206,6 +3264,7 @@ def _save_result(
         away_score=away_score,
         advancing_team_id=match.home_team_id,
         now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
     )
 
 
@@ -3219,6 +3278,7 @@ def _delete_match(database_path: Path, *, contest_id: int, match_id: int) -> Non
         first_name="Анна",
         last_name="Иванова",
         username="anna",
+        audit_actor=AUDIT_ACTOR,
     )
 
 

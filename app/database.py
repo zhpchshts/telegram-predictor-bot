@@ -56,8 +56,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
         actor_role IN (
             'telegram_admin',
             'supermoderator',
-            'participant',
-            'unverified'
+            'participant'
         )
     ),
     event_type TEXT NOT NULL,

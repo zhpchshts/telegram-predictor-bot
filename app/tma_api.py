@@ -10,7 +10,6 @@ from pydantic import BaseModel, BeforeValidator, Field
 
 from app.access_control import (
     AccessDecision,
-    AccessRole,
     AccessVerificationStatus,
     TelegramAdministratorsClient,
     TelegramAdministratorsSnapshot,
@@ -97,18 +96,12 @@ def _utc_now() -> datetime:
 
 
 def _audit_actor(context: TmaContext, access: AccessDecision) -> AuditActor:
-    if access.role is AccessRole.SUPERMODERATOR:
-        role = AuditActorRole.SUPERMODERATOR
-    elif access.verification_status is AccessVerificationStatus.UNAVAILABLE:
-        role = AuditActorRole.UNVERIFIED
-    elif access.role is None:
-        raise RuntimeError("Verified contest access has no effective role.")
-    else:
-        role = AuditActorRole(access.role.value)
+    if access.role is None:
+        raise RuntimeError("Allowed administrative action has no effective role.")
     return AuditActor(
         telegram_chat_id=context.chat.telegram_chat_id,
         telegram_user_id=context.user.telegram_user_id,
-        role=role,
+        role=AuditActorRole(access.role.value),
     )
 
 

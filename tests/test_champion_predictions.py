@@ -7,6 +7,7 @@ from threading import Barrier
 
 import pytest
 
+from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
     ChampionUnavailableError,
     PredictionUnavailableError,
@@ -28,6 +29,11 @@ BOB_TELEGRAM_USER_ID = 303
 OPEN_PREDICTION_TIME = datetime(2029, 1, 1, tzinfo=timezone.utc)
 CLOSED_PREDICTION_TIME = datetime(2030, 1, 2, tzinfo=timezone.utc)
 FUTURE_DEADLINE = "2030-01-01T12:00:00Z"
+AUDIT_ACTOR = AuditActor(
+    telegram_chat_id=CHAT_ID,
+    telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+    role=AuditActorRole.TELEGRAM_ADMIN,
+)
 
 
 @pytest.fixture
@@ -48,6 +54,7 @@ def _create_contest(database_path: Path) -> int:
         username="admin",
         contest_name="Плей-офф",
         idempotency_key="create-contest",
+        audit_actor=AUDIT_ACTOR,
     )
     return result.contest.id
 
@@ -69,6 +76,7 @@ def _create_matches(
         away_team_name="Франция",
         starts_at_utc="2029-06-14T12:00:00Z",
         idempotency_key="create-first-match",
+        audit_actor=AUDIT_ACTOR,
     ).match
     second_match = create_match(
         database_path=database_path,
@@ -82,6 +90,7 @@ def _create_matches(
         away_team_name="Португалия",
         starts_at_utc="2029-06-15T12:00:00Z",
         idempotency_key="create-second-match",
+        audit_actor=AUDIT_ACTOR,
     ).match
 
     return (
@@ -110,6 +119,7 @@ def _configure_champion_prediction(
         enabled=True,
         deadline_at=deadline_at,
         points=points,
+        audit_actor=AUDIT_ACTOR,
     )
 
 
@@ -332,6 +342,7 @@ def test_champion_recalculation_updates_leaderboard_after_correction(
             last_name=None,
             username="admin",
             champion_team_id=spain_team_id,
+            audit_actor=AUDIT_ACTOR,
         )
 
     _mark_all_matches_finished(
@@ -355,6 +366,7 @@ def test_champion_recalculation_updates_leaderboard_after_correction(
             username="admin",
             champion_team_id=spain_team_id,
             now_utc=OPEN_PREDICTION_TIME,
+            audit_actor=AUDIT_ACTOR,
         )
 
     with database_connection(database_path) as connection:
@@ -390,6 +402,7 @@ def test_champion_recalculation_updates_leaderboard_after_correction(
         username="admin",
         champion_team_id=spain_team_id,
         now_utc=CLOSED_PREDICTION_TIME,
+        audit_actor=AUDIT_ACTOR,
     )
     assert saved_champion.name == "Испания"
 
@@ -416,6 +429,7 @@ def test_champion_recalculation_updates_leaderboard_after_correction(
         username="admin",
         champion_team_id=france_team_id,
         now_utc=CLOSED_PREDICTION_TIME,
+        audit_actor=AUDIT_ACTOR,
     )
     assert corrected_champion.name == "Франция"
 
@@ -455,6 +469,7 @@ def test_moving_deadline_first_blocks_subsequent_champion(
         deadline_at="2031-01-01T12:00:00Z",
         points=5,
         now_utc=CLOSED_PREDICTION_TIME,
+        audit_actor=AUDIT_ACTOR,
     )
 
     with pytest.raises(
@@ -473,6 +488,7 @@ def test_moving_deadline_first_blocks_subsequent_champion(
             username="admin",
             champion_team_id=spain_team_id,
             now_utc=CLOSED_PREDICTION_TIME,
+            audit_actor=AUDIT_ACTOR,
         )
 
 
@@ -503,6 +519,7 @@ def test_concurrent_champion_and_settings_changes_preserve_invariant(
                 deadline_at="2031-01-01T12:00:00Z",
                 points=5,
                 now_utc=CLOSED_PREDICTION_TIME,
+                audit_actor=AUDIT_ACTOR,
             )
         except ValueError as error:
             return "settings", type(error).__name__, str(error)
@@ -521,6 +538,7 @@ def test_concurrent_champion_and_settings_changes_preserve_invariant(
                 username="admin",
                 champion_team_id=spain_team_id,
                 now_utc=CLOSED_PREDICTION_TIME,
+                audit_actor=AUDIT_ACTOR,
             )
         except ValueError as error:
             return "champion", type(error).__name__, str(error)
@@ -593,6 +611,7 @@ def test_complete_contest_rejects_enabled_champion_prediction_without_deadline(
             last_name=None,
             username="admin",
             now_utc=CLOSED_PREDICTION_TIME,
+            audit_actor=AUDIT_ACTOR,
         )
 
     with database_connection(database_path) as connection:
@@ -646,6 +665,7 @@ def test_correct_champion_breaks_tie_with_zero_points_in_completed_contest(
         username="admin",
         champion_team_id=spain_team_id,
         now_utc=CLOSED_PREDICTION_TIME,
+        audit_actor=AUDIT_ACTOR,
     )
 
     active_details = get_contest_details(
@@ -662,6 +682,7 @@ def test_correct_champion_breaks_tie_with_zero_points_in_completed_contest(
         last_name=None,
         username="admin",
         now_utc=CLOSED_PREDICTION_TIME,
+        audit_actor=AUDIT_ACTOR,
     )
     completed_details = get_contest_details(
         database_path=database_path,

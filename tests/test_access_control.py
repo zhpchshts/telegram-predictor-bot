@@ -13,12 +13,18 @@ from app.access_control import (
     AccessVerificationStatus,
     determine_access,
 )
+from app.audit_service import AuditActor, AuditActorRole
 from app.database import create_connection, initialize_database
 from app.supermoderator_service import assign_supermoderator
 
 
 TELEGRAM_CHAT_ID = -100123
 TELEGRAM_USER_ID = 123
+AUDIT_ACTOR = AuditActor(
+    telegram_chat_id=TELEGRAM_CHAT_ID,
+    telegram_user_id=456,
+    role=AuditActorRole.TELEGRAM_ADMIN,
+)
 
 
 class FakeTelegramClient:
@@ -84,6 +90,7 @@ def test_telegram_administrator_has_priority_over_local_assignment(
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
+        audit_actor=AUDIT_ACTOR,
     )
     telegram_client = FakeTelegramClient([TELEGRAM_USER_ID])
 
@@ -146,6 +153,7 @@ def test_verified_non_admin_role_depends_on_local_assignment(tmp_path: Path) -> 
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
+        audit_actor=AUDIT_ACTOR,
     )
     supermoderator_access = asyncio.run(
         determine_access(
@@ -192,6 +200,7 @@ def test_telegram_unavailable_is_distinct_and_preserves_local_role(
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
+        audit_actor=AUDIT_ACTOR,
     )
     supermoderator_access = asyncio.run(
         determine_access(

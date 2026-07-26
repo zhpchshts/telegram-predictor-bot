@@ -15,6 +15,8 @@ from app.audit_service import (
     record_audit_event,
 )
 from app.contest_service import (
+    ContestNotFoundError,
+    MatchNotFoundError,
     complete_contest,
     create_match,
     create_world_cup_2026_contest,
@@ -22,6 +24,7 @@ from app.contest_service import (
     delete_match,
     save_champion_prediction_settings,
     save_contest_champion,
+    save_match_prediction_publication_settings,
     save_match_result,
 )
 from app.database import create_connection, initialize_database
@@ -124,7 +127,7 @@ def test_audit_schema_is_added_without_removing_existing_data(tmp_path: Path) ->
         "idx_audit_events_contest_created",
         "idx_audit_events_event_type",
     } <= indexes
-    assert "'unverified'" in table_sql
+    assert "'unverified'" not in table_sql
 
 
 def test_audit_service_stores_deterministic_json_and_utc_time(tmp_path: Path) -> None:
@@ -281,7 +284,164 @@ def test_contest_match_result_champion_and_deletion_events(tmp_path: Path) -> No
     assert changed_result["actor_role"] == "telegram_admin"
     assert json.loads(changed_result["before_state"])["home_score"] == 2
     assert json.loads(changed_result["after_state"])["home_score"] == 1
+    deleted_match_event = events[-2]
+    deleted_match_before = json.loads(deleted_match_event["before_state"])
+    assert deleted_match_event["entity_id"] == disposable_match.id
+    assert deleted_match_event["contest_id"] == disposable.id
+    assert deleted_match_before["id"] == disposable_match.id
+    assert deleted_match_event["after_state"] is None
+    deleted_contest_before = json.loads(events[-1]["before_state"])
+    assert events[-1]["entity_id"] == disposable.id
+    assert events[-1]["contest_id"] == disposable.id
+    assert deleted_contest_before["id"] == disposable.id
     assert events[-1]["after_state"] is None
+
+
+def test_first_match_result_keeps_existing_match_as_before_state(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "first-result.db"
+    initialize_database(database_path)
+    contest = _create_contest(database_path)
+    match = _create_match(database_path, contest.id)
+
+    save_match_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        match_id=match.id,
+        telegram_user_id=ACTOR_USER_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        home_score=3,
+        away_score=2,
+        advancing_team_id=match.home_team_id,
+        audit_actor=ACTOR,
+        now_utc=datetime(2026, 6, 2, tzinfo=timezone.utc),
+    )
+
+    event = _events(database_path)[-1]
+    before_state = json.loads(event["before_state"])
+    after_state = json.loads(event["after_state"])
+    assert event["event_type"] == "match_result_set"
+    assert before_state["home_score"] is None
+    assert before_state["away_score"] is None
+    assert before_state["advancing_team_id"] is None
+    assert before_state["status"] == "scheduled"
+    assert after_state["home_score"] == 3
+    assert after_state["away_score"] == 2
+    assert after_state["advancing_team_id"] == match.home_team_id
+    assert after_state["status"] == "finished"
+
+
+def test_changed_champion_and_publication_settings_have_semantic_events(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "settings-and-champion.db"
+    initialize_database(database_path)
+    contest = _create_contest(database_path)
+    match = _create_match(database_path, contest.id)
+    save_match_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        match_id=match.id,
+        telegram_user_id=ACTOR_USER_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        home_score=1,
+        away_score=0,
+        advancing_team_id=match.home_team_id,
+        audit_actor=ACTOR,
+        now_utc=datetime(2026, 6, 2, tzinfo=timezone.utc),
+    )
+    save_match_prediction_publication_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=ACTOR_USER_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        enabled=True,
+        audit_actor=ACTOR,
+        now_utc=datetime(2026, 6, 2, tzinfo=timezone.utc),
+    )
+    save_match_prediction_publication_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=ACTOR_USER_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        enabled=True,
+        audit_actor=ACTOR,
+        now_utc=datetime(2026, 6, 2, tzinfo=timezone.utc),
+    )
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=ACTOR_USER_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        enabled=True,
+        deadline_at="2026-06-01T13:00:00Z",
+        points=5,
+        audit_actor=ACTOR,
+    )
+    save_contest_champion(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=ACTOR_USER_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        champion_team_id=match.home_team_id,
+        audit_actor=ACTOR,
+        now_utc=datetime(2026, 6, 2, tzinfo=timezone.utc),
+    )
+    save_contest_champion(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=ACTOR_USER_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        champion_team_id=match.away_team_id,
+        audit_actor=ACTOR,
+        now_utc=datetime(2026, 6, 2, tzinfo=timezone.utc),
+    )
+
+    events = _events(database_path)
+    publication_events = [
+        event
+        for event in events
+        if event["event_type"] == "contest_updated"
+        and json.loads(event["metadata"] or "{}").get("changed_section")
+        == "match_prediction_publication"
+    ]
+    assert len(publication_events) == 1
+    publication_before = json.loads(publication_events[0]["before_state"])
+    publication_after = json.loads(publication_events[0]["after_state"])
+    assert publication_before["match_prediction_publication_enabled"] is False
+    assert publication_after["match_prediction_publication_enabled"] is True
+    champion_changed = [
+        event for event in events if event["event_type"] == "contest_champion_changed"
+    ]
+    assert len(champion_changed) == 1
+    assert json.loads(champion_changed[0]["before_state"])["champion_team_id"] == (
+        match.home_team_id
+    )
+    assert json.loads(champion_changed[0]["after_state"])["champion_team_id"] == (
+        match.away_team_id
+    )
 
 
 def test_idempotent_creation_and_unchanged_result_do_not_add_events(
@@ -317,6 +477,57 @@ def test_idempotent_creation_and_unchanged_result_do_not_add_events(
         "match_created",
         "match_result_set",
     ]
+
+
+def test_invalid_missing_and_cross_chat_operations_do_not_add_events(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "failed-actions.db"
+    initialize_database(database_path)
+    contest = _create_contest(database_path)
+    baseline_types = [event["event_type"] for event in _events(database_path)]
+
+    with pytest.raises(ValueError, match="different teams|разные команды"):
+        create_match(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest.id,
+            telegram_user_id=ACTOR_USER_ID,
+            first_name="Администратор",
+            last_name=None,
+            username="admin",
+            home_team_name="Испания",
+            away_team_name="Испания",
+            starts_at_utc="2026-06-01T12:00:00Z",
+            idempotency_key="invalid-match",
+            audit_actor=ACTOR,
+        )
+    with pytest.raises(MatchNotFoundError):
+        delete_match(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest.id,
+            match_id=999999,
+            telegram_user_id=ACTOR_USER_ID,
+            first_name="Администратор",
+            last_name=None,
+            username="admin",
+            audit_actor=ACTOR,
+        )
+    other_chat_actor = AuditActor(
+        telegram_chat_id=-100987,
+        telegram_user_id=ACTOR_USER_ID,
+        role=AuditActorRole.TELEGRAM_ADMIN,
+    )
+    with pytest.raises(ContestNotFoundError):
+        delete_contest(
+            database_path=database_path,
+            telegram_chat_id=other_chat_actor.telegram_chat_id,
+            contest_id=contest.id,
+            audit_actor=other_chat_actor,
+        )
+
+    assert [event["event_type"] for event in _events(database_path)] == baseline_types
 
 
 def test_supermoderator_events_distinguish_actor_and_target(tmp_path: Path) -> None:
@@ -428,3 +639,78 @@ def test_main_change_failure_does_not_leave_audit_event(
     assert [event["event_type"] for event in _events(database_path)] == [
         "contest_created"
     ]
+
+
+def test_mismatched_audit_chat_rolls_back_contest_creation(tmp_path: Path) -> None:
+    database_path = tmp_path / "chat-mismatch.db"
+    initialize_database(database_path)
+    mismatched_actor = AuditActor(
+        telegram_chat_id=-100999,
+        telegram_user_id=ACTOR_USER_ID,
+        role=AuditActorRole.TELEGRAM_ADMIN,
+    )
+
+    with pytest.raises(ValueError, match="Audit actor chat"):
+        create_world_cup_2026_contest(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            chat_title="Чат",
+            telegram_user_id=ACTOR_USER_ID,
+            first_name="Администратор",
+            last_name=None,
+            username="admin",
+            contest_name="Не должен сохраниться",
+            idempotency_key="chat-mismatch",
+            audit_actor=mismatched_actor,
+        )
+
+    with create_connection(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM contests").fetchone()[0] == 0
+        assert (
+            connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == 0
+        )
+
+
+def test_supermoderator_audit_failure_rolls_back_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "role-audit-rollback.db"
+    initialize_database(database_path)
+    actor = upsert_chat_actor(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        chat_title="Чат",
+        telegram_user_id=ACTOR_USER_ID,
+        username="admin",
+        first_name="Администратор",
+        last_name=None,
+    )
+    target = get_or_create_telegram_user(
+        database_path=database_path,
+        telegram_user_id=987654321,
+    )
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("synthetic role audit failure")
+
+    monkeypatch.setattr("app.supermoderator_service.record_audit_event", fail_audit)
+    with pytest.raises(RuntimeError, match="synthetic role audit failure"):
+        assign_supermoderator_with_status(
+            database_path=database_path,
+            chat_id=actor.chat_id,
+            user_id=target.id,
+            assigned_by_user_id=actor.actor_user_id,
+            audit_actor=ACTOR,
+        )
+
+    with create_connection(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM supermoderator_assignments"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == 0
+        )

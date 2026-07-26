@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from app import contest_service, match_lifecycle
+from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
     ContestNotFoundError,
     create_match,
@@ -23,6 +24,11 @@ from app.match_lifecycle import start_due_matches
 TELEGRAM_CHAT_ID = -1001234567890
 TELEGRAM_USER_ID = 123
 MATCH_START = datetime(2026, 6, 11, 18, 0, tzinfo=timezone.utc)
+AUDIT_ACTOR = AuditActor(
+    telegram_chat_id=TELEGRAM_CHAT_ID,
+    telegram_user_id=TELEGRAM_USER_ID,
+    role=AuditActorRole.TELEGRAM_ADMIN,
+)
 
 
 def _create_contest(database_path: Path, *, suffix: str = "1"):
@@ -36,6 +42,7 @@ def _create_contest(database_path: Path, *, suffix: str = "1"):
         username=None,
         contest_name=f"Contest {suffix}",
         idempotency_key=f"contest-{suffix}",
+        audit_actor=AUDIT_ACTOR,
     ).contest
 
 
@@ -52,6 +59,7 @@ def _create_match(database_path: Path, *, contest_id: int, suffix: str = "1"):
         away_team_name=f"Away {suffix}",
         starts_at_utc="2026-06-11T18:00:00Z",
         idempotency_key=f"match-{suffix}",
+        audit_actor=AUDIT_ACTOR,
     ).match
 
 
@@ -381,6 +389,7 @@ def test_save_match_result_finishes_due_scheduled_and_started_matches(
         away_score=1,
         advancing_team_id=match.home_team_id,
         now_utc=MATCH_START,
+        audit_actor=AUDIT_ACTOR,
     )
 
     assert _status(database_path, match.id) == "finished"

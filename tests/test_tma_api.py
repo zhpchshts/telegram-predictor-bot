@@ -13,6 +13,14 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
 import pytest
 
+from app import tma_api
+from app.access_control import (
+    AccessDecision,
+    AccessRole,
+    AccessVerificationStatus,
+    TelegramAdministratorsSnapshot,
+)
+from app.audit_service import AuditActor, AuditActorRole
 from app.database import create_connection, initialize_database
 from app.main import create_app as create_application
 from app.supermoderator_service import (
@@ -33,11 +41,13 @@ from app.tma_api import (
     TelegramUserIdInvalidError,
     _authorize_contest_management,
     _authorize_role_management,
+    _audit_actor,
     _parse_telegram_user_id_target,
     get_telegram_administrators_client,
     get_telegram_username_resolver,
 )
 from app.tma_auth import calculate_init_data_hash
+from app.tma_context import TmaChatContext, TmaContext, TmaUserContext
 from app.tma_launch import create_tma_launch_token
 from app.user_service import ChatActor, upsert_chat_actor
 
@@ -45,6 +55,11 @@ from app.user_service import ChatActor, upsert_chat_actor
 BOT_TOKEN = "123456789:test-token"
 TELEGRAM_CHAT_ID = -1001234567890
 CHAT_TITLE = "Футбольные прогнозы"
+TEST_AUDIT_ACTOR = AuditActor(
+    telegram_chat_id=TELEGRAM_CHAT_ID,
+    telegram_user_id=123,
+    role=AuditActorRole.TELEGRAM_ADMIN,
+)
 
 
 class FakeTelegramAdministratorsClient:
@@ -126,6 +141,7 @@ def assign_current_user_as_supermoderator(
         chat_id=actor.chat_id,
         user_id=actor.actor_user_id,
         assigned_by_user_id=actor.actor_user_id,
+        audit_actor=TEST_AUDIT_ACTOR,
     )
     return actor, assignment
 
@@ -798,6 +814,11 @@ def test_contest_management_is_allowed_without_enforcement_or_telegram_check(
     )
 
     assert response.status_code == 201
+    with create_connection(database_path) as connection:
+        actor_role = connection.execute(
+            "SELECT actor_role FROM audit_events WHERE event_type = 'contest_created'"
+        ).fetchone()["actor_role"]
+    assert actor_role == "participant"
 
 
 def test_unenforced_local_supermoderator_is_recorded_in_audit(
@@ -853,6 +874,84 @@ def test_telegram_admin_can_manage_contests_with_enforcement(
 
     assert response.status_code == 201
     assert telegram_client.calls == 1
+    with create_connection(database_path) as connection:
+        actor_role = connection.execute(
+            "SELECT actor_role FROM audit_events WHERE event_type = 'contest_created'"
+        ).fetchone()["actor_role"]
+    assert actor_role == "telegram_admin"
+
+
+def test_contest_audit_uses_exact_access_decision_from_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
+    decision = AccessDecision(
+        verification_status=AccessVerificationStatus.VERIFIED,
+        role=AccessRole.TELEGRAM_ADMIN,
+        can_manage_contests=True,
+        can_manage_roles=True,
+        enforcement_enabled=True,
+        administrators=TelegramAdministratorsSnapshot(
+            telegram_user_ids=frozenset({123})
+        ),
+    )
+    captured_decisions: list[AccessDecision] = []
+    original_audit_actor = tma_api._audit_actor
+
+    async def fixed_access(**kwargs) -> AccessDecision:
+        return decision
+
+    def capture_audit_actor(
+        context: TmaContext,
+        access: AccessDecision,
+    ) -> AuditActor:
+        captured_decisions.append(access)
+        return original_audit_actor(context, access)
+
+    monkeypatch.setattr(tma_api, "determine_access", fixed_access)
+    monkeypatch.setattr(tma_api, "_audit_actor", capture_audit_actor)
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="same-access-decision"),
+        json={"name": "Конкурс с единым решением"},
+    )
+
+    assert response.status_code == 201
+    assert len(captured_decisions) == 1
+    assert captured_decisions[0] is decision
+
+
+def test_audit_actor_rejects_allowed_action_without_role() -> None:
+    context = TmaContext(
+        user=TmaUserContext(
+            telegram_user_id=123,
+            first_name="Eugene",
+            last_name=None,
+            username=None,
+        ),
+        chat=TmaChatContext(
+            telegram_chat_id=TELEGRAM_CHAT_ID,
+            chat_type="supergroup",
+            title=CHAT_TITLE,
+        ),
+    )
+    access = AccessDecision(
+        verification_status=AccessVerificationStatus.UNAVAILABLE,
+        role=None,
+        can_manage_contests=True,
+        can_manage_roles=False,
+        enforcement_enabled=True,
+        administrators=None,
+    )
+
+    with pytest.raises(RuntimeError, match="no effective role"):
+        _audit_actor(context, access)
 
 
 def test_telegram_admin_gain_and_loss_apply_to_the_next_request(
@@ -897,6 +996,9 @@ def test_telegram_admin_gain_and_loss_apply_to_the_next_request(
             ).fetchone()[0]
             == 1
         )
+        assert (
+            connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == 1
+        )
 
 
 def test_verified_supermoderator_can_manage_contests_with_enforcement(
@@ -908,7 +1010,8 @@ def test_verified_supermoderator_can_manage_contests_with_enforcement(
     configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
     assign_current_user_as_supermoderator(database_path)
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
-    client = TestClient(create_app())
+    telegram_client = MutableTelegramAdministratorsClient([])
+    client = TestClient(create_app_with_telegram_client(telegram_client))
 
     response = client.post(
         "/api/tma/contests",
@@ -917,6 +1020,12 @@ def test_verified_supermoderator_can_manage_contests_with_enforcement(
     )
 
     assert response.status_code == 201
+    assert telegram_client.calls == 1
+    with create_connection(database_path) as connection:
+        actor_role = connection.execute(
+            "SELECT actor_role FROM audit_events WHERE event_type = 'contest_created'"
+        ).fetchone()["actor_role"]
+    assert actor_role == "supermoderator"
 
 
 def test_supermoderator_assignment_from_another_chat_does_not_grant_access(
@@ -940,6 +1049,11 @@ def test_supermoderator_assignment_from_another_chat_does_not_grant_access(
         chat_id=actor.chat_id,
         user_id=actor.actor_user_id,
         assigned_by_user_id=actor.actor_user_id,
+        audit_actor=AuditActor(
+            telegram_chat_id=-1009876543210,
+            telegram_user_id=123,
+            role=AuditActorRole.TELEGRAM_ADMIN,
+        ),
     )
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
     client = TestClient(create_app())
@@ -986,6 +1100,16 @@ def test_participant_cannot_manage_contests_or_create_idempotency_record(
             ).fetchone()[0]
             == 0
         )
+        assert (
+            connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM audit_events
+                WHERE event_type = 'contest_created'
+                """
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_denied_match_creation_does_not_create_match_or_idempotency_record(
@@ -1019,6 +1143,16 @@ def test_denied_match_creation_does_not_create_match_or_idempotency_record(
         assert (
             connection.execute(
                 "SELECT COUNT(*) FROM match_creation_requests"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM audit_events
+                WHERE event_type = 'match_created'
+                """
             ).fetchone()[0]
             == 0
         )
@@ -1109,6 +1243,7 @@ def test_supermoderator_assignment_and_revocation_apply_to_next_request(
         chat_id=actor.chat_id,
         user_id=assignment.user_id,
         revoked_by_user_id=actor.actor_user_id,
+        audit_actor=TEST_AUDIT_ACTOR,
     )
     repeated_response = client.post(
         "/api/tma/contests",
@@ -1615,7 +1750,7 @@ def test_create_contest_creates_world_cup_2026_contest(
     assert scoring_rule_sets_count == 1
     assert events_count == 1
     assert requests_count == 1
-    assert audit_actor_role == "unverified"
+    assert audit_actor_role == "participant"
 
 
 def test_create_contest_reuses_result_for_same_idempotency_key(
