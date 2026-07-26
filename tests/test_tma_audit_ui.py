@@ -168,8 +168,132 @@ def test_audit_navigation_uses_the_existing_administrative_access_decision() -> 
         "renderContestScreen",
         "renderBootstrap",
     )
+    management_source = _function_source(
+        "renderManagementScreen",
+        "openManagement",
+    )
 
     assert "if (canManageContests(bootstrap))" in screen_source
-    assert "cards.push(createAuditNavigationCard(bootstrap))" in screen_source
+    assert "createManagementNavigationCard(bootstrap)" in screen_source
+    assert "capabilities.can_read_audit === true" in management_source
+    assert "cards.push(createAuditNavigationCard(bootstrap))" in management_source
     assert '"/api/tma/audit-events?' not in source
     assert "`/api/tma/audit-events?${parameters.toString()}`" in source
+
+
+def test_participant_and_management_contours_are_separate() -> None:
+    participant_source = _function_source(
+        "renderContestDetailsScreen",
+        "renderContestDetailsRoute",
+    )
+    management_source = _function_source(
+        "renderContestManagementScreen",
+        "openContest",
+    )
+    contest_list_source = _function_source(
+        "renderContestScreen",
+        "renderBootstrap",
+    )
+
+    assert "canManageResults: false" in participant_source
+    assert "createMatchFormCard" not in participant_source
+    assert "createContestCompletionCard" not in participant_source
+    assert "createContestDeletionCard" not in participant_source
+    assert "createMatchFormCard" in management_source
+    assert "createContestCompletionCard" in management_source
+    assert "createContestDeletionCard" in management_source
+    assert "createManagementNavigationCard" in contest_list_source
+    assert "createSupermoderatorManagementCard" not in contest_list_source
+
+
+def test_management_always_uses_explicit_contest_selection_and_lazy_api() -> None:
+    source = _source()
+    management_source = _function_source(
+        "renderManagementScreen",
+        "openManagement",
+    )
+    list_source = _function_source(
+        "createManagementContestListCard",
+        "createManagementHeaderCard",
+    )
+
+    assert 'apiRequest("/api/tma/management/contests")' in source
+    assert "createManagementContestListCard(contests, bootstrap)" in management_source
+    assert "contests.length === 1" not in management_source
+    assert "contests.length === 1" not in list_source
+    assert "{ managementMode: true }" in list_source
+    assert 'currentViewMode = "participant"' in source
+    assert 'currentViewMode = "management"' in source
+
+
+def test_successful_participant_contest_render_resets_view_mode() -> None:
+    participant_source = _function_source(
+        "renderContestDetailsScreen",
+        "renderContestDetailsRoute",
+    )
+
+    assert (
+        "function renderContestDetailsScreen(bootstrap, contest, state = {}) {\n"
+        '  currentViewMode = "participant";'
+    ) in participant_source
+
+
+def test_management_open_errors_stay_in_management_contour() -> None:
+    source = _source()
+    open_start = source.index("async function openContest")
+    open_end = source.index("function getAuditEventPresentation", open_start)
+    open_source = source[open_start:open_end]
+    error_source = _function_source(
+        "renderContestManagementError",
+        "openContest",
+    )
+
+    assert "state.managementMode === true" in open_source
+    assert "handleManagementRequestError(" in open_source
+    assert "renderContestManagementError(bootstrap, errorMessage)" in open_source
+    assert "renderContestDetailsError(bootstrap, errorMessage)" in open_source
+    assert "void openManagement(bootstrap)" in error_source
+    assert "renderContestScreen(bootstrap)" not in error_source
+
+
+def test_low_level_api_request_has_no_navigation_side_effects() -> None:
+    source = _source()
+    request_start = source.index("async function apiRequest")
+    request_end = source.index("function handleError", request_start)
+    request_source = source[request_start:request_end]
+    management_error_source = _function_source(
+        "handleManagementRequestError",
+        "openManagement",
+    )
+
+    assert "error.status = response.status" in request_source
+    assert "openManagement" not in request_source
+    assert "currentViewMode" not in request_source
+    assert "setTimeout" not in request_source
+    assert "error?.status !== 403" in management_error_source
+    assert "void openManagement(activeBootstrap" in management_error_source
+
+
+def test_participant_prediction_failures_do_not_use_management_handler() -> None:
+    source = _source()
+    match_prediction_start = source.index("function createMatchPredictionSection")
+    match_prediction_end = source.index(
+        "function getChampionPrediction",
+        match_prediction_start,
+    )
+    champion_prediction_start = source.index(
+        "function createChampionPredictionChoiceSection",
+    )
+    champion_prediction_end = source.index(
+        "function createContestChampionSection",
+        champion_prediction_start,
+    )
+
+    assert (
+        "handleManagementRequestError"
+        not in source[match_prediction_start:match_prediction_end]
+    )
+    assert (
+        "handleManagementRequestError"
+        not in source[champion_prediction_start:champion_prediction_end]
+    )

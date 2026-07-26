@@ -10,11 +10,11 @@ from pydantic import BaseModel, BeforeValidator, Field
 
 from app.access_control import (
     AccessDecision,
+    AccessRole,
     AccessVerificationStatus,
     TelegramAdministratorsClient,
     TelegramAdministratorsSnapshot,
     determine_access,
-    determine_unenforced_access,
 )
 from app.audit_read_service import (
     AuditCursorInvalidError,
@@ -226,14 +226,6 @@ async def _authorize_contest_management(
         x_telegram_init_data=x_telegram_init_data,
     )
     settings = load_settings()
-    if not settings.role_enforcement_enabled:
-        access = determine_unenforced_access(
-            database_path=settings.database_path,
-            telegram_chat_id=context.chat.telegram_chat_id,
-            telegram_user_id=context.user.telegram_user_id,
-        )
-        return ContestManagementContext(context=context, access=access)
-
     access = await determine_access(
         database_path=settings.database_path,
         telegram_chat_id=context.chat.telegram_chat_id,
@@ -351,6 +343,7 @@ async def get_tma_bootstrap(
     return {
         "context": _serialize_context(context),
         "access": _serialize_access(access),
+        "can_access_management": access.can_manage_contests,
         "active_contests": [
             _serialize_active_contest(contest) for contest in active_contests
         ],
@@ -358,6 +351,77 @@ async def get_tma_bootstrap(
             _serialize_active_contest(contest) for contest in completed_contests
         ],
     }
+
+
+@router.get("/management/contests")
+async def get_tma_management_contests(
+    management: Annotated[
+        ContestManagementContext,
+        Depends(_authorize_contest_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    active_contests = get_active_contests(
+        database_path=settings.database_path,
+        telegram_chat_id=management.chat.telegram_chat_id,
+    )
+    completed_contests = get_completed_contests(
+        database_path=settings.database_path,
+        telegram_chat_id=management.chat.telegram_chat_id,
+    )
+    effective_role = (
+        management.access.role.value
+        if management.access.role is not None
+        else AccessRole.PARTICIPANT.value
+    )
+    return {
+        "contests": [
+            _serialize_management_contest(
+                contest,
+                status_value="active",
+                effective_role=effective_role,
+            )
+            for contest in active_contests
+        ]
+        + [
+            _serialize_management_contest(
+                contest,
+                status_value="completed",
+                effective_role=effective_role,
+            )
+            for contest in completed_contests
+        ],
+        "capabilities": {
+            "can_create_contests": management.access.can_manage_contests,
+            "can_manage_roles": management.access.can_manage_roles,
+            "can_read_audit": management.access.can_manage_contests,
+        },
+    }
+
+
+@router.get("/management/contests/{contest_id}")
+async def get_tma_management_contest(
+    contest_id: SqliteInteger,
+    management: Annotated[
+        ContestManagementContext,
+        Depends(_authorize_contest_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        contest = get_contest_details(
+            database_path=settings.database_path,
+            telegram_chat_id=management.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=management.user.telegram_user_id,
+            now_utc=_utc_now(),
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    return {"contest": _serialize_contest_details(contest)}
 
 
 @router.get("/access/supermoderators")
@@ -1365,6 +1429,20 @@ def _serialize_active_contest(contest) -> dict[str, object]:
         "name": contest.name,
         "slug": contest.slug,
         "created_at": contest.created_at,
+    }
+
+
+def _serialize_management_contest(
+    contest,
+    *,
+    status_value: str,
+    effective_role: str,
+) -> dict[str, object]:
+    return {
+        "id": contest.id,
+        "name": contest.name,
+        "status": status_value,
+        "effective_role": effective_role,
     }
 
 

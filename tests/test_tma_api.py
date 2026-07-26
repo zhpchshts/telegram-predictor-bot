@@ -111,7 +111,7 @@ class FakeUsernameResolver:
 def create_app() -> FastAPI:
     app = create_application()
     app.dependency_overrides[get_telegram_administrators_client] = (
-        FakeTelegramAdministratorsClient
+        AdminTelegramAdministratorsClient
     )
     return app
 
@@ -619,11 +619,12 @@ def test_bootstrap_returns_verified_context_and_empty_active_contests(
         },
         "access": {
             "verification_status": "verified",
-            "role": "participant",
-            "can_manage_contests": False,
-            "can_manage_roles": False,
+            "role": "telegram_admin",
+            "can_manage_contests": True,
+            "can_manage_roles": True,
             "enforcement_enabled": False,
         },
+        "can_access_management": True,
         "active_contests": [],
         "completed_contests": [],
     }
@@ -741,6 +742,155 @@ def test_bootstrap_returns_active_and_completed_contests_for_context_chat(
     assert all(contest["created_at"] for contest in response_data["active_contests"])
 
 
+def test_participant_cannot_read_management_contest_list(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(
+        create_app_with_telegram_client(FakeTelegramAdministratorsClient())
+    )
+
+    response = client.get(
+        "/api/tma/management/contests",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "contest_management_forbidden"
+
+
+def test_management_contest_list_is_minimal_and_scoped_to_launch_chat(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    with create_connection(database_path) as connection:
+        chat_id = int(
+            connection.execute(
+                "INSERT INTO chats (telegram_chat_id, title) VALUES (?, ?)",
+                (TELEGRAM_CHAT_ID, CHAT_TITLE),
+            ).lastrowid
+        )
+        other_chat_id = int(
+            connection.execute(
+                "INSERT INTO chats (telegram_chat_id, title) VALUES (?, ?)",
+                (-1009876543210, "Другой чат"),
+            ).lastrowid
+        )
+        active_id = int(
+            connection.execute(
+                """
+                INSERT INTO contests (chat_id, name, slug, is_active)
+                VALUES (?, ?, ?, 1)
+                """,
+                (chat_id, "Активный", "active"),
+            ).lastrowid
+        )
+        completed_id = int(
+            connection.execute(
+                """
+                INSERT INTO contests (chat_id, name, slug, is_active)
+                VALUES (?, ?, ?, 0)
+                """,
+                (chat_id, "Завершённый", "completed"),
+            ).lastrowid
+        )
+        other_id = int(
+            connection.execute(
+                """
+                INSERT INTO contests (chat_id, name, slug, is_active)
+                VALUES (?, ?, ?, 1)
+                """,
+                (other_chat_id, "Чужой", "other"),
+            ).lastrowid
+        )
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/api/tma/management/contests",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 200
+    contests = response.json()["contests"]
+    assert contests == [
+        {
+            "id": active_id,
+            "name": "Активный",
+            "status": "active",
+            "effective_role": "telegram_admin",
+        },
+        {
+            "id": completed_id,
+            "name": "Завершённый",
+            "status": "completed",
+            "effective_role": "telegram_admin",
+        },
+    ]
+    assert other_id not in {item["id"] for item in contests}
+    assert all(
+        set(item) == {"id", "name", "status", "effective_role"} for item in contests
+    )
+
+
+def test_management_contest_details_reject_other_chat_identifier(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    with create_connection(database_path) as connection:
+        other_chat_id = int(
+            connection.execute(
+                "INSERT INTO chats (telegram_chat_id, title) VALUES (?, ?)",
+                (-1009876543210, "Другой чат"),
+            ).lastrowid
+        )
+        contest_id = int(
+            connection.execute(
+                """
+                INSERT INTO contests (chat_id, name, slug, is_active)
+                VALUES (?, ?, ?, 1)
+                """,
+                (other_chat_id, "Чужой", "other"),
+            ).lastrowid
+        )
+    client = TestClient(create_app())
+
+    response = client.get(
+        f"/api/tma/management/contests/{contest_id}",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 404
+
+
+def test_management_contest_details_return_only_selected_contest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    response = client.get(
+        f"/api/tma/management/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"contest"}
+    assert response.json()["contest"]["id"] == contest["id"]
+
+
 def test_telegram_failure_keeps_bootstrap_data_and_does_not_enable_enforcement(
     monkeypatch,
     tmp_path: Path,
@@ -753,7 +903,7 @@ def test_telegram_failure_keeps_bootstrap_data_and_does_not_enable_enforcement(
     )
     app = create_application()
     app.dependency_overrides[get_telegram_administrators_client] = (
-        FakeTelegramAdministratorsClient
+        AdminTelegramAdministratorsClient
     )
     client = TestClient(app)
 
@@ -787,24 +937,21 @@ def test_telegram_failure_keeps_bootstrap_data_and_does_not_enable_enforcement(
         "can_manage_roles": False,
         "enforcement_enabled": True,
     }
+    assert response_data["can_access_management"] is False
     assert [item["slug"] for item in response_data["completed_contests"]] == [
         "completed-contest"
     ]
 
 
-def test_contest_management_is_allowed_without_enforcement_or_telegram_check(
+def test_contest_management_requires_verified_rights_even_without_feature_flag(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    class UnexpectedTelegramAdministratorsClient:
-        async def get_chat_administrators(self, chat_id: int) -> list[object]:
-            raise AssertionError(f"Unexpected Telegram request for chat {chat_id}")
-
     database_path = tmp_path / "predictor.db"
     initialize_database(database_path)
     configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
     client = TestClient(
-        create_app_with_telegram_client(UnexpectedTelegramAdministratorsClient())
+        create_app_with_telegram_client(FakeTelegramAdministratorsClient())
     )
 
     response = client.post(
@@ -813,28 +960,24 @@ def test_contest_management_is_allowed_without_enforcement_or_telegram_check(
         json={"name": "Разрешённый конкурс"},
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 403
     with create_connection(database_path) as connection:
-        actor_role = connection.execute(
-            "SELECT actor_role FROM audit_events WHERE event_type = 'contest_created'"
-        ).fetchone()["actor_role"]
-    assert actor_role == "participant"
+        assert connection.execute("SELECT COUNT(*) FROM contests").fetchone()[0] == 0
+        assert (
+            connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == 0
+        )
 
 
-def test_unenforced_local_supermoderator_is_recorded_in_audit(
+def test_local_supermoderator_is_recorded_in_audit_when_telegram_is_unavailable(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    class UnexpectedTelegramAdministratorsClient:
-        async def get_chat_administrators(self, chat_id: int) -> list[object]:
-            raise AssertionError(f"Unexpected Telegram request for chat {chat_id}")
-
     database_path = tmp_path / "predictor.db"
     initialize_database(database_path)
     configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
     assign_current_user_as_supermoderator(database_path)
     client = TestClient(
-        create_app_with_telegram_client(UnexpectedTelegramAdministratorsClient())
+        create_app_with_telegram_client(UnavailableTelegramAdministratorsClient())
     )
 
     response = client.post(
@@ -1056,7 +1199,9 @@ def test_supermoderator_assignment_from_another_chat_does_not_grant_access(
         ),
     )
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
-    client = TestClient(create_app())
+    client = TestClient(
+        create_app_with_telegram_client(FakeTelegramAdministratorsClient())
+    )
 
     response = client.post(
         "/api/tma/contests",
@@ -1077,7 +1222,9 @@ def test_participant_cannot_manage_contests_or_create_idempotency_record(
     initialize_database(database_path)
     configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
-    client = TestClient(create_app())
+    client = TestClient(
+        create_app_with_telegram_client(FakeTelegramAdministratorsClient())
+    )
 
     response = client.post(
         "/api/tma/contests",
@@ -1125,6 +1272,9 @@ def test_denied_match_creation_does_not_create_match_or_idempotency_record(
         idempotency_key="contest-before-enforcement",
     )
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
+    client.app.dependency_overrides[get_telegram_administrators_client] = (
+        FakeTelegramAdministratorsClient
+    )
 
     response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
@@ -1318,6 +1468,11 @@ def test_participants_and_supermoderators_cannot_use_role_management_routes(
 def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> None:
     expected_routes = {
         ("GET", "/api/tma/bootstrap"): "read",
+        ("GET", "/api/tma/management/contests"): "contest_management",
+        (
+            "GET",
+            "/api/tma/management/contests/{contest_id}",
+        ): "contest_management",
         ("GET", "/api/tma/access/supermoderators"): "role_management",
         ("GET", "/api/tma/audit-events"): "contest_management",
         ("POST", "/api/tma/access/users/resolve"): "role_management",
@@ -1519,6 +1674,9 @@ def test_denied_administrative_operations_do_not_mutate_multiple_domain_areas(
     assert match_response.status_code == 201
     match = match_response.json()["match"]
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
+    client.app.dependency_overrides[get_telegram_administrators_client] = (
+        FakeTelegramAdministratorsClient
+    )
 
     result_response = client.put(
         f"/api/tma/contests/{contest['id']}/matches/{match['id']}/result",
@@ -1751,7 +1909,7 @@ def test_create_contest_creates_world_cup_2026_contest(
     assert scoring_rule_sets_count == 1
     assert events_count == 1
     assert requests_count == 1
-    assert audit_actor_role == "participant"
+    assert audit_actor_role == "telegram_admin"
 
 
 def test_create_contest_reuses_result_for_same_idempotency_key(

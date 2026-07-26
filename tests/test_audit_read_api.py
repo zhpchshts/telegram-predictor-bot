@@ -196,7 +196,7 @@ def test_telegram_admin_reads_current_chat_audit_with_user_identity(
     assert event["metadata"] is None
 
 
-def test_supermoderator_reads_audit_and_unenforced_access_stays_compatible(
+def test_supermoderator_reads_audit_with_fresh_access_check(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -243,7 +243,7 @@ def test_supermoderator_reads_audit_and_unenforced_access_stays_compatible(
     )
 
     assert unenforced_response.status_code == 200
-    assert unenforced_client.calls == 0
+    assert unenforced_client.calls == 1
 
 
 def test_participant_cannot_read_audit_when_role_enforcement_is_enabled(

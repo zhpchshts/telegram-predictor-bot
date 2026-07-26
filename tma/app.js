@@ -1,6 +1,8 @@
 "use strict";
 
 let telegram = window.Telegram?.WebApp || null;
+let activeBootstrap = null;
+let currentViewMode = "participant";
 
 const TELEGRAM_INIT_DATA_QUERY_PARAM = "tgWebAppData";
 const IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
@@ -454,7 +456,8 @@ function createContestFormCard(bootstrap, state) {
 
     input.removeAttribute("aria-invalid");
 
-    renderContestScreen(bootstrap, {
+    renderContestCreationState(bootstrap, {
+      ...state,
       mode: "confirm",
       draftName: contestName,
       idempotencyKey: createIdempotencyKey(),
@@ -514,7 +517,8 @@ function createContestConfirmationCard(bootstrap, state) {
   card.append(heading, panel, actions);
 
   backButton.addEventListener("click", () => {
-    renderContestScreen(bootstrap, {
+    renderContestCreationState(bootstrap, {
+      ...state,
       mode: "form",
       draftName: state.draftName,
     });
@@ -554,6 +558,16 @@ function createContestConfirmationCard(bootstrap, state) {
         ],
       };
 
+      if (state.managementMode === true) {
+        void openManagement(nextBootstrap, {
+          mode: "form",
+          formMessage: result.was_created
+            ? `Конкурс «${result.contest.name}» создан.`
+            : `Конкурс «${result.contest.name}» уже был создан ранее.`,
+          formMessageType: "success",
+        });
+        return;
+      }
       renderContestScreen(nextBootstrap, {
         mode: "form",
         formMessage: result.was_created
@@ -562,11 +576,14 @@ function createContestConfirmationCard(bootstrap, state) {
         formMessageType: "success",
       });
     } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
       const errorMessage = error instanceof Error
         ? error.message
         : "Не удалось создать конкурс.";
 
-      renderContestScreen(bootstrap, {
+      renderContestCreationState(bootstrap, {
         ...state,
         mode: "confirm",
         confirmationMessage: errorMessage,
@@ -576,6 +593,14 @@ function createContestConfirmationCard(bootstrap, state) {
   });
 
   return card;
+}
+
+function renderContestCreationState(bootstrap, state) {
+  if (state.managementMode === true && state.managementData) {
+    renderManagementScreen(bootstrap, state.managementData, state);
+    return;
+  }
+  renderContestScreen(bootstrap, state);
 }
 
 function createContestDetailsCard(contest, onBack) {
@@ -651,18 +676,18 @@ function createContestCompletionCard(bootstrap, contest, state) {
       "danger-action-button",
     );
 
-	continueButton.addEventListener("click", () => {
-	  renderContestDetailsScreen(bootstrap, contest, {
-		...state,
-		activeTab: "matches",
-		completionMode: "confirm",
-		completionMessage: "",
-		completionMessageType: "",
-		deletionMode: "",
-		deletionMessage: "",
-		deletionMessageType: "",
-	  });
-	});
+    continueButton.addEventListener("click", () => {
+      renderContestDetailsRoute(bootstrap, contest, {
+        ...state,
+        activeTab: "matches",
+        completionMode: "confirm",
+        completionMessage: "",
+        completionMessageType: "",
+        deletionMode: "",
+        deletionMessage: "",
+        deletionMessageType: "",
+      });
+    });
 
     actions.append(continueButton);
     card.append(heading, description, message, actions);
@@ -698,7 +723,7 @@ function createContestCompletionCard(bootstrap, contest, state) {
   card.append(heading, panel, message, actions);
 
   cancelButton.addEventListener("click", () => {
-    renderContestDetailsScreen(bootstrap, contest, {
+    renderContestDetailsRoute(bootstrap, contest, {
       ...state,
       activeTab: "matches",
       completionMode: "",
@@ -746,17 +771,28 @@ function createContestCompletionCard(bootstrap, contest, state) {
         ],
       };
 
+      if (state.managementMode === true) {
+        activeBootstrap = nextBootstrap;
+        void openManagement(nextBootstrap, {
+          formMessage: `Конкурс «${result.contest.name}» завершён.`,
+          formMessageType: "success",
+        });
+        return;
+      }
       renderContestScreen(nextBootstrap, {
         mode: "form",
         formMessage: `Конкурс «${result.contest.name}» завершён.`,
         formMessageType: "success",
       });
     } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
       const errorMessage = error instanceof Error
         ? error.message
         : "Не удалось завершить конкурс.";
 
-      renderContestDetailsScreen(bootstrap, contest, {
+      renderContestDetailsRoute(bootstrap, contest, {
         ...state,
         activeTab: "matches",
         completionMode: "confirm",
@@ -803,18 +839,18 @@ function createContestDeletionCard(bootstrap, contest, state) {
       "danger-action-button",
     );
 
-	continueButton.addEventListener("click", () => {
-	  renderContestDetailsScreen(bootstrap, contest, {
-		...state,
-		activeTab: "matches",
-		completionMode: "",
-		completionMessage: "",
-		completionMessageType: "",
-		deletionMode: "confirm",
-		deletionMessage: "",
-		deletionMessageType: "",
-	  });
-	});
+    continueButton.addEventListener("click", () => {
+      renderContestDetailsRoute(bootstrap, contest, {
+        ...state,
+        activeTab: "matches",
+        completionMode: "",
+        completionMessage: "",
+        completionMessageType: "",
+        deletionMode: "confirm",
+        deletionMessage: "",
+        deletionMessageType: "",
+      });
+    });
 
     actions.append(continueButton);
     card.append(heading, description, message, actions);
@@ -850,7 +886,7 @@ function createContestDeletionCard(bootstrap, contest, state) {
   card.append(heading, panel, message, actions);
 
   cancelButton.addEventListener("click", () => {
-    renderContestDetailsScreen(bootstrap, contest, {
+    renderContestDetailsRoute(bootstrap, contest, {
       ...state,
       activeTab: "matches",
       deletionMode: "",
@@ -879,17 +915,28 @@ function createContestDeletionCard(bootstrap, contest, state) {
         ),
       };
 
+      if (state.managementMode === true) {
+        activeBootstrap = nextBootstrap;
+        void openManagement(nextBootstrap, {
+          formMessage: `Конкурс «${contest.name}» удалён.`,
+          formMessageType: "success",
+        });
+        return;
+      }
       renderContestScreen(nextBootstrap, {
         mode: "form",
         formMessage: `Конкурс «${contest.name}» удалён.`,
         formMessageType: "success",
       });
     } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
       const errorMessage = error instanceof Error
         ? error.message
         : "Не удалось удалить конкурс.";
 
-      renderContestDetailsScreen(bootstrap, contest, {
+      renderContestDetailsRoute(bootstrap, contest, {
         ...state,
         activeTab: "matches",
         deletionMode: "confirm",
@@ -1940,6 +1987,9 @@ function createMatchResultSection(
         type: "success",
       });
     } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
       const errorMessage =
         error instanceof Error
           ? error.message
@@ -2584,6 +2634,9 @@ function createChampionPredictionSettingsDisclosure(
 
       onUpdated();
     } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
       const errorMessage =
         error instanceof Error
           ? error.message
@@ -2875,6 +2928,9 @@ function createContestChampionSection(
 
       onUpdated();
     } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
       const errorMessage =
         error instanceof Error
           ? error.message
@@ -3064,6 +3120,9 @@ function createMatchPredictionPublicationSettingsDisclosure(
 
       onUpdated();
     } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
       const errorMessage =
         error instanceof Error
           ? error.message
@@ -3367,6 +3426,9 @@ function createMatchDeletionSection(
         matchesMessageType: "success",
       });
     } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
       const errorMessage = error instanceof Error
         ? error.message
         : "Не удалось удалить матч.";
@@ -3807,16 +3869,20 @@ function createMatchFormCard(bootstrap, contest, state) {
         }),
       };
 
-      renderContestDetailsScreen(bootstrap, updatedContest, {
+      renderContestDetailsRoute(bootstrap, updatedContest, {
+        ...state,
         activeTab: "matches",
         matchFormMessage: successMessage,
         matchFormMessageType: "success",
       });
     } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
       const errorMessage =
         error instanceof Error ? error.message : "Не удалось добавить матч.";
 
-      renderContestDetailsScreen(bootstrap, contest, {
+      renderContestDetailsRoute(bootstrap, contest, {
         ...state,
         matchDraft,
         matchIdempotencyKey: idempotencyKey,
@@ -3868,6 +3934,7 @@ function renderContestDetailsError(bootstrap, message) {
 }
 
 function renderContestDetailsScreen(bootstrap, contest, state = {}) {
+  currentViewMode = "participant";
   const { user, chat } = bootstrap.context;
   const chatTitle = chat.title || "этого чата";
   const userName = getUserDisplayName(user);
@@ -3877,7 +3944,6 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
     : [];
   const activeTab = getActiveContestTab(state.activeTab);
   const isActive = contest.is_active !== false;
-  const canManage = canManageContests(bootstrap);
   const cards = [
     createContestDetailsCard(contest, () => {
       renderContestScreen(bootstrap);
@@ -3904,68 +3970,20 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
         contest,
         matches,
         state,
-        canManage ? (resultState) => {
-          void openContest(bootstrap, contest.id, {
-            ...state,
-            activeTab: "matches",
-            resultMatchId: resultState.matchId,
-            resultMessage: resultState.message,
-            resultMessageType: resultState.type,
-          });
-        } : null,
-        canManage ? (deletionState) => {
-          void openContest(bootstrap, contest.id, {
-            ...state,
-            activeTab: "matches",
-            ...deletionState,
-          });
-        } : null,
+        null,
+        null,
         {
           title: "Матчи",
           emptyMessages: isActive
-            ? canManage
-              ? ["Матчей пока нет.", "Добавьте первый матч ниже."]
-              : ["Матчей пока нет."]
+            ? ["Матчей пока нет."]
             : ["Матчей нет."],
           showPredictions: false,
           showResults: true,
-          canManageResults: canManage,
-          leadingItems: isActive && canManage
-            ? [
-              createMatchPredictionPublicationAdministrationCard(
-                contest,
-                () => {
-                  void openContest(bootstrap, contest.id, {
-                    ...state,
-                    activeTab: "matches",
-                  });
-                },
-              ),
-              createChampionAdministrationCard(
-                contest,
-                state,
-                () => {
-                  void openContest(bootstrap, contest.id, {
-                    ...state,
-                    activeTab: "matches",
-                  });
-                },
-              ),
-            ]
-            : [],
+          canManageResults: false,
+          leadingItems: [],
         },
       ),
     );
-
-    if (isActive && canManage) {
-      cards.push(
-        createMatchFormCard(bootstrap, contest, state),
-        createContestCompletionCard(bootstrap, contest, state),
-        createContestDeletionCard(bootstrap, contest, state),
-      );
-    } else if (isActive && isContestManagementVerificationUnavailable(bootstrap)) {
-      cards.push(createContestManagementUnavailableCard());
-    }
   } else {
     cards.push(
       createContestRulesCard(contest.champion_prediction),
@@ -4004,22 +4022,169 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
   appContentElement.replaceChildren(...cards);
 }
 
+function renderContestDetailsRoute(bootstrap, contest, state = {}) {
+  if (state.managementMode === true) {
+    renderContestManagementScreen(bootstrap, contest, state);
+    return;
+  }
+  renderContestDetailsScreen(bootstrap, contest, state);
+}
+
+function createContestManagementHeader(contest, bootstrap) {
+  const card = createElement("section", {
+    className: "contest-overview management-overview",
+  });
+  const backButton = createActionButton(
+    "← К выбору конкурса",
+    "contest-back-link",
+  );
+  const participantButton = createActionButton(
+    "← Вернуться в конкурс",
+    "secondary-action-button",
+  );
+  const mode = createElement("p", {
+    className: "management-mode-label",
+    text: "Режим управления",
+  });
+  const heading = createElement("h2", { text: contest.name });
+
+  backButton.addEventListener("click", () => {
+    void openManagement(bootstrap);
+  });
+  participantButton.addEventListener("click", () => {
+    void openContest(bootstrap, contest.id);
+  });
+  card.append(backButton, mode, heading, participantButton);
+  return card;
+}
+
+function renderContestManagementScreen(bootstrap, contest, state = {}) {
+  currentViewMode = "management";
+  const matches = Array.isArray(contest.matches) ? contest.matches : [];
+  const isActive = contest.is_active !== false;
+  const managementState = {
+    ...state,
+    managementMode: true,
+  };
+  const cards = [
+    createContestManagementHeader(contest, bootstrap),
+    createMatchesCard(
+      contest,
+      matches,
+      managementState,
+      (resultState) => {
+        void openContest(bootstrap, contest.id, {
+          ...managementState,
+          resultMatchId: resultState.matchId,
+          resultMessage: resultState.message,
+          resultMessageType: resultState.type,
+        });
+      },
+      (deletionState) => {
+        void openContest(bootstrap, contest.id, {
+          ...managementState,
+          ...deletionState,
+        });
+      },
+      {
+        title: "Управление матчами",
+        emptyMessages: isActive
+          ? ["Матчей пока нет.", "Добавьте первый матч ниже."]
+          : ["Матчей нет."],
+        showPredictions: false,
+        showResults: true,
+        canManageResults: isActive,
+        leadingItems: isActive
+          ? [
+            createMatchPredictionPublicationAdministrationCard(
+              contest,
+              () => {
+                void openContest(bootstrap, contest.id, managementState);
+              },
+            ),
+            createChampionAdministrationCard(
+              contest,
+              managementState,
+              () => {
+                void openContest(bootstrap, contest.id, managementState);
+              },
+            ),
+          ]
+          : [],
+      },
+    ),
+  ];
+
+  if (isActive) {
+    cards.push(
+      createMatchFormCard(bootstrap, contest, managementState),
+      createContestCompletionCard(bootstrap, contest, managementState),
+      createContestDeletionCard(bootstrap, contest, managementState),
+    );
+  }
+
+  appContentElement.replaceChildren(...cards);
+}
+
+function renderContestManagementError(bootstrap, message) {
+  currentViewMode = "management";
+  const card = createInfoCard(
+    "Не удалось открыть управление конкурсом",
+    [message],
+    "management-error-card",
+  );
+  const actions = createElement("div", { className: "form-actions" });
+  const backButton = createActionButton(
+    "К выбору конкурса",
+    "secondary-action-button",
+  );
+  backButton.addEventListener("click", () => {
+    void openManagement(bootstrap);
+  });
+  actions.append(backButton);
+  card.append(actions);
+  appContentElement.replaceChildren(
+    createManagementHeaderCard(bootstrap),
+    card,
+  );
+}
+
 async function openContest(bootstrap, contestId, state = {}) {
   renderContestDetailsLoading(bootstrap);
 
   try {
-    const result = await apiRequest(`/api/tma/contests/${contestId}`);
+    const path = state.managementMode === true
+      ? `/api/tma/management/contests/${contestId}`
+      : `/api/tma/contests/${contestId}`;
+    const result = await apiRequest(path);
 
     if (!result || !result.contest) {
       throw new Error("Сервер вернул некорректный ответ при открытии конкурса.");
     }
 
-    renderContestDetailsScreen(bootstrap, result.contest, state);
+    if (state.managementMode === true) {
+      renderContestManagementScreen(bootstrap, result.contest, state);
+    } else {
+      renderContestDetailsScreen(bootstrap, result.contest, state);
+    }
   } catch (error) {
+    if (
+      state.managementMode === true
+      && handleManagementRequestError(
+        error,
+        "Доступ к управлению этим конкурсом отсутствует.",
+      )
+    ) {
+      return;
+    }
     const errorMessage =
       error instanceof Error ? error.message : "Не удалось открыть конкурс.";
 
-    renderContestDetailsError(bootstrap, errorMessage);
+    if (state.managementMode === true) {
+      renderContestManagementError(bootstrap, errorMessage);
+    } else {
+      renderContestDetailsError(bootstrap, errorMessage);
+    }
   }
 }
 
@@ -4743,7 +4908,7 @@ function createAuditHeaderCard(bootstrap) {
     "secondary-action-button",
   );
   backButton.addEventListener("click", () => {
-    renderContestScreen(bootstrap);
+    void openManagement(bootstrap);
   });
   card.append(heading, description, backButton);
   return card;
@@ -4794,6 +4959,7 @@ async function loadAuditEvents(bootstrap, state, append) {
   }
   renderAuditScreen(bootstrap, state);
 
+  let managementRequestFailed = false;
   try {
     const result = await apiRequest(buildAuditRequestPath(state, append));
     const incomingEvents = Array.isArray(result.events) ? result.events : [];
@@ -4818,11 +4984,17 @@ async function loadAuditEvents(bootstrap, state, append) {
     };
     state.initialized = true;
   } catch (error) {
+    if (handleManagementRequestError(error)) {
+      managementRequestFailed = true;
+      return;
+    }
     state.error = getAuditErrorMessage(error);
     state.initialized = true;
   } finally {
     state.loading = false;
-    renderAuditScreen(bootstrap, state);
+    if (!managementRequestFailed) {
+      renderAuditScreen(bootstrap, state);
+    }
   }
 }
 
@@ -4951,6 +5123,9 @@ function createSupermoderatorManagementCard() {
         loadAssignments,
       );
     } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
       setFormMessage(
         listStatus,
         getRoleManagementErrorMessage(error),
@@ -5016,6 +5191,11 @@ function createSupermoderatorManagementCard() {
             );
             preview.replaceChildren();
             await loadAssignments();
+          } catch (error) {
+            if (handleManagementRequestError(error)) {
+              return;
+            }
+            throw error;
           } finally {
             activeOperation = null;
             input.disabled = false;
@@ -5025,6 +5205,9 @@ function createSupermoderatorManagementCard() {
         },
       );
     } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
       setFormMessage(
         formMessage,
         getRoleManagementErrorMessage(error),
@@ -5097,6 +5280,9 @@ function renderSupermoderatorAssignments(container, assignments, reload) {
         );
         await reload();
       } catch (error) {
+        if (handleManagementRequestError(error)) {
+          return;
+        }
         setFormMessage(message, getRoleManagementErrorMessage(error), "error");
         revokeButton.disabled = false;
         revokeButton.textContent = "Отозвать";
@@ -5158,10 +5344,7 @@ function createRoleManagementUnavailableCard() {
 }
 
 function canManageContests(bootstrap) {
-  return (
-    bootstrap.access?.enforcement_enabled !== true
-    || bootstrap.access?.can_manage_contests === true
-  );
+  return bootstrap.can_access_management === true;
 }
 
 function isContestManagementVerificationUnavailable(bootstrap) {
@@ -5237,7 +5420,180 @@ function getRoleManagementErrorMessage(error) {
   return error instanceof Error ? error.message : "Не удалось выполнить операцию.";
 }
 
+function createManagementNavigationCard(bootstrap) {
+  const card = createElement("section", {
+    className: "info-card management-navigation-card",
+  });
+  const heading = createElement("h2", { text: "Управление" });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: "Матчи, результаты, настройки конкурса и доступы вынесены в отдельный раздел.",
+  });
+  const button = createActionButton(
+    "Открыть управление",
+    "secondary-action-button",
+  );
+  button.addEventListener("click", () => {
+    void openManagement(bootstrap);
+  });
+  card.append(heading, description, button);
+  return card;
+}
+
+function createManagementContestListCard(contests, bootstrap) {
+  const card = createElement("section", {
+    className: "info-card management-contest-list-card",
+  });
+  const heading = createElement("h2", { text: "Выберите конкурс" });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: "Показаны только конкурсы текущего Telegram-чата, доступные для управления.",
+  });
+  const list = createElement("ul", { className: "contest-list" });
+  card.append(heading, description);
+
+  if (contests.length === 0) {
+    card.append(
+      createElement("p", {
+        className: "subtitle management-empty-state",
+        text: "В этом чате пока нет конкурсов, доступных для управления.",
+      }),
+    );
+    return card;
+  }
+
+  for (const contest of contests) {
+    const item = createElement("li", { className: "contest-list-item" });
+    const button = createActionButton(
+      contest.name,
+      "secondary-action-button contest-list-button management-contest-button",
+    );
+    const statusLabel = contest.status === "completed" ? "Завершён" : "Активен";
+    const roleLabel = AUDIT_ROLE_LABELS[contest.effective_role]
+      || contest.effective_role;
+    const meta = createElement("span", {
+      className: "management-contest-meta",
+      text: `${statusLabel} · ${roleLabel}`,
+    });
+    button.append(meta);
+    button.addEventListener("click", () => {
+      void openContest(bootstrap, contest.id, { managementMode: true });
+    });
+    item.append(button);
+    list.append(item);
+  }
+  card.append(list);
+  return card;
+}
+
+function createManagementHeaderCard(bootstrap) {
+  const card = createElement("section", {
+    className: "contest-overview management-overview",
+  });
+  const backButton = createActionButton(
+    "← Вернуться к конкурсам",
+    "contest-back-link",
+  );
+  const mode = createElement("p", {
+    className: "management-mode-label",
+    text: "Режим управления",
+  });
+  const heading = createElement("h2", { text: "Управление" });
+  backButton.addEventListener("click", () => {
+    renderContestScreen(bootstrap);
+  });
+  card.append(backButton, mode, heading);
+  return card;
+}
+
+function renderManagementScreen(bootstrap, managementData, state = {}) {
+  currentViewMode = "management";
+  const contests = Array.isArray(managementData.contests)
+    ? managementData.contests
+    : [];
+  const capabilities = managementData.capabilities || {};
+  const cards = [
+    createManagementHeaderCard(bootstrap),
+    createManagementContestListCard(contests, bootstrap),
+  ];
+  const managementState = {
+    ...state,
+    managementMode: true,
+    managementData,
+  };
+
+  if (state.accessMessage) {
+    cards.splice(
+      1,
+      0,
+      createInfoCard("Доступ изменился", [state.accessMessage]),
+    );
+  }
+  if (capabilities.can_create_contests === true) {
+    cards.push(
+      state.mode === "confirm"
+        ? createContestConfirmationCard(bootstrap, managementState)
+        : createContestFormCard(bootstrap, managementState),
+    );
+  }
+  if (capabilities.can_read_audit === true) {
+    cards.push(createAuditNavigationCard(bootstrap));
+  }
+  if (capabilities.can_manage_roles === true) {
+    cards.push(createSupermoderatorManagementCard());
+  }
+  appContentElement.replaceChildren(...cards);
+}
+
+function handleManagementRequestError(
+  error,
+  message = "Права изменились. Недоступный экран управления закрыт.",
+) {
+  if (error?.status !== 403 || !activeBootstrap) {
+    return false;
+  }
+  void openManagement(activeBootstrap, {
+    accessMessage: message,
+  });
+  return true;
+}
+
+async function openManagement(bootstrap, state = {}) {
+  activeBootstrap = bootstrap;
+  currentViewMode = "management";
+  appContentElement.replaceChildren(
+    createStatusCard(
+      "Открываем управление",
+      "Проверяем права и загружаем конкурсы текущего чата…",
+    ),
+  );
+  try {
+    const result = await apiRequest("/api/tma/management/contests");
+    renderManagementScreen(bootstrap, result || {}, state);
+  } catch (error) {
+    if (error?.status === 403) {
+      const nextBootstrap = {
+        ...bootstrap,
+        can_access_management: false,
+      };
+      activeBootstrap = nextBootstrap;
+      renderContestScreen(nextBootstrap, {
+        managementMessage: "Доступ к разделу «Управление» отсутствует.",
+      });
+      return;
+    }
+    const message = error instanceof Error
+      ? error.message
+      : "Не удалось открыть управление.";
+    appContentElement.replaceChildren(
+      createManagementHeaderCard(bootstrap),
+      createInfoCard("Не удалось открыть управление", [message]),
+    );
+  }
+}
+
 function renderContestScreen(bootstrap, state = {}) {
+  currentViewMode = "participant";
   const { user, chat } = bootstrap.context;
   const chatTitle = chat.title || "этого чата";
   const userName = getUserDisplayName(user);
@@ -5257,30 +5613,18 @@ function renderContestScreen(bootstrap, state = {}) {
       void openContest(bootstrap, contestId);
     },
   );
-  let creationCard;
-  if (canManageContests(bootstrap)) {
-    creationCard = state.mode === "confirm"
-      ? createContestConfirmationCard(bootstrap, state)
-      : createContestFormCard(bootstrap, state);
-  } else if (isContestManagementVerificationUnavailable(bootstrap)) {
-    creationCard = createContestManagementUnavailableCard();
-  } else {
-    creationCard = createContestManagementRestrictedCard();
+  const cards = [contestCard];
+  if (state.managementMessage) {
+    cards.push(createInfoCard("Управление недоступно", [state.managementMessage]));
   }
-
-  const cards = [contestCard, creationCard];
   if (canManageContests(bootstrap)) {
-    cards.push(createAuditNavigationCard(bootstrap));
-  }
-  if (bootstrap.access?.can_manage_roles === true) {
-    cards.push(createSupermoderatorManagementCard());
-  } else if (bootstrap.access?.verification_status === "unavailable") {
-    cards.push(createRoleManagementUnavailableCard());
+    cards.push(createManagementNavigationCard(bootstrap));
   }
   appContentElement.replaceChildren(...cards);
 }
 
 function renderBootstrap(bootstrap) {
+  activeBootstrap = bootstrap;
   renderContestScreen(bootstrap);
 }
 
@@ -5318,6 +5662,7 @@ async function apiRequest(path, options = {}) {
       ? detail.message
       : detail;
     const error = new Error(message || `HTTP ${response.status}`);
+    error.status = response.status;
     if (detail && typeof detail === "object") {
       error.code = detail.code || "";
     }

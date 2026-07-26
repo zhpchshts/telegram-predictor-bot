@@ -295,6 +295,45 @@ summary:focus-visible {
   text-align: left;
 }
 
+.management-navigation-card,
+.management-contest-list-card,
+.management-overview {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+}
+
+.management-navigation-card {
+  display: grid;
+  gap: 12px;
+}
+
+.management-mode-label {
+  width: fit-content;
+  margin: 0;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.management-contest-button {
+  display: grid;
+  gap: 5px;
+}
+
+.management-contest-meta {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.management-empty-state {
+  margin-top: 14px;
+}
+
 .contest-lists {
   display: grid;
   gap: 14px;

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
 from fastapi import FastAPI
@@ -25,7 +26,7 @@ PAST_DEADLINE = "2020-01-01T12:00:00Z"
 class FakeTelegramAdministratorsClient:
     async def get_chat_administrators(self, chat_id: int) -> list[object]:
         assert chat_id == TELEGRAM_CHAT_ID
-        return []
+        return [SimpleNamespace(user=SimpleNamespace(id=123))]
 
 
 def create_app() -> FastAPI:
