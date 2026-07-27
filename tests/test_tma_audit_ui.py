@@ -26,6 +26,7 @@ def test_audit_ui_has_central_russian_labels_for_every_event_type() -> None:
         AuditEventType.CONTEST_FINISHED: "Конкурс завершён",
         AuditEventType.CONTEST_DELETED: "Удалён конкурс",
         AuditEventType.MATCH_CREATED: "Создан матч",
+        AuditEventType.MATCH_UPDATED: "Изменено время матча",
         AuditEventType.MATCH_DELETED: "Удалён матч",
         AuditEventType.MATCH_RESULT_SET: "Внесён результат матча",
         AuditEventType.MATCH_RESULT_CHANGED: "Изменён результат матча",

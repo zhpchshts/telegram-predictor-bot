@@ -601,6 +601,7 @@ summary:focus-visible {
 
 .match-prediction-section,
 .match-result-section,
+.match-start-editing-section,
 .match-deletion-section {
   display: grid;
   gap: 10px;
@@ -609,7 +610,8 @@ summary:focus-visible {
   border-top: 1px solid var(--border);
 }
 
-.match-deletion-section .form-actions {
+.match-deletion-section .form-actions,
+.match-start-editing-section .form-actions {
   margin-top: 0;
 }
 

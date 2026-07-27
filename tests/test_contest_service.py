@@ -18,6 +18,7 @@ from app.contest_service import (
     MatchCreationConflictError,
     MatchNotFoundError,
     MatchResultUnavailableError,
+    MatchUpdateUnavailableError,
     PredictionUnavailableError,
     create_match,
     delete_match,
@@ -27,6 +28,7 @@ from app.contest_service import (
     get_contest_details,
     save_match_prediction,
     save_match_result,
+    update_match_start,
     save_match_prediction_publication_settings,
     ContestCompletedError,
     ContestCompletionUnavailableError,
@@ -106,6 +108,29 @@ def delete_test_match(
         last_name="Sabir",
         username="evsab",
         audit_actor=AUDIT_ACTOR,
+    )
+
+
+def update_test_match_start(
+    *,
+    database_path: Path,
+    contest_id: int,
+    match_id: int,
+    starts_at_utc: str,
+    now_utc: datetime,
+):
+    return update_match_start(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest_id,
+        match_id=match_id,
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        starts_at_utc=starts_at_utc,
+        audit_actor=AUDIT_ACTOR,
+        now_utc=now_utc,
     )
 
 
@@ -2295,6 +2320,189 @@ def test_delete_match_removes_linked_data_and_writes_event(
     assert deleted_payload["starts_at_utc"] == match.starts_at_utc
     assert deleted_payload["status"] == "finished"
     assert deleted_payload["tie_id"] == match.tie_id
+
+
+def test_update_match_start_changes_future_match_and_writes_events(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        starts_at_utc="2030-06-11T18:00:00Z",
+    ).match
+
+    updated_match = update_test_match_start(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        starts_at_utc="2030-06-12T20:30:45+02:00",
+        now_utc=datetime(2030, 6, 10, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert updated_match.starts_at_utc == "2030-06-12T18:30:45Z"
+    with create_connection(database_path) as connection:
+        legacy_event = connection.execute(
+            """
+            SELECT payload_json
+            FROM event_log
+            WHERE event_type = 'match.updated'
+            """
+        ).fetchone()
+        audit_event = connection.execute(
+            """
+            SELECT before_state, after_state
+            FROM audit_events
+            WHERE event_type = 'match_updated'
+            """
+        ).fetchone()
+
+    assert legacy_event is not None
+    assert json.loads(legacy_event["payload_json"]) == {
+        "before": {"starts_at_utc": "2030-06-11T18:00:00Z"},
+        "after": {"starts_at_utc": "2030-06-12T18:30:45Z"},
+    }
+    assert audit_event is not None
+    assert json.loads(audit_event["before_state"])["starts_at_utc"] == (
+        "2030-06-11T18:00:00Z"
+    )
+    assert json.loads(audit_event["after_state"])["starts_at_utc"] == (
+        "2030-06-12T18:30:45Z"
+    )
+
+
+def test_update_match_start_with_same_value_does_not_write_events(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        starts_at_utc="2030-06-11T18:00:00Z",
+    ).match
+
+    unchanged_match = update_test_match_start(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        starts_at_utc="2030-06-11T21:00:00+03:00",
+        now_utc=datetime(2030, 6, 10, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert unchanged_match == match
+    with create_connection(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM event_log WHERE event_type = 'match.updated'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE event_type = 'match_updated'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_update_match_start_resolves_current_time_after_acquiring_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        starts_at_utc="2030-06-11T18:00:00Z",
+    ).match
+    worker_started = Event()
+    time_was_resolved = Event()
+    original_resolve_now_utc = contest_service._resolve_now_utc
+
+    def tracked_resolve_now_utc(value: datetime | None) -> datetime:
+        time_was_resolved.set()
+        return original_resolve_now_utc(value)
+
+    monkeypatch.setattr(
+        contest_service,
+        "_resolve_now_utc",
+        tracked_resolve_now_utc,
+    )
+
+    def update_while_locked():
+        worker_started.set()
+        return update_test_match_start(
+            database_path=database_path,
+            contest_id=contest.id,
+            match_id=match.id,
+            starts_at_utc="2030-06-12T18:00:00Z",
+            now_utc=datetime(2030, 6, 10, 12, 0, tzinfo=timezone.utc),
+        )
+
+    with create_connection(database_path) as lock_connection:
+        lock_connection.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            update_future = executor.submit(update_while_locked)
+            assert worker_started.wait(timeout=5)
+            assert not time_was_resolved.wait(timeout=0.2)
+            lock_connection.execute("COMMIT")
+            updated_match = update_future.result(timeout=5)
+
+    assert time_was_resolved.is_set()
+    assert updated_match.starts_at_utc == "2030-06-12T18:00:00Z"
+
+
+@pytest.mark.parametrize(
+    ("now_utc", "new_starts_at_utc", "message"),
+    [
+        (
+            datetime(2030, 6, 11, 18, 0, tzinfo=timezone.utc),
+            "2030-06-12T18:00:00Z",
+            "уже начавшегося матча",
+        ),
+        (
+            datetime(2030, 6, 10, 12, 0, tzinfo=timezone.utc),
+            "2030-06-10T11:59:00Z",
+            "должно быть в будущем",
+        ),
+    ],
+)
+def test_update_match_start_rejects_closed_match_or_past_new_time(
+    tmp_path: Path,
+    now_utc: datetime,
+    new_starts_at_utc: str,
+    message: str,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        starts_at_utc="2030-06-11T18:00:00Z",
+    ).match
+
+    with pytest.raises(MatchUpdateUnavailableError, match=message):
+        update_test_match_start(
+            database_path=database_path,
+            contest_id=contest.id,
+            match_id=match.id,
+            starts_at_utc=new_starts_at_utc,
+            now_utc=now_utc,
+        )
+
+    with create_connection(database_path) as connection:
+        stored_start = connection.execute(
+            "SELECT starts_at_utc FROM matches WHERE id = ?",
+            (match.id,),
+        ).fetchone()["starts_at_utc"]
+    assert stored_start == "2030-06-11T18:00:00Z"
 
 
 def test_delete_match_rejects_unknown_match(

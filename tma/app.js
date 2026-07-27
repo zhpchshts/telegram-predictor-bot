@@ -33,6 +33,10 @@ const AUDIT_EVENT_PRESENTATIONS = Object.freeze({
     label: "Создан матч",
     group: "Матчи",
   }),
+  match_updated: Object.freeze({
+    label: "Изменено время матча",
+    group: "Матчи",
+  }),
   match_deleted: Object.freeze({
     label: "Удалён матч",
     group: "Матчи",
@@ -2368,6 +2372,7 @@ function getMatchPredictionPublication(contest) {
 }
 
 function formatDateTimeLocalValue(utcValue) {
+  // datetime-local expects the device's local wall-clock value, not UTC.
   if (typeof utcValue !== "string") {
     return "";
   }
@@ -3444,6 +3449,133 @@ function createMatchDeletionSection(
   return section;
 }
 
+function createMatchStartEditingSection(
+  contest,
+  match,
+  state,
+  onMatchEditingStateChange,
+) {
+  const section = createElement("section", {
+    className: "match-start-editing-section",
+  });
+  const disclosure = document.createElement("details");
+  const summary = document.createElement("summary");
+  const form = createElement("form", {
+    className: "form-fields",
+  });
+  const field = createElement("label", {
+    className: "form-field",
+  });
+  const label = createElement("span", {
+    className: "form-field-label",
+    text: "Новая дата и время начала",
+  });
+  const input = createElement("input", {
+    className: "text-input",
+  });
+  const hint = createElement("p", {
+    className: "form-hint",
+    text: "Время указывается в вашем часовом поясе.",
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const submitButton = createActionButton(
+    "Сохранить время",
+    "primary-action-button",
+    "submit",
+  );
+  const isCurrentMatch = state.matchStartEditId === match.id;
+
+  disclosure.className = "match-form-disclosure";
+  disclosure.open = isCurrentMatch;
+  summary.textContent = "Изменить дату и время";
+  input.type = "datetime-local";
+  input.step = "60";
+  input.required = true;
+  input.value = isCurrentMatch && state.matchStartEditValue
+    ? state.matchStartEditValue
+    : formatDateTimeLocalValue(match.starts_at_utc);
+
+  setFormMessage(
+    message,
+    isCurrentMatch ? state.matchStartEditMessage || "" : "",
+    isCurrentMatch ? state.matchStartEditMessageType || "" : "",
+  );
+  field.append(label, input);
+  actions.append(submitButton);
+  form.append(field, hint, message, actions);
+  disclosure.append(summary, form);
+  section.append(disclosure);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const startsAtLocal = input.value;
+    const startsAt = new Date(startsAtLocal);
+
+    if (
+      !startsAtLocal
+      || Number.isNaN(startsAt.getTime())
+      || startsAt.getTime() <= Date.now()
+    ) {
+      input.setAttribute("aria-invalid", "true");
+      setFormMessage(
+        message,
+        "Новое время начала матча должно быть в будущем.",
+        "error",
+      );
+      input.focus();
+      return;
+    }
+
+    input.removeAttribute("aria-invalid");
+    submitButton.disabled = true;
+    submitButton.textContent = "Сохраняем…";
+
+    try {
+      await apiRequest(
+        `/api/tma/contests/${contest.id}/matches/${match.id}`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            starts_at_utc: startsAt.toISOString(),
+          }),
+        },
+      );
+      onMatchEditingStateChange({
+        matchStartEditId: null,
+        matchStartEditValue: "",
+        matchStartEditMessage: "",
+        matchStartEditMessageType: "",
+        matchesMessage: (
+          `Время матча «${match.home_team_name} — ${match.away_team_name}» изменено.`
+        ),
+        matchesMessageType: "success",
+      });
+    } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
+      onMatchEditingStateChange({
+        matchStartEditId: match.id,
+        matchStartEditValue: startsAtLocal,
+        matchStartEditMessage: error instanceof Error
+          ? error.message
+          : "Не удалось изменить время начала матча.",
+        matchStartEditMessageType: "error",
+      });
+    }
+  });
+
+  return section;
+}
+
 function createMatchListItem(
   contest,
   match,
@@ -3477,6 +3609,22 @@ function createMatchListItem(
 
   header.append(teams, status);
   meta.append(startsAt);
+
+  if (
+    showResults
+    && contest.is_active !== false
+    && onMatchDeletionStateChange
+    && isMatchPredictionOpen(match)
+  ) {
+    sections.push(
+      createMatchStartEditingSection(
+        contest,
+        match,
+        state,
+        onMatchDeletionStateChange,
+      ),
+    );
+  }
 
   if (showPredictions) {
     sections.push(createMatchPredictionSection(contest, match));
@@ -4424,6 +4572,12 @@ function buildAuditSummaryLines(event) {
       return [`Удалён конкурс «${entityName}».`];
     case "match_created":
       return [`Создан матч «${entityName}».`];
+    case "match_updated":
+      return [
+        "Время начала: "
+        + `${formatMatchStartsAt(before.starts_at_utc)} → `
+        + `${formatMatchStartsAt(after.starts_at_utc)}.`,
+      ];
     case "match_deleted":
       return [`Удалён матч «${entityName}».`];
     case "match_result_set":

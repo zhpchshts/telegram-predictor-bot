@@ -1489,6 +1489,10 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
             "DELETE",
             "/api/tma/contests/{contest_id}/matches/{match_id}",
         ): "contest_management",
+        (
+            "PUT",
+            "/api/tma/contests/{contest_id}/matches/{match_id}",
+        ): "contest_management",
         ("GET", "/api/tma/contests/{contest_id}"): "read",
         (
             "POST",
@@ -3252,6 +3256,173 @@ def test_delete_match_returns_no_content_and_removes_match(
 
     assert contest_response.status_code == 200
     assert contest_response.json()["contest"]["matches"] == []
+
+
+def test_update_match_start_returns_updated_match(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(
+        client,
+        idempotency_key="contest-for-match-start-update",
+    )
+    create_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="match-for-start-update"),
+        json={
+            "home_team_name": "Аргентина",
+            "away_team_name": "Франция",
+            "starts_at_utc": "2030-07-19T18:00:00Z",
+        },
+    )
+    match = create_response.json()["match"]
+
+    response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match['id']}",
+        headers=build_tma_headers(),
+        json={"starts_at_utc": "2030-07-20T21:30:00+03:00"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["match"]["starts_at_utc"] == "2030-07-20T18:30:00Z"
+
+
+def test_update_match_start_rejects_past_new_time(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(
+        client,
+        idempotency_key="contest-for-invalid-match-start-update",
+    )
+    create_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="match-for-invalid-start-update"),
+        json={
+            "home_team_name": "Испания",
+            "away_team_name": "Англия",
+            "starts_at_utc": "2030-07-19T18:00:00Z",
+        },
+    )
+    match = create_response.json()["match"]
+
+    response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match['id']}",
+        headers=build_tma_headers(),
+        json={"starts_at_utc": "2020-07-20T18:30:00Z"},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Новое время начала матча должно быть в будущем.",
+    }
+
+
+def test_update_match_start_hides_match_from_another_contest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    source_contest = create_tma_contest(
+        client,
+        idempotency_key="source-contest-for-match-update",
+    )
+    other_contest = create_tma_contest(
+        client,
+        idempotency_key="other-contest-for-match-update",
+        name="Другой конкурс",
+    )
+    create_response = client.post(
+        f"/api/tma/contests/{source_contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="isolated-match-for-update"),
+        json={
+            "home_team_name": "Германия",
+            "away_team_name": "Италия",
+            "starts_at_utc": "2030-07-19T18:00:00Z",
+        },
+    )
+    match = create_response.json()["match"]
+
+    response = client.put(
+        f"/api/tma/contests/{other_contest['id']}/matches/{match['id']}",
+        headers=build_tma_headers(),
+        json={"starts_at_utc": "2030-07-20T18:00:00Z"},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Матч не найден."}
+    with create_connection(database_path) as connection:
+        stored_start = connection.execute(
+            "SELECT starts_at_utc FROM matches WHERE id = ?",
+            (match["id"],),
+        ).fetchone()["starts_at_utc"]
+    assert stored_start == "2030-07-19T18:00:00Z"
+
+
+def test_participant_cannot_update_match_start(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(
+        client,
+        idempotency_key="contest-before-match-update-enforcement",
+    )
+    create_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="match-before-update-enforcement"),
+        json={
+            "home_team_name": "Нидерланды",
+            "away_team_name": "Португалия",
+            "starts_at_utc": "2030-07-19T18:00:00Z",
+        },
+    )
+    match = create_response.json()["match"]
+    monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
+    client.app.dependency_overrides[get_telegram_administrators_client] = (
+        FakeTelegramAdministratorsClient
+    )
+
+    response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match['id']}",
+        headers=build_tma_headers(),
+        json={"starts_at_utc": "2030-07-20T18:00:00Z"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "contest_management_forbidden"
+    with create_connection(database_path) as connection:
+        stored_start = connection.execute(
+            "SELECT starts_at_utc FROM matches WHERE id = ?",
+            (match["id"],),
+        ).fetchone()["starts_at_utc"]
+    assert stored_start == "2030-07-19T18:00:00Z"
 
 
 def test_delete_match_rejects_unknown_match(

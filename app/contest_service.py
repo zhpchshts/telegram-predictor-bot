@@ -65,6 +65,10 @@ class MatchNotFoundError(ValueError):
     """Raised when a match is unavailable in the current contest."""
 
 
+class MatchUpdateUnavailableError(ValueError):
+    """Raised when a match start time can no longer be changed."""
+
+
 class PredictionUnavailableError(ValueError):
     """Raised when a prediction can no longer be changed."""
 
@@ -1340,6 +1344,122 @@ def delete_match(
             before_state=_match_snapshot(match_row),
             after_state=None,
         )
+
+
+def update_match_start(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    match_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    starts_at_utc: str,
+    audit_actor: AuditActor,
+    now_utc: datetime | None = None,
+) -> MatchSummary:
+    normalized_starts_at_utc = _normalize_starts_at_utc(starts_at_utc)
+    new_starts_at_utc = datetime.fromisoformat(
+        normalized_starts_at_utc.replace("Z", "+00:00")
+    )
+
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        resolved_now_utc = _resolve_now_utc(now_utc)
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        match_row = _get_match_row(
+            connection,
+            contest_id=contest_id,
+            match_id=match_id,
+        )
+        if match_row is None:
+            raise MatchNotFoundError("Матч не найден.")
+        if not _is_prediction_open(match_row, now_utc=resolved_now_utc):
+            raise MatchUpdateUnavailableError(
+                "Дата и время начала уже начавшегося матча недоступны для изменения."
+            )
+        if new_starts_at_utc <= resolved_now_utc:
+            raise MatchUpdateUnavailableError(
+                "Новое время начала матча должно быть в будущем."
+            )
+        if normalized_starts_at_utc == str(match_row["starts_at_utc"]):
+            return _match_summary_from_row(match_row)
+
+        before_state = _match_snapshot(match_row)
+        actor_user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+        update = connection.execute(
+            """
+            UPDATE matches
+            SET starts_at_utc = ?
+            WHERE id = ?
+              AND status = 'scheduled'
+            """,
+            (normalized_starts_at_utc, match_id),
+        )
+        if update.rowcount != 1:
+            raise MatchUpdateUnavailableError(
+                "Дата и время начала уже начавшегося матча недоступны для изменения."
+            )
+
+        updated_match_row = _get_match_row(
+            connection,
+            contest_id=contest_id,
+            match_id=match_id,
+        )
+        if updated_match_row is None:
+            raise RuntimeError("Не удалось повторно прочитать изменённый матч.")
+
+        event_payload = json.dumps(
+            {
+                "before": {"starts_at_utc": str(match_row["starts_at_utc"])},
+                "after": {"starts_at_utc": normalized_starts_at_utc},
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        event = connection.execute(
+            """
+            INSERT INTO event_log (
+                contest_id,
+                actor_user_id,
+                event_type,
+                entity_type,
+                entity_id,
+                payload_json
+            )
+            VALUES (?, ?, 'match.updated', 'match', ?, ?)
+            """,
+            (contest_id, actor_user_id, match_id, event_payload),
+        )
+        if event.lastrowid is None:
+            raise RuntimeError("Не удалось записать событие изменения матча.")
+
+        _record_audit(
+            connection,
+            audit_actor=audit_actor,
+            telegram_chat_id=telegram_chat_id,
+            event_type=AuditEventType.MATCH_UPDATED,
+            entity_type=AuditEntityType.MATCH,
+            entity_id=match_id,
+            contest_id=contest_id,
+            before_state=before_state,
+            after_state=_match_snapshot(updated_match_row),
+        )
+
+    return _match_summary_from_row(updated_match_row)
 
 
 def save_match_prediction(

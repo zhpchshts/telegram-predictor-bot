@@ -14,6 +14,7 @@ class AuditEventType(StrEnum):
     CONTEST_FINISHED = "contest_finished"
     CONTEST_DELETED = "contest_deleted"
     MATCH_CREATED = "match_created"
+    MATCH_UPDATED = "match_updated"
     MATCH_DELETED = "match_deleted"
     MATCH_RESULT_SET = "match_result_set"
     MATCH_RESULT_CHANGED = "match_result_changed"

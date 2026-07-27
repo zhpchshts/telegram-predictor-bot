@@ -38,6 +38,7 @@ from app.contest_service import (
     MatchCreationConflictError,
     MatchNotFoundError,
     MatchResultUnavailableError,
+    MatchUpdateUnavailableError,
     PredictionUnavailableError,
     complete_contest,
     create_match,
@@ -53,6 +54,7 @@ from app.contest_service import (
     save_match_prediction,
     save_match_prediction_publication_settings,
     save_match_result,
+    update_match_start,
 )
 from app.tma_context import TmaContext, TmaContextError, build_tma_context
 from app.supermoderator_service import (
@@ -128,6 +130,10 @@ class CreateContestRequest(BaseModel):
 class CreateMatchRequest(BaseModel):
     home_team_name: str
     away_team_name: str
+    starts_at_utc: str
+
+
+class UpdateMatchStartRequest(BaseModel):
     starts_at_utc: str
 
 
@@ -785,6 +791,48 @@ async def delete_tma_match(
         ) from error
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put("/contests/{contest_id}/matches/{match_id}")
+async def update_tma_match_start(
+    contest_id: SqliteInteger,
+    match_id: SqliteInteger,
+    payload: UpdateMatchStartRequest,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
+) -> JSONResponse:
+    settings = load_settings()
+    try:
+        match = update_match_start(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            match_id=match_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            starts_at_utc=payload.starts_at_utc,
+            audit_actor=_audit_actor(context.context, context.access),
+        )
+    except (ContestNotFoundError, MatchNotFoundError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (ContestCompletedError, MatchUpdateUnavailableError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(content={"match": _serialize_match(match)})
 
 
 @router.get("/contests/{contest_id}")
