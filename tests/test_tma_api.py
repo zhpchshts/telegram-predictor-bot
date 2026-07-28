@@ -26,6 +26,7 @@ from app.main import create_app as create_application
 from app.supermoderator_service import (
     SupermoderatorAssignment,
     assign_supermoderator,
+    get_active_supermoderator_assignment_by_telegram_ids,
     revoke_supermoderator,
 )
 from app.telegram_username_resolver import (
@@ -437,6 +438,87 @@ def test_telegram_admin_assigns_unknown_user_by_exact_telegram_id_without_mtprot
     assert repeated.json()["created"] is False
 
 
+def test_supermoderator_management_is_scoped_to_launch_chat(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    other_telegram_chat_id = -1009876543210
+    other_admin = upsert_chat_actor(
+        database_path=database_path,
+        telegram_chat_id=other_telegram_chat_id,
+        chat_title="Other chat",
+        telegram_user_id=999,
+        username="other_admin",
+        first_name="Other",
+        last_name="Admin",
+    )
+    target = upsert_chat_actor(
+        database_path=database_path,
+        telegram_chat_id=other_telegram_chat_id,
+        chat_title="Other chat",
+        telegram_user_id=456,
+        username="target_user",
+        first_name="Target",
+        last_name="User",
+    )
+    other_assignment = assign_supermoderator(
+        database_path=database_path,
+        chat_id=other_admin.chat_id,
+        user_id=target.actor_user_id,
+        assigned_by_user_id=other_admin.actor_user_id,
+        audit_actor=AuditActor(
+            telegram_chat_id=other_telegram_chat_id,
+            telegram_user_id=999,
+            role=AuditActorRole.TELEGRAM_ADMIN,
+        ),
+    )
+    client = TestClient(create_role_management_app())
+
+    assigned = client.put(
+        "/api/tma/access/supermoderators/456",
+        headers=build_tma_headers(),
+    )
+    listed = client.get(
+        "/api/tma/access/supermoderators",
+        headers=build_tma_headers(),
+    )
+
+    assert assigned.status_code == 200
+    assert assigned.json()["created"] is True
+    current_assignment_id = assigned.json()["assignment"]["id"]
+    assert current_assignment_id != other_assignment.id
+    assert [item["id"] for item in listed.json()["assignments"]] == [
+        current_assignment_id
+    ]
+
+    revoked = client.delete(
+        "/api/tma/access/supermoderators/456",
+        headers=build_tma_headers(),
+    )
+
+    assert revoked.status_code == 200
+    assert revoked.json()["assignment"]["id"] == current_assignment_id
+    assert (
+        get_active_supermoderator_assignment_by_telegram_ids(
+            database_path=database_path,
+            telegram_chat_id=TELEGRAM_CHAT_ID,
+            telegram_user_id=456,
+        )
+        is None
+    )
+    assert (
+        get_active_supermoderator_assignment_by_telegram_ids(
+            database_path=database_path,
+            telegram_chat_id=other_telegram_chat_id,
+            telegram_user_id=456,
+        )
+        == other_assignment
+    )
+
+
 def test_invalid_telegram_user_id_is_rejected_before_target_write(
     monkeypatch,
     tmp_path: Path,
@@ -817,7 +899,14 @@ def test_management_contest_list_is_minimal_and_scoped_to_launch_chat(
     )
 
     assert response.status_code == 200
-    contests = response.json()["contests"]
+    response_data = response.json()
+    assert set(response_data) == {"contests", "capabilities"}
+    assert response_data["capabilities"] == {
+        "can_create_contests": True,
+        "can_manage_roles": True,
+        "can_read_audit": True,
+    }
+    contests = response_data["contests"]
     assert contests == [
         {
             "id": active_id,
@@ -1761,6 +1850,10 @@ def test_participant_can_read_contest_matches_and_leaderboard_with_enforcement(
     )
     assert prediction_response.status_code == 201
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
+    participant_telegram_client = MutableTelegramAdministratorsClient([])
+    client.app.dependency_overrides[get_telegram_administrators_client] = lambda: (
+        participant_telegram_client
+    )
 
     bootstrap_response = client.get(
         "/api/tma/bootstrap",
@@ -1772,14 +1865,23 @@ def test_participant_can_read_contest_matches_and_leaderboard_with_enforcement(
     )
 
     assert bootstrap_response.status_code == 200
-    assert [item["id"] for item in bootstrap_response.json()["active_contests"]] == [
-        contest["id"]
-    ]
+    bootstrap_data = bootstrap_response.json()
+    assert bootstrap_data["access"] == {
+        "verification_status": "verified",
+        "role": "participant",
+        "can_manage_contests": False,
+        "can_manage_roles": False,
+        "enforcement_enabled": True,
+    }
+    assert bootstrap_data["can_access_management"] is False
+    assert [item["id"] for item in bootstrap_data["active_contests"]] == [contest["id"]]
     assert contest_response.status_code == 200
+    assert set(contest_response.json()) == {"contest"}
     contest_details = contest_response.json()["contest"]
     assert [item["id"] for item in contest_details["matches"]] == [match["id"]]
     assert len(contest_details["leaderboard"]) == 1
     assert contest_details["leaderboard"][0]["participant_name"] == "Eugene Sabir"
+    assert participant_telegram_client.calls == 1
 
 
 def test_create_contest_rejects_missing_init_data(

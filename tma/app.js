@@ -76,6 +76,14 @@ const AUDIT_PAGE_SIZE = 30;
 const chatSummaryElement = document.querySelector("#chat-summary");
 const appContentElement = document.querySelector("#app-content");
 
+function setChatSummary(text = "") {
+  chatSummaryElement.textContent = text;
+  chatSummaryElement.hidden = !text;
+  if (chatSummaryElement.parentElement) {
+    chatSummaryElement.parentElement.hidden = !text;
+  }
+}
+
 function refreshTelegramWebApp() {
   telegram = window.Telegram?.WebApp || telegram || null;
   return telegram;
@@ -257,7 +265,7 @@ function getUserDisplayName(user) {
 }
 
 function renderLoading() {
-  chatSummaryElement.textContent = "Загружаем конкурсы этого чата…";
+  setChatSummary("Загружаем конкурсы этого чата…");
   appContentElement.replaceChildren(
     createStatusCard(
       "Открываем конкурсы",
@@ -563,12 +571,9 @@ function createContestConfirmationCard(bootstrap, state) {
       };
 
       if (state.managementMode === true) {
-        void openManagement(nextBootstrap, {
-          mode: "form",
-          formMessage: result.was_created
-            ? `Конкурс «${result.contest.name}» создан.`
-            : `Конкурс «${result.contest.name}» уже был создан ранее.`,
-          formMessageType: "success",
+        activeBootstrap = nextBootstrap;
+        void openContest(nextBootstrap, result.contest.id, {
+          managementMode: true,
         });
         return;
       }
@@ -600,11 +605,42 @@ function createContestConfirmationCard(bootstrap, state) {
 }
 
 function renderContestCreationState(bootstrap, state) {
-  if (state.managementMode === true && state.managementData) {
-    renderManagementScreen(bootstrap, state.managementData, state);
+  if (state.managementMode === true) {
+    renderContestCreationScreen(bootstrap, state);
     return;
   }
   renderContestScreen(bootstrap, state);
+}
+
+function renderContestCreationScreen(bootstrap, state = {}) {
+  currentViewMode = "management";
+  setChatSummary();
+  const creationState = {
+    ...state,
+    managementMode: true,
+  };
+  const formCard = state.mode === "confirm"
+    ? createContestConfirmationCard(bootstrap, creationState)
+    : createContestFormCard(bootstrap, creationState);
+
+  appContentElement.replaceChildren(
+    createAdministrativeHeader(bootstrap, {
+      title: "Создание конкурса",
+      backLabel: "← К управлению",
+      onBack: () => {
+        void openManagement(bootstrap);
+      },
+    }),
+    formCard,
+  );
+}
+
+function openContestCreation(bootstrap, managementData) {
+  renderContestCreationScreen(bootstrap, {
+    managementMode: true,
+    managementData,
+    mode: "form",
+  });
 }
 
 function createContestDetailsCard(contest, onBack) {
@@ -4048,7 +4084,7 @@ function renderContestDetailsLoading(bootstrap) {
   const chatTitle = chat.title || "этого чата";
   const userName = getUserDisplayName(user);
 
-  chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
+  setChatSummary(`Привет, ${userName}. Чат «${chatTitle}».`);
   appContentElement.replaceChildren(
     createStatusCard(
       "Открываем конкурс",
@@ -4077,7 +4113,7 @@ function renderContestDetailsError(bootstrap, message) {
   actions.append(backButton);
   card.append(actions);
 
-  chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
+  setChatSummary(`Привет, ${userName}. Чат «${chatTitle}».`);
   appContentElement.replaceChildren(card);
 }
 
@@ -4166,7 +4202,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
     );
   }
 
-  chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
+  setChatSummary(`Привет, ${userName}. Чат «${chatTitle}».`);
   appContentElement.replaceChildren(...cards);
 }
 
@@ -4208,6 +4244,7 @@ function createContestManagementHeader(contest, bootstrap) {
 
 function renderContestManagementScreen(bootstrap, contest, state = {}) {
   currentViewMode = "management";
+  setChatSummary();
   const matches = Array.isArray(contest.matches) ? contest.matches : [];
   const isActive = contest.is_active !== false;
   const managementState = {
@@ -4276,6 +4313,7 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
 
 function renderContestManagementError(bootstrap, message) {
   currentViewMode = "management";
+  setChatSummary();
   const card = createInfoCard(
     "Не удалось открыть управление конкурсом",
     [message],
@@ -5046,33 +5084,23 @@ function createAuditListCard(bootstrap, state) {
 }
 
 function createAuditHeaderCard(bootstrap) {
-  const card = createElement("section", {
-    className: "info-card audit-header-card",
-  });
-  const heading = createElement("h2", { text: "История действий" });
-  const description = createElement("p", {
-    className: "subtitle",
-    text: (
+  return createAdministrativeHeader(bootstrap, {
+    title: "Журнал действий",
+    backLabel: "← К управлению",
+    description: (
       "Административные действия этого Telegram-чата — "
       + "от новых к старым."
     ),
+    className: "audit-header-card",
+    onBack: () => {
+      void openManagement(bootstrap);
+    },
   });
-  const backButton = createActionButton(
-    "К конкурсам",
-    "secondary-action-button",
-  );
-  backButton.addEventListener("click", () => {
-    void openManagement(bootstrap);
-  });
-  card.append(heading, description, backButton);
-  return card;
 }
 
 function renderAuditScreen(bootstrap, state) {
-  const { user, chat } = bootstrap.context;
-  const chatTitle = chat.title || "этого чата";
-  const userName = getUserDisplayName(user);
-  chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
+  currentViewMode = "management";
+  setChatSummary();
   appContentElement.replaceChildren(
     createAuditHeaderCard(bootstrap),
     createAuditFiltersCard(bootstrap, state),
@@ -5172,34 +5200,10 @@ function openAuditHistory(bootstrap) {
   void loadAuditEvents(bootstrap, state, false);
 }
 
-function createAuditNavigationCard(bootstrap) {
-  const card = createElement("section", {
-    className: "info-card audit-navigation-card",
-  });
-  const heading = createElement("h2", { text: "История действий" });
-  const description = createElement("p", {
-    className: "subtitle",
-    text: (
-      "Посмотрите, кто создавал и изменял конкурсы, матчи, "
-      + "результаты и назначения ролей."
-    ),
-  });
-  const openButton = createActionButton(
-    "Открыть историю",
-    "secondary-action-button",
-  );
-  openButton.addEventListener("click", () => {
-    openAuditHistory(bootstrap);
-  });
-  card.append(heading, description, openButton);
-  return card;
-}
-
 function createSupermoderatorManagementCard() {
   const card = createElement("section", {
     className: "info-card role-management-card",
   });
-  const heading = createElement("h2", { text: "Супермодераторы" });
   const description = createElement("p", {
     className: "subtitle",
     text: (
@@ -5257,7 +5261,6 @@ function createSupermoderatorManagementCard() {
   form.append(field, fieldHint, findButton, formMessage, preview);
   listContainer.append(listStatus);
   card.append(
-    heading,
     description,
     warning,
     listHeading,
@@ -5379,6 +5382,25 @@ function createSupermoderatorManagementCard() {
 
   void loadAssignments();
   return card;
+}
+
+function renderSupermoderatorManagementScreen(bootstrap) {
+  currentViewMode = "management";
+  setChatSummary();
+  appContentElement.replaceChildren(
+    createAdministrativeHeader(bootstrap, {
+      title: "Супермодераторы",
+      backLabel: "← К управлению",
+      onBack: () => {
+        void openManagement(bootstrap);
+      },
+    }),
+    createSupermoderatorManagementCard(),
+  );
+}
+
+function openSupermoderatorManagement(bootstrap) {
+  renderSupermoderatorManagementScreen(bootstrap);
 }
 
 function renderSupermoderatorAssignments(container, assignments, reload) {
@@ -5594,87 +5616,318 @@ function createManagementNavigationCard(bootstrap) {
   return card;
 }
 
-function createManagementContestListCard(contests, bootstrap) {
+function createAdministrativeHeader(
+  bootstrap,
+  {
+    title,
+    backLabel,
+    onBack,
+    description = "",
+    className = "",
+  },
+) {
+  const chatTitle = bootstrap.context?.chat?.title || "этого чата";
+  const card = createElement("section", {
+    className: [
+      "contest-overview",
+      "management-overview",
+      "administrative-header",
+      className,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  });
+  const backButton = createActionButton(backLabel, "contest-back-link");
+  const heading = createElement("h2", { text: title });
+  const context = createElement("p", {
+    className: "subtitle management-context",
+    text: `Чат «${chatTitle}»`,
+  });
+
+  backButton.addEventListener("click", onBack);
+  card.append(backButton, heading, context);
+
+  if (description) {
+    card.append(
+      createElement("p", {
+        className: "subtitle administrative-header-description",
+        text: description,
+      }),
+    );
+  }
+
+  return card;
+}
+
+function createManagementContestRow(contest, bootstrap) {
+  const item = createElement("li", {
+    className: "management-list-item",
+  });
+  const button = createActionButton(
+    "",
+    "secondary-action-button management-navigation-row management-contest-button",
+  );
+  const copy = createElement("span", {
+    className: "management-row-copy",
+  });
+  const title = createElement("span", {
+    className: "management-row-title",
+    text: contest.name,
+  });
+  const statusLabel = contest.status === "completed" ? "Завершён" : "Активен";
+  const status = createElement("span", {
+    className: "management-contest-meta",
+    text: statusLabel,
+  });
+  const chevron = createElement("span", {
+    className: "management-row-chevron",
+    text: "›",
+  });
+
+  button.setAttribute("aria-label", `${contest.name}. ${statusLabel}`);
+  chevron.setAttribute("aria-hidden", "true");
+  copy.append(title, status);
+  button.append(copy, chevron);
+  button.addEventListener("click", () => {
+    void openContest(bootstrap, contest.id, { managementMode: true });
+  });
+  item.append(button);
+  return item;
+}
+
+function createManagementContestGroup(
+  title,
+  contests,
+  bootstrap,
+  emptyMessage = "",
+) {
+  const group = createElement("section", {
+    className: "management-contest-group",
+  });
+  const heading = createElement("h3", { text: title });
+  group.append(heading);
+
+  if (contests.length === 0) {
+    if (emptyMessage) {
+      group.append(
+        createElement("p", {
+          className: "subtitle management-group-empty-state",
+          text: emptyMessage,
+        }),
+      );
+    }
+    return group;
+  }
+
+  const list = createElement("ul", {
+    className: "management-navigation-list",
+  });
+  for (const contest of contests) {
+    list.append(createManagementContestRow(contest, bootstrap));
+  }
+  group.append(list);
+  return group;
+}
+
+function createCompletedManagementContestGroup(contests, bootstrap) {
+  const disclosure = createElement("details", {
+    className: "management-contest-group management-completed-contests",
+  });
+  const summary = createElement("summary", {
+    text: "Завершённые",
+  });
+  const list = createElement("ul", {
+    className: "management-navigation-list",
+  });
+
+  for (const contest of contests) {
+    list.append(createManagementContestRow(contest, bootstrap));
+  }
+  disclosure.append(summary, list);
+  return disclosure;
+}
+
+function createManagementContestListCard(
+  contests,
+  bootstrap,
+  managementData,
+) {
+  const capabilities = managementData.capabilities || {};
+  const activeContests = contests.filter(
+    (contest) => contest.status === "active",
+  );
+  const completedContests = contests.filter(
+    (contest) => contest.status === "completed",
+  );
   const card = createElement("section", {
     className: "info-card management-contest-list-card",
   });
-  const heading = createElement("h2", { text: "Выберите конкурс" });
-  const description = createElement("p", {
-    className: "subtitle",
-    text: "Показаны только конкурсы текущего Telegram-чата, доступные для управления.",
+  const sectionHeader = createElement("div", {
+    className: "management-section-header",
   });
-  const list = createElement("ul", { className: "contest-list" });
-  card.append(heading, description);
+  const heading = createElement("h2", { text: "Конкурсы" });
+  sectionHeader.append(heading);
+
+  if (capabilities.can_create_contests === true) {
+    const createButton = createActionButton(
+      "Создать",
+      "secondary-action-button management-create-button",
+    );
+    createButton.addEventListener("click", () => {
+      openContestCreation(bootstrap, managementData);
+    });
+    sectionHeader.append(createButton);
+  }
+
+  card.append(sectionHeader);
 
   if (contests.length === 0) {
-    card.append(
+    const emptyState = createElement("div", {
+      className: "management-empty-state",
+    });
+    emptyState.append(
       createElement("p", {
-        className: "subtitle management-empty-state",
-        text: "В этом чате пока нет конкурсов, доступных для управления.",
+        className: "management-empty-title",
+        text: "Конкурсов в этом чате пока нет.",
+      }),
+      createElement("p", {
+        className: "subtitle",
+        text: (
+          "Создайте первый конкурс, чтобы добавить матчи "
+          + "и принимать прогнозы."
+        ),
       }),
     );
+
+    if (capabilities.can_create_contests === true) {
+      const createContestButton = createActionButton(
+        "Создать конкурс",
+        "primary-action-button",
+      );
+      createContestButton.addEventListener("click", () => {
+        openContestCreation(bootstrap, managementData);
+      });
+      emptyState.append(createContestButton);
+    }
+
+    card.append(emptyState);
     return card;
   }
 
-  for (const contest of contests) {
-    const item = createElement("li", { className: "contest-list-item" });
-    const button = createActionButton(
-      contest.name,
-      "secondary-action-button contest-list-button management-contest-button",
+  const groups = createElement("div", {
+    className: "management-contest-groups",
+  });
+  groups.append(
+    createManagementContestGroup(
+      "Активные",
+      activeContests,
+      bootstrap,
+      "Активных конкурсов сейчас нет.",
+    ),
+  );
+  if (completedContests.length > 0) {
+    groups.append(
+      createCompletedManagementContestGroup(completedContests, bootstrap),
     );
-    const statusLabel = contest.status === "completed" ? "Завершён" : "Активен";
-    const roleLabel = AUDIT_ROLE_LABELS[contest.effective_role]
-      || contest.effective_role;
-    const meta = createElement("span", {
-      className: "management-contest-meta",
-      text: `${statusLabel} · ${roleLabel}`,
-    });
-    button.append(meta);
-    button.addEventListener("click", () => {
-      void openContest(bootstrap, contest.id, { managementMode: true });
-    });
-    item.append(button);
-    list.append(item);
   }
-  card.append(list);
+  card.append(groups);
+  return card;
+}
+
+function createManagementNavigationRow(title, description, onOpen) {
+  const button = createActionButton(
+    "",
+    "secondary-action-button management-navigation-row",
+  );
+  const copy = createElement("span", {
+    className: "management-row-copy",
+  });
+  const heading = createElement("span", {
+    className: "management-row-title",
+    text: title,
+  });
+  const details = createElement("span", {
+    className: "management-row-description",
+    text: description,
+  });
+  const chevron = createElement("span", {
+    className: "management-row-chevron",
+    text: "›",
+  });
+
+  button.setAttribute("aria-label", `${title}. ${description}`);
+  chevron.setAttribute("aria-hidden", "true");
+  copy.append(heading, details);
+  button.append(copy, chevron);
+  button.addEventListener("click", onOpen);
+  return button;
+}
+
+function createManagementAccessCard(bootstrap, capabilities) {
+  const rows = [];
+
+  if (capabilities.can_read_audit === true) {
+    rows.push(
+      createManagementNavigationRow(
+        "Журнал действий",
+        "История административных изменений",
+        () => {
+          openAuditHistory(bootstrap);
+        },
+      ),
+    );
+  }
+  if (capabilities.can_manage_roles === true) {
+    rows.push(
+      createManagementNavigationRow(
+        "Супермодераторы",
+        "Управление дополнительными правами",
+        () => {
+          openSupermoderatorManagement(bootstrap);
+        },
+      ),
+    );
+  }
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  const card = createElement("section", {
+    className: "info-card management-access-card",
+  });
+  const heading = createElement("h2", {
+    text: "Доступ и аудит",
+  });
+  const list = createElement("div", {
+    className: "management-navigation-list",
+  });
+  list.append(...rows);
+  card.append(heading, list);
   return card;
 }
 
 function createManagementHeaderCard(bootstrap) {
-  const card = createElement("section", {
-    className: "contest-overview management-overview",
+  return createAdministrativeHeader(bootstrap, {
+    title: "Управление",
+    backLabel: "← К конкурсам",
+    onBack: () => {
+      void openContestList(bootstrap);
+    },
   });
-  const backButton = createActionButton(
-    "← Вернуться к конкурсам",
-    "contest-back-link",
-  );
-  const mode = createElement("p", {
-    className: "management-mode-label",
-    text: "Режим управления",
-  });
-  const heading = createElement("h2", { text: "Управление" });
-  backButton.addEventListener("click", () => {
-    renderContestScreen(bootstrap);
-  });
-  card.append(backButton, mode, heading);
-  return card;
 }
 
 function renderManagementScreen(bootstrap, managementData, state = {}) {
   currentViewMode = "management";
+  setChatSummary();
   const contests = Array.isArray(managementData.contests)
     ? managementData.contests
     : [];
   const capabilities = managementData.capabilities || {};
   const cards = [
     createManagementHeaderCard(bootstrap),
-    createManagementContestListCard(contests, bootstrap),
+    createManagementContestListCard(contests, bootstrap, managementData),
   ];
-  const managementState = {
-    ...state,
-    managementMode: true,
-    managementData,
-  };
 
   if (state.accessMessage) {
     cards.splice(
@@ -5683,18 +5936,10 @@ function renderManagementScreen(bootstrap, managementData, state = {}) {
       createInfoCard("Доступ изменился", [state.accessMessage]),
     );
   }
-  if (capabilities.can_create_contests === true) {
-    cards.push(
-      state.mode === "confirm"
-        ? createContestConfirmationCard(bootstrap, managementState)
-        : createContestFormCard(bootstrap, managementState),
-    );
-  }
-  if (capabilities.can_read_audit === true) {
-    cards.push(createAuditNavigationCard(bootstrap));
-  }
-  if (capabilities.can_manage_roles === true) {
-    cards.push(createSupermoderatorManagementCard());
+
+  const accessCard = createManagementAccessCard(bootstrap, capabilities);
+  if (accessCard) {
+    cards.push(accessCard);
   }
   appContentElement.replaceChildren(...cards);
 }
@@ -5715,6 +5960,7 @@ function handleManagementRequestError(
 async function openManagement(bootstrap, state = {}) {
   activeBootstrap = bootstrap;
   currentViewMode = "management";
+  setChatSummary();
   appContentElement.replaceChildren(
     createStatusCard(
       "Открываем управление",
@@ -5731,7 +5977,7 @@ async function openManagement(bootstrap, state = {}) {
         can_access_management: false,
       };
       activeBootstrap = nextBootstrap;
-      renderContestScreen(nextBootstrap, {
+      await openContestList(nextBootstrap, {
         managementMessage: "Доступ к разделу «Управление» отсутствует.",
       });
       return;
@@ -5743,6 +5989,25 @@ async function openManagement(bootstrap, state = {}) {
       createManagementHeaderCard(bootstrap),
       createInfoCard("Не удалось открыть управление", [message]),
     );
+  }
+}
+
+async function openContestList(bootstrap, state = {}) {
+  renderLoading();
+
+  try {
+    const refreshedBootstrap = await apiRequest("/api/tma/bootstrap");
+    activeBootstrap = refreshedBootstrap;
+    renderContestScreen(refreshedBootstrap, state);
+  } catch (error) {
+    const message = error instanceof Error
+      ? error.message
+      : "Не удалось обновить список конкурсов.";
+    activeBootstrap = bootstrap;
+    renderContestScreen(bootstrap, {
+      ...state,
+      contestListMessage: message,
+    });
   }
 }
 
@@ -5758,7 +6023,7 @@ function renderContestScreen(bootstrap, state = {}) {
     ? bootstrap.completed_contests
     : [];
 
-  chatSummaryElement.textContent = `Привет, ${userName}. Чат «${chatTitle}».`;
+  setChatSummary(`Привет, ${userName}. Чат «${chatTitle}».`);
 
   const contestCard = createContestsCard(
     activeContests,
@@ -5768,6 +6033,14 @@ function renderContestScreen(bootstrap, state = {}) {
     },
   );
   const cards = [contestCard];
+  if (state.contestListMessage) {
+    cards.push(
+      createInfoCard(
+        "Не удалось обновить список конкурсов",
+        [state.contestListMessage],
+      ),
+    );
+  }
   if (state.managementMessage) {
     cards.push(createInfoCard("Управление недоступно", [state.managementMessage]));
   }
@@ -5783,7 +6056,7 @@ function renderBootstrap(bootstrap) {
 }
 
 function renderError(message) {
-  chatSummaryElement.textContent = "Не удалось открыть конкурсы.";
+  setChatSummary("Не удалось открыть конкурсы.");
   appContentElement.replaceChildren(
     createInfoCard("Не удалось открыть Клевер", [message]),
   );

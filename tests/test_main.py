@@ -1,11 +1,34 @@
 import asyncio
 from pathlib import Path
+import re
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 from app import main
 from app.main import create_app
+
+
+def _tma_source() -> str:
+    return (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
+
+
+def _function_source(name: str) -> str:
+    source = _tma_source()
+    match = re.search(
+        rf"^(?:async )?function {re.escape(name)}\(",
+        source,
+        flags=re.MULTILINE,
+    )
+    if match is None:
+        raise AssertionError(f"Function {name!r} was not found.")
+    next_match = re.search(
+        r"^(?:async )?function [A-Za-z_$][\w$]*\(",
+        source[match.end() :],
+        flags=re.MULTILINE,
+    )
+    end = len(source) if next_match is None else match.end() + next_match.start()
+    return source[match.start() : end]
 
 
 def test_tma_index_is_available() -> None:
@@ -19,12 +42,10 @@ def test_tma_index_is_available() -> None:
 
 
 def test_tma_locks_champion_settings_after_actual_champion() -> None:
-    source = (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
-    card_start = source.index("function createChampionAdministrationCard")
-    card_end = source.index("function createChampionPredictionCard", card_start)
-    card_source = source[card_start:card_end]
+    card_source = _function_source("createChampionAdministrationCard")
 
-    assert "championPrediction.actual_champion\n      ? createElement" in card_source
+    assert "championPrediction.actual_champion" in card_source
+    assert '? createElement("p"' in card_source
     assert (
         "Настройки зафиксированы после указания фактического чемпиона." in card_source
     )
@@ -33,13 +54,8 @@ def test_tma_locks_champion_settings_after_actual_champion() -> None:
 
 
 def test_tma_exposes_chat_level_supermoderator_management_for_admins() -> None:
-    source = (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
-    management_start = source.index("function createSupermoderatorManagementCard")
-    management_end = source.index(
-        "function renderSupermoderatorAssignments",
-        management_start,
-    )
-    management_source = source[management_start:management_end]
+    source = _tma_source()
+    management_source = _function_source("createSupermoderatorManagementCard")
     assignment_start = management_source.index("async (selectedUser) =>")
     assignment_source = management_source[assignment_start:]
     put_index = assignment_source.index("await apiRequest")
@@ -63,25 +79,18 @@ def test_tma_exposes_chat_level_supermoderator_management_for_admins() -> None:
 
 
 def test_tma_explains_unavailable_telegram_admin_verification() -> None:
-    source = (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
-    management_start = source.index("async function openManagement")
-    management_end = source.index("function renderContestScreen", management_start)
-    management_source = source[management_start:management_end]
+    management_source = _function_source("openManagement")
 
     assert '"Не удалось открыть управление"' in management_source
     assert "error.message" in management_source
-    assert "renderContestScreen(nextBootstrap" in management_source
+    assert "await openContestList(nextBootstrap" in management_source
     assert "can_access_management: false" in management_source
 
 
 def test_tma_hides_contest_management_without_access() -> None:
-    source = (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
-    details_start = source.index("function renderContestDetailsScreen")
-    details_end = source.index("function renderContestDetailsRoute", details_start)
-    details_source = source[details_start:details_end]
-    screen_start = source.index("function renderContestScreen")
-    screen_end = source.index("function renderBootstrap", screen_start)
-    screen_source = source[screen_start:screen_end]
+    source = _tma_source()
+    details_source = _function_source("renderContestDetailsScreen")
+    screen_source = _function_source("renderContestScreen")
 
     assert "return bootstrap.can_access_management === true" in source
     assert "if (canManageContests(bootstrap))" in screen_source
@@ -95,42 +104,42 @@ def test_tma_hides_contest_management_without_access() -> None:
 
 
 def test_tma_keeps_supermoderator_role_management_separate() -> None:
-    source = (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
-    management_start = source.index("function renderManagementScreen")
-    management_end = source.index("async function openManagement", management_start)
-    management_source = source[management_start:management_end]
-    participant_start = source.index("function renderContestScreen")
-    participant_end = source.index("function renderBootstrap", participant_start)
-    participant_source = source[participant_start:participant_end]
+    management_source = _function_source("renderManagementScreen")
+    access_source = _function_source("createManagementAccessCard")
+    role_screen_source = _function_source("renderSupermoderatorManagementScreen")
+    participant_source = _function_source("renderContestScreen")
 
-    assert "if (capabilities.can_manage_roles === true)" in management_source
-    assert "cards.push(createSupermoderatorManagementCard())" in management_source
+    assert "capabilities.can_manage_roles === true" in access_source
+    assert "openSupermoderatorManagement(bootstrap)" in access_source
+    assert "createSupermoderatorManagementCard" not in management_source
+    assert "createSupermoderatorManagementCard()" in role_screen_source
     assert "createSupermoderatorManagementCard" not in participant_source
 
 
 def test_tma_reports_rejected_management_request_without_false_success() -> None:
-    source = (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
-    request_start = source.index("async function apiRequest")
-    request_end = source.index("function handleError", request_start)
-    request_source = source[request_start:request_end]
-    confirmation_start = source.index("function createContestConfirmationCard")
-    confirmation_end = source.index(
-        "function createContestDetailsCard",
-        confirmation_start,
-    )
-    confirmation_source = source[confirmation_start:confirmation_end]
+    request_source = _function_source("apiRequest")
+    confirmation_source = _function_source("createContestConfirmationCard")
     catch_start = confirmation_source.index("} catch (error) {")
     success_source = confirmation_source[:catch_start]
     rejection_source = confirmation_source[catch_start:]
+    management_start = success_source.index("if (state.managementMode === true)")
+    management_end = success_source.index(
+        "renderContestScreen(nextBootstrap",
+        management_start,
+    )
+    management_success_source = success_source[management_start:management_end]
 
     assert "if (!response.ok)" in request_source
     assert "detail.message" in request_source
     assert "error.code = detail.code" in request_source
     assert 'formMessageType: "success"' in success_source
+    assert "openContest(nextBootstrap, result.contest.id" in management_success_source
+    assert "managementMode: true" in management_success_source
+    assert "openManagement(nextBootstrap" not in management_success_source
     assert 'confirmationMessageType: "error"' in rejection_source
     assert "error instanceof Error" in rejection_source
     assert 'MessageType: "success"' not in rejection_source
-    assert "renderContestScreen(bootstrap" in rejection_source
+    assert "renderContestCreationState(bootstrap" in rejection_source
 
 
 def test_lifespan_cleans_up_after_a_background_task_failure(

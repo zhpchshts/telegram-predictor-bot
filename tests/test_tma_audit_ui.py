@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from app import main
 from app.audit_service import AuditEventType
 
@@ -8,10 +10,22 @@ def _source() -> str:
     return (main.TMA_DIRECTORY / "app.js").read_text(encoding="utf-8")
 
 
-def _function_source(name: str, next_name: str) -> str:
+def _function_source(name: str, _next_name: str | None = None) -> str:
     source = _source()
-    start = source.index(f"function {name}")
-    end = source.index(f"function {next_name}", start)
+    match = re.search(
+        rf"^(?:async )?function {re.escape(name)}\(",
+        source,
+        flags=re.MULTILINE,
+    )
+    if match is None:
+        raise AssertionError(f"Function {name!r} was not found.")
+    start = match.start()
+    next_match = re.search(
+        r"^(?:async )?function [A-Za-z_$][\w$]*\(",
+        source[match.end() :],
+        flags=re.MULTILINE,
+    )
+    end = len(source) if next_match is None else match.end() + next_match.start()
     return source[start:end]
 
 
@@ -173,11 +187,13 @@ def test_audit_navigation_uses_the_existing_administrative_access_decision() -> 
         "renderManagementScreen",
         "openManagement",
     )
+    access_source = _function_source("createManagementAccessCard")
 
     assert "if (canManageContests(bootstrap))" in screen_source
     assert "createManagementNavigationCard(bootstrap)" in screen_source
-    assert "capabilities.can_read_audit === true" in management_source
-    assert "cards.push(createAuditNavigationCard(bootstrap))" in management_source
+    assert "createManagementAccessCard(bootstrap, capabilities)" in management_source
+    assert "capabilities.can_read_audit === true" in access_source
+    assert "openAuditHistory(bootstrap)" in access_source
     assert '"/api/tma/audit-events?' not in source
     assert "`/api/tma/audit-events?${parameters.toString()}`" in source
 
@@ -205,6 +221,7 @@ def test_participant_and_management_contours_are_separate() -> None:
     assert "createContestDeletionCard" in management_source
     assert "createManagementNavigationCard" in contest_list_source
     assert "createSupermoderatorManagementCard" not in contest_list_source
+    assert "createContestFormCard" not in contest_list_source
 
 
 def test_management_always_uses_explicit_contest_selection_and_lazy_api() -> None:
@@ -217,12 +234,16 @@ def test_management_always_uses_explicit_contest_selection_and_lazy_api() -> Non
         "createManagementContestListCard",
         "createManagementHeaderCard",
     )
+    row_source = _function_source("createManagementContestRow")
 
     assert 'apiRequest("/api/tma/management/contests")' in source
-    assert "createManagementContestListCard(contests, bootstrap)" in management_source
+    assert (
+        "createManagementContestListCard(contests, bootstrap, managementData)"
+        in management_source
+    )
     assert "contests.length === 1" not in management_source
     assert "contests.length === 1" not in list_source
-    assert "{ managementMode: true }" in list_source
+    assert "{ managementMode: true }" in row_source
     assert 'currentViewMode = "participant"' in source
     assert 'currentViewMode = "management"' in source
 
@@ -233,17 +254,11 @@ def test_successful_participant_contest_render_resets_view_mode() -> None:
         "renderContestDetailsRoute",
     )
 
-    assert (
-        "function renderContestDetailsScreen(bootstrap, contest, state = {}) {\n"
-        '  currentViewMode = "participant";'
-    ) in participant_source
+    assert 'currentViewMode = "participant";' in participant_source
 
 
 def test_management_open_errors_stay_in_management_contour() -> None:
-    source = _source()
-    open_start = source.index("async function openContest")
-    open_end = source.index("function getAuditEventPresentation", open_start)
-    open_source = source[open_start:open_end]
+    open_source = _function_source("openContest")
     error_source = _function_source(
         "renderContestManagementError",
         "openContest",
@@ -258,10 +273,7 @@ def test_management_open_errors_stay_in_management_contour() -> None:
 
 
 def test_low_level_api_request_has_no_navigation_side_effects() -> None:
-    source = _source()
-    request_start = source.index("async function apiRequest")
-    request_end = source.index("function handleError", request_start)
-    request_source = source[request_start:request_end]
+    request_source = _function_source("apiRequest")
     management_error_source = _function_source(
         "handleManagementRequestError",
         "openManagement",
@@ -276,25 +288,10 @@ def test_low_level_api_request_has_no_navigation_side_effects() -> None:
 
 
 def test_participant_prediction_failures_do_not_use_management_handler() -> None:
-    source = _source()
-    match_prediction_start = source.index("function createMatchPredictionSection")
-    match_prediction_end = source.index(
-        "function getChampionPrediction",
-        match_prediction_start,
-    )
-    champion_prediction_start = source.index(
-        "function createChampionPredictionChoiceSection",
-    )
-    champion_prediction_end = source.index(
-        "function createContestChampionSection",
-        champion_prediction_start,
+    match_prediction_source = _function_source("createMatchPredictionSection")
+    champion_prediction_source = _function_source(
+        "createChampionPredictionChoiceSection"
     )
 
-    assert (
-        "handleManagementRequestError"
-        not in source[match_prediction_start:match_prediction_end]
-    )
-    assert (
-        "handleManagementRequestError"
-        not in source[champion_prediction_start:champion_prediction_end]
-    )
+    assert "handleManagementRequestError" not in match_prediction_source
+    assert "handleManagementRequestError" not in champion_prediction_source
