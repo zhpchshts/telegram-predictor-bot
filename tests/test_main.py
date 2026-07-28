@@ -100,7 +100,8 @@ def test_tma_hides_contest_management_without_access() -> None:
     assert "createContestDeletionCard" not in details_source
     assert "canManageResults: false" in details_source
     assert "createMatchPredictionSection(contest, match)" in source
-    assert "createLeaderboardCard(leaderboard, contest.champion_prediction)" in source
+    assert "createLeaderboardCard(" in details_source
+    assert "contest.swiss_stage_prediction" in details_source
 
 
 def test_tma_keeps_supermoderator_role_management_separate() -> None:

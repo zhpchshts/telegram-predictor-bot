@@ -419,6 +419,19 @@ def _event_team_ids(events: list[dict[str, object]]) -> set[int]:
                 team = state.get(key)
                 if isinstance(team, dict) and _is_integer(team.get("id")):
                     team_ids.add(int(team["id"]))
+            candidate_teams = state.get("teams")
+            if isinstance(candidate_teams, list):
+                for team in candidate_teams:
+                    if isinstance(team, dict) and _is_integer(team.get("id")):
+                        team_ids.add(int(team["id"]))
+            actual_result = state.get("actual_result")
+            if isinstance(actual_result, dict):
+                for key in ("direct_team_ids", "elimination_team_ids"):
+                    values = actual_result.get(key)
+                    if isinstance(values, list):
+                        team_ids.update(
+                            int(value) for value in values if _is_integer(value)
+                        )
     return team_ids
 
 
@@ -493,6 +506,13 @@ def _build_entity(
             "type": entity_type,
             "display_name": display_name,
             "is_deleted": event["event_type"] == AuditEventType.MATCH_DELETED.value,
+        }
+    if entity_type == AuditEntityType.SWISS_STAGE_PREDICTION.value:
+        return {
+            "id": entity_id,
+            "type": entity_type,
+            "display_name": "Итоги швейцарского этапа",
+            "is_deleted": False,
         }
     target_display = _user_display_name(target_user, target_user_id)
     return {

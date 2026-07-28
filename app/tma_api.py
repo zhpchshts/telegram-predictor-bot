@@ -40,6 +40,8 @@ from app.contest_service import (
     MatchResultUnavailableError,
     MatchUpdateUnavailableError,
     PredictionUnavailableError,
+    SwissStagePredictionSettingsLockedError,
+    SwissStageResultUnavailableError,
     complete_contest,
     create_match,
     create_world_cup_2026_contest,
@@ -54,6 +56,9 @@ from app.contest_service import (
     save_match_prediction,
     save_match_prediction_publication_settings,
     save_match_result,
+    save_swiss_stage_prediction,
+    save_swiss_stage_prediction_settings,
+    save_swiss_stage_result,
     update_match_start,
 )
 from app.tma_context import TmaContext, TmaContextError, build_tma_context
@@ -165,6 +170,19 @@ class SaveChampionPredictionRequest(BaseModel):
 
 class SaveContestChampionRequest(BaseModel):
     champion_team_id: SqliteInteger
+
+
+class SaveSwissStagePredictionSettingsRequest(BaseModel):
+    enabled: bool
+    deadline_at: str | None = None
+    direct_qualifier_count: SqliteInteger = 4
+    elimination_qualifier_count: SqliteInteger = 4
+    team_names: list[str] = Field(default_factory=list)
+
+
+class SaveSwissStageSelectionRequest(BaseModel):
+    direct_team_ids: list[SqliteInteger]
+    elimination_team_ids: list[SqliteInteger]
 
 
 class ResolveRoleTargetRequest(BaseModel):
@@ -1253,6 +1271,174 @@ async def save_tma_champion_prediction_settings(
     )
 
 
+@router.put("/contests/{contest_id}/swiss-stage-prediction/settings")
+async def save_tma_swiss_stage_prediction_settings(
+    contest_id: SqliteInteger,
+    payload: SaveSwissStagePredictionSettingsRequest,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
+) -> JSONResponse:
+    settings = load_settings()
+    try:
+        save_swiss_stage_prediction_settings(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            enabled=payload.enabled,
+            deadline_at=payload.deadline_at,
+            direct_qualifier_count=payload.direct_qualifier_count,
+            elimination_qualifier_count=payload.elimination_qualifier_count,
+            team_names=payload.team_names,
+            audit_actor=_audit_actor(context.context, context.access),
+        )
+        contest = get_contest_details(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            now_utc=_utc_now(),
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (
+        ContestCompletedError,
+        SwissStagePredictionSettingsLockedError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        content={
+            "swiss_stage_prediction": _serialize_swiss_stage_prediction(
+                contest.swiss_stage_prediction
+            )
+        },
+    )
+
+
+@router.put("/contests/{contest_id}/swiss-stage-prediction")
+async def save_tma_swiss_stage_prediction(
+    contest_id: SqliteInteger,
+    payload: SaveSwissStageSelectionRequest,
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> JSONResponse:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+    try:
+        save_swiss_stage_prediction(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            direct_team_ids=payload.direct_team_ids,
+            elimination_team_ids=payload.elimination_team_ids,
+            now_utc=_utc_now(),
+        )
+        contest = get_contest_details(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            now_utc=_utc_now(),
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (ContestCompletedError, PredictionUnavailableError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        content={
+            "swiss_stage_prediction": _serialize_swiss_stage_prediction(
+                contest.swiss_stage_prediction
+            )
+        },
+    )
+
+
+@router.put("/contests/{contest_id}/swiss-stage-result")
+async def save_tma_swiss_stage_result(
+    contest_id: SqliteInteger,
+    payload: SaveSwissStageSelectionRequest,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
+) -> JSONResponse:
+    settings = load_settings()
+    try:
+        save_swiss_stage_result(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            direct_team_ids=payload.direct_team_ids,
+            elimination_team_ids=payload.elimination_team_ids,
+            audit_actor=_audit_actor(context.context, context.access),
+            now_utc=_utc_now(),
+        )
+        contest = get_contest_details(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            now_utc=_utc_now(),
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (
+        ContestCompletedError,
+        SwissStageResultUnavailableError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        content={
+            "swiss_stage_prediction": _serialize_swiss_stage_prediction(
+                contest.swiss_stage_prediction
+            )
+        },
+    )
+
+
 @router.put("/contests/{contest_id}/champion-prediction")
 async def save_tma_champion_prediction(
     contest_id: SqliteInteger,
@@ -1495,7 +1681,7 @@ def _serialize_management_contest(
 
 
 def _serialize_contest_details(contest) -> dict[str, object]:
-    return {
+    result = {
         "id": contest.id,
         "name": contest.name,
         "slug": contest.slug,
@@ -1512,6 +1698,18 @@ def _serialize_contest_details(contest) -> dict[str, object]:
         ],
         "matches": [_serialize_match(match) for match in contest.matches],
     }
+    if (
+        contest.swiss_stage_prediction.is_enabled
+        or contest.swiss_stage_prediction.deadline_at is not None
+        or contest.swiss_stage_prediction.candidates
+        or contest.swiss_stage_prediction.settings_locked
+        or contest.swiss_stage_prediction.direct_qualifier_count != 4
+        or contest.swiss_stage_prediction.elimination_qualifier_count != 4
+    ):
+        result["swiss_stage_prediction"] = _serialize_swiss_stage_prediction(
+            contest.swiss_stage_prediction
+        )
+    return result
 
 
 def _serialize_match_prediction_publication(
@@ -1553,8 +1751,59 @@ def _serialize_team_summary(team) -> dict[str, object]:
     }
 
 
-def _serialize_leaderboard_entry(entry) -> dict[str, object]:
+def _serialize_swiss_stage_selection(selection) -> dict[str, object]:
     return {
+        "direct_teams": [
+            _serialize_team_summary(team) for team in selection.direct_teams
+        ],
+        "elimination_teams": [
+            _serialize_team_summary(team) for team in selection.elimination_teams
+        ],
+    }
+
+
+def _serialize_swiss_stage_award(award) -> dict[str, object]:
+    return {
+        "team": _serialize_team_summary(award.team),
+        "predicted_category": award.predicted_category,
+        "actual_category": award.actual_category,
+        "points": award.points,
+    }
+
+
+def _serialize_swiss_stage_prediction(swiss_stage_prediction) -> dict[str, object]:
+    return {
+        "is_enabled": swiss_stage_prediction.is_enabled,
+        "deadline_at": swiss_stage_prediction.deadline_at,
+        "direct_qualifier_count": (swiss_stage_prediction.direct_qualifier_count),
+        "elimination_qualifier_count": (
+            swiss_stage_prediction.elimination_qualifier_count
+        ),
+        "candidates": [
+            _serialize_team_summary(team) for team in swiss_stage_prediction.candidates
+        ],
+        "prediction": (
+            _serialize_swiss_stage_selection(swiss_stage_prediction.prediction)
+            if swiss_stage_prediction.prediction is not None
+            else None
+        ),
+        "actual_result": (
+            _serialize_swiss_stage_selection(swiss_stage_prediction.actual_result)
+            if swiss_stage_prediction.actual_result is not None
+            else None
+        ),
+        "is_open": swiss_stage_prediction.is_open,
+        "settings_locked": swiss_stage_prediction.settings_locked,
+        "awarded_points": swiss_stage_prediction.awarded_points,
+        "awards": [
+            _serialize_swiss_stage_award(award)
+            for award in swiss_stage_prediction.awards
+        ],
+    }
+
+
+def _serialize_leaderboard_entry(entry) -> dict[str, object]:
+    result = {
         "place": entry.place,
         "participant_name": entry.participant_name,
         "total_points": entry.total_points,
@@ -1572,6 +1821,19 @@ def _serialize_leaderboard_entry(entry) -> dict[str, object]:
             else None
         ),
     }
+    if (
+        entry.swiss_stage_prediction_count
+        or entry.swiss_stage_prediction_history is not None
+    ):
+        result["swiss_stage_prediction_count"] = entry.swiss_stage_prediction_count
+        result["swiss_stage_prediction_history"] = (
+            _serialize_leaderboard_swiss_stage_prediction_history(
+                entry.swiss_stage_prediction_history,
+            )
+            if entry.swiss_stage_prediction_history is not None
+            else None
+        )
+    return result
 
 
 def _serialize_leaderboard_champion_prediction_history(history) -> dict[str, object]:
@@ -1583,6 +1845,21 @@ def _serialize_leaderboard_champion_prediction_history(history) -> dict[str, obj
             else None
         ),
         "awarded_points": history.awarded_points,
+    }
+
+
+def _serialize_leaderboard_swiss_stage_prediction_history(
+    history,
+) -> dict[str, object]:
+    return {
+        "prediction": _serialize_swiss_stage_selection(history.prediction),
+        "actual_result": (
+            _serialize_swiss_stage_selection(history.actual_result)
+            if history.actual_result is not None
+            else None
+        ),
+        "awarded_points": history.awarded_points,
+        "awards": [_serialize_swiss_stage_award(award) for award in history.awards],
     }
 
 

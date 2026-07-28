@@ -1610,6 +1610,18 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
         ): "contest_management",
         (
             "PUT",
+            "/api/tma/contests/{contest_id}/swiss-stage-prediction/settings",
+        ): "contest_management",
+        (
+            "PUT",
+            "/api/tma/contests/{contest_id}/swiss-stage-prediction",
+        ): "prediction",
+        (
+            "PUT",
+            "/api/tma/contests/{contest_id}/swiss-stage-result",
+        ): "contest_management",
+        (
+            "PUT",
             "/api/tma/contests/{contest_id}/champion-prediction",
         ): "prediction",
         (

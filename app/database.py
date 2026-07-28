@@ -239,6 +239,70 @@ CREATE TABLE IF NOT EXISTS champion_predictions (
   UNIQUE (contest_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS swiss_stage_prediction_settings (
+    contest_id INTEGER PRIMARY KEY REFERENCES contests(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    deadline_at TEXT,
+    direct_qualifier_count INTEGER NOT NULL DEFAULT 4
+        CHECK (direct_qualifier_count > 0),
+    elimination_qualifier_count INTEGER NOT NULL DEFAULT 4
+        CHECK (elimination_qualifier_count > 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS swiss_stage_prediction_candidates (
+    contest_id INTEGER NOT NULL
+        REFERENCES swiss_stage_prediction_settings(contest_id) ON DELETE CASCADE,
+    team_id INTEGER NOT NULL REFERENCES teams(id),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    PRIMARY KEY (contest_id, team_id),
+    UNIQUE (contest_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS swiss_stage_predictions (
+    id INTEGER PRIMARY KEY,
+    contest_id INTEGER NOT NULL
+        REFERENCES swiss_stage_prediction_settings(contest_id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (contest_id, user_id),
+    UNIQUE (id, contest_id)
+);
+
+CREATE TABLE IF NOT EXISTS swiss_stage_prediction_selections (
+    prediction_id INTEGER NOT NULL,
+    contest_id INTEGER NOT NULL,
+    team_id INTEGER NOT NULL,
+    category TEXT NOT NULL CHECK (category IN ('direct', 'elimination')),
+    PRIMARY KEY (prediction_id, team_id),
+    FOREIGN KEY (prediction_id, contest_id)
+        REFERENCES swiss_stage_predictions(id, contest_id) ON DELETE CASCADE,
+    FOREIGN KEY (contest_id, team_id)
+        REFERENCES swiss_stage_prediction_candidates(contest_id, team_id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS swiss_stage_results (
+    contest_id INTEGER PRIMARY KEY
+        REFERENCES swiss_stage_prediction_settings(contest_id) ON DELETE CASCADE,
+    recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS swiss_stage_result_selections (
+    contest_id INTEGER NOT NULL,
+    team_id INTEGER NOT NULL,
+    category TEXT NOT NULL CHECK (category IN ('direct', 'elimination')),
+    PRIMARY KEY (contest_id, team_id),
+    FOREIGN KEY (contest_id)
+        REFERENCES swiss_stage_results(contest_id) ON DELETE CASCADE,
+    FOREIGN KEY (contest_id, team_id)
+        REFERENCES swiss_stage_prediction_candidates(contest_id, team_id)
+        ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS match_prediction_scores (
     id INTEGER PRIMARY KEY,
     match_prediction_id INTEGER NOT NULL REFERENCES match_predictions(id)
@@ -390,6 +454,12 @@ CREATE INDEX IF NOT EXISTS idx_champion_predictions_contest_id
 
 CREATE INDEX IF NOT EXISTS idx_champion_predictions_user_id
   ON champion_predictions(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_swiss_stage_predictions_user_id
+    ON swiss_stage_predictions(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_swiss_stage_prediction_selections_contest
+    ON swiss_stage_prediction_selections(contest_id);
 
 CREATE INDEX IF NOT EXISTS idx_event_log_contest_id
     ON event_log(contest_id);

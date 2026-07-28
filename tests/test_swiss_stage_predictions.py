@@ -1,0 +1,575 @@
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+from threading import Barrier
+
+import pytest
+
+from app.audit_service import AuditActor, AuditActorRole
+from app.contest_service import (
+    ContestCompletionUnavailableError,
+    PredictionUnavailableError,
+    SwissStagePredictionSettingsLockedError,
+    complete_contest,
+    create_world_cup_2026_contest,
+    get_contest_details,
+    save_swiss_stage_prediction,
+    save_swiss_stage_prediction_settings,
+    save_swiss_stage_result,
+)
+from app.database import database_connection, initialize_database
+
+
+CHAT_ID = -1001234567890
+ADMIN_ID = 101
+ALICE_ID = 202
+OPEN_TIME = datetime(2029, 1, 1, tzinfo=timezone.utc)
+CLOSED_TIME = datetime(2030, 1, 2, tzinfo=timezone.utc)
+DEADLINE = "2030-01-01T12:00:00Z"
+AUDIT_ACTOR = AuditActor(
+    telegram_chat_id=CHAT_ID,
+    telegram_user_id=ADMIN_ID,
+    role=AuditActorRole.TELEGRAM_ADMIN,
+)
+
+
+@pytest.fixture
+def database_path(tmp_path: Path) -> Path:
+    path = tmp_path / "predictor.db"
+    initialize_database(path)
+    return path
+
+
+def _create_contest(database_path: Path) -> int:
+    return create_world_cup_2026_contest(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        chat_title="Тестовый чат",
+        telegram_user_id=ADMIN_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        contest_name="Швейцарский этап",
+        idempotency_key="create-swiss-contest",
+        audit_actor=AUDIT_ACTOR,
+    ).contest.id
+
+
+def _configure(
+    database_path: Path,
+    *,
+    contest_id: int,
+    team_names: list[str] | None = None,
+    direct_count: int = 2,
+    elimination_count: int = 2,
+) -> dict[str, int]:
+    names = team_names or ["Альфа", "Бета", "Гамма", "Дельта", "Эпсилон"]
+    save_swiss_stage_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        enabled=True,
+        deadline_at=DEADLINE,
+        direct_qualifier_count=direct_count,
+        elimination_qualifier_count=elimination_count,
+        team_names=names,
+        audit_actor=AUDIT_ACTOR,
+    )
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        now_utc=OPEN_TIME,
+    )
+    return {team.name: team.id for team in details.swiss_stage_prediction.candidates}
+
+
+def _save_alice_prediction(
+    database_path: Path,
+    *,
+    contest_id: int,
+    teams: dict[str, int],
+) -> None:
+    save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=[teams["Альфа"], teams["Бета"]],
+        elimination_team_ids=[teams["Гамма"], teams["Дельта"]],
+        now_utc=OPEN_TIME,
+    )
+
+
+def test_swiss_stage_settings_create_candidates_without_matches_and_are_audited(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    teams = _configure(database_path, contest_id=contest_id)
+
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        now_utc=OPEN_TIME,
+    )
+    prediction = details.swiss_stage_prediction
+    assert prediction.is_enabled is True
+    assert prediction.is_open is True
+    assert prediction.direct_qualifier_count == 2
+    assert prediction.elimination_qualifier_count == 2
+    assert {team.name for team in prediction.candidates} == set(teams)
+    assert details.matches == ()
+
+    with database_connection(database_path) as connection:
+        audit_row = connection.execute(
+            """
+            SELECT event_type, entity_type, before_state, after_state
+            FROM audit_events
+            WHERE contest_id = ?
+              AND event_type = 'swiss_stage_settings_updated'
+            """,
+            (contest_id,),
+        ).fetchone()
+    assert audit_row is not None
+    assert audit_row["entity_type"] == "swiss_stage_prediction"
+    assert audit_row["before_state"] is None
+    assert '"direct_qualifier_count":2' in audit_row["after_state"]
+
+
+@pytest.mark.parametrize(
+    ("team_names", "direct_count", "elimination_count", "message"),
+    [
+        ([], 1, 1, "Добавьте хотя бы одну команду"),
+        (["А", " а "], 1, 1, "не должна повторяться"),
+        (["А", "Б"], 0, 1, "положительным целым"),
+        (["А", "Б"], 2, 1, "не может превышать"),
+    ],
+)
+def test_swiss_stage_settings_validate_candidates_and_limits(
+    database_path: Path,
+    team_names: list[str],
+    direct_count: int,
+    elimination_count: int,
+    message: str,
+) -> None:
+    contest_id = _create_contest(database_path)
+    with pytest.raises(ValueError, match=message):
+        save_swiss_stage_prediction_settings(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            enabled=True,
+            deadline_at=DEADLINE,
+            direct_qualifier_count=direct_count,
+            elimination_qualifier_count=elimination_count,
+            team_names=team_names,
+            audit_actor=AUDIT_ACTOR,
+        )
+
+
+def test_swiss_stage_prediction_is_atomic_replace_and_locks_settings(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    teams = _configure(database_path, contest_id=contest_id)
+    _save_alice_prediction(database_path, contest_id=contest_id, teams=teams)
+
+    replacement = save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=[teams["Гамма"], teams["Дельта"]],
+        elimination_team_ids=[teams["Альфа"], teams["Эпсилон"]],
+        now_utc=OPEN_TIME,
+    )
+    assert [team.name for team in replacement.direct_teams] == [
+        "Гамма",
+        "Дельта",
+    ]
+    with database_connection(database_path) as connection:
+        prediction_count = connection.execute(
+            "SELECT COUNT(*) FROM swiss_stage_predictions"
+        ).fetchone()[0]
+        selection_count = connection.execute(
+            "SELECT COUNT(*) FROM swiss_stage_prediction_selections"
+        ).fetchone()[0]
+    assert prediction_count == 1
+    assert selection_count == 4
+
+    with pytest.raises(SwissStagePredictionSettingsLockedError):
+        save_swiss_stage_prediction_settings(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            enabled=False,
+            deadline_at=None,
+            direct_qualifier_count=2,
+            elimination_qualifier_count=2,
+            team_names=[],
+            audit_actor=AUDIT_ACTOR,
+        )
+
+
+@pytest.mark.parametrize(
+    ("direct_ids", "elimination_ids", "message"),
+    [
+        (["Альфа"], ["Гамма", "Дельта"], "ровно 2"),
+        (["Альфа", "Альфа"], ["Гамма", "Дельта"], "не должна повторяться"),
+        (["Альфа", "Бета"], ["Бета", "Дельта"], "обеих категориях"),
+    ],
+)
+def test_swiss_stage_prediction_validates_full_selection(
+    database_path: Path,
+    direct_ids: list[str],
+    elimination_ids: list[str],
+    message: str,
+) -> None:
+    contest_id = _create_contest(database_path)
+    teams = _configure(database_path, contest_id=contest_id)
+    with pytest.raises(ValueError, match=message):
+        save_swiss_stage_prediction(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=ALICE_ID,
+            first_name="Алиса",
+            last_name=None,
+            username="alice",
+            direct_team_ids=[teams[name] for name in direct_ids],
+            elimination_team_ids=[teams[name] for name in elimination_ids],
+            now_utc=OPEN_TIME,
+        )
+
+
+def test_swiss_stage_scoring_history_and_correction_recalculate_on_read(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    teams = _configure(database_path, contest_id=contest_id)
+    _save_alice_prediction(database_path, contest_id=contest_id, teams=teams)
+
+    before_deadline = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        now_utc=OPEN_TIME,
+    )
+    assert len(before_deadline.leaderboard) == 1
+    assert before_deadline.leaderboard[0].total_points == 0
+    assert before_deadline.leaderboard[0].swiss_stage_prediction_count == 1
+    assert before_deadline.leaderboard[0].swiss_stage_prediction_history is None
+
+    after_deadline = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        now_utc=CLOSED_TIME,
+    )
+    history_without_result = after_deadline.leaderboard[
+        0
+    ].swiss_stage_prediction_history
+    assert history_without_result is not None
+    assert history_without_result.awarded_points is None
+
+    save_swiss_stage_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        direct_team_ids=[teams["Альфа"], teams["Гамма"]],
+        elimination_team_ids=[teams["Бета"], teams["Эпсилон"]],
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_TIME,
+    )
+    scored = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=CLOSED_TIME,
+    )
+    assert scored.leaderboard[0].total_points == 4
+    assert scored.swiss_stage_prediction.awarded_points == 4
+    assert [
+        (award.team.name, award.points)
+        for award in scored.swiss_stage_prediction.awards
+    ] == [
+        ("Альфа", 2),
+        ("Бета", 1),
+        ("Гамма", 1),
+        ("Дельта", 0),
+    ]
+
+    with database_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE swiss_stage_results
+            SET updated_at = '2000-01-01T00:00:00Z'
+            WHERE contest_id = ?
+            """,
+            (contest_id,),
+        )
+    save_swiss_stage_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        direct_team_ids=[teams["Гамма"], teams["Альфа"]],
+        elimination_team_ids=[teams["Эпсилон"], teams["Бета"]],
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_TIME,
+    )
+    with database_connection(database_path) as connection:
+        unchanged_result_row = connection.execute(
+            """
+            SELECT updated_at
+            FROM swiss_stage_results
+            WHERE contest_id = ?
+            """,
+            (contest_id,),
+        ).fetchone()
+        unchanged_audit_rows = connection.execute(
+            """
+            SELECT event_type, COUNT(*) AS event_count
+            FROM audit_events
+            WHERE contest_id = ?
+              AND event_type IN (
+                  'swiss_stage_result_set',
+                  'swiss_stage_result_changed'
+              )
+            GROUP BY event_type
+            """,
+            (contest_id,),
+        ).fetchall()
+    assert unchanged_result_row["updated_at"] == "2000-01-01T00:00:00Z"
+    assert {
+        row["event_type"]: int(row["event_count"]) for row in unchanged_audit_rows
+    } == {"swiss_stage_result_set": 1}
+
+    save_swiss_stage_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        direct_team_ids=[teams["Бета"], teams["Дельта"]],
+        elimination_team_ids=[teams["Альфа"], teams["Гамма"]],
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_TIME,
+    )
+    corrected = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        now_utc=CLOSED_TIME,
+    )
+    assert corrected.leaderboard[0].total_points == 6
+    with database_connection(database_path) as connection:
+        changed_audit_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM audit_events
+            WHERE contest_id = ?
+              AND event_type = 'swiss_stage_result_changed'
+            """,
+            (contest_id,),
+        ).fetchone()[0]
+    assert changed_audit_count == 1
+
+
+def test_swiss_stage_exact_four_plus_four_awards_sixteen_points(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    names = [f"Команда {number}" for number in range(1, 9)]
+    teams = _configure(
+        database_path,
+        contest_id=contest_id,
+        team_names=names,
+        direct_count=4,
+        elimination_count=4,
+    )
+    direct_ids = [teams[name] for name in names[:4]]
+    elimination_ids = [teams[name] for name in names[4:]]
+    save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=direct_ids,
+        elimination_team_ids=elimination_ids,
+        now_utc=OPEN_TIME,
+    )
+    save_swiss_stage_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        direct_team_ids=direct_ids,
+        elimination_team_ids=elimination_ids,
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_TIME,
+    )
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        now_utc=CLOSED_TIME,
+    )
+    assert details.leaderboard[0].total_points == 16
+
+
+def test_swiss_stage_deadline_completion_and_cascade_rules(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    teams = _configure(database_path, contest_id=contest_id)
+    _save_alice_prediction(database_path, contest_id=contest_id, teams=teams)
+
+    with pytest.raises(PredictionUnavailableError, match="уже закрыт"):
+        save_swiss_stage_prediction(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=ALICE_ID,
+            first_name="Алиса",
+            last_name=None,
+            username="alice",
+            direct_team_ids=[teams["Альфа"], teams["Бета"]],
+            elimination_team_ids=[teams["Гамма"], teams["Дельта"]],
+            now_utc=CLOSED_TIME,
+        )
+    with pytest.raises(
+        ContestCompletionUnavailableError,
+        match="фактические итоги",
+    ):
+        complete_contest(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=ADMIN_ID,
+            first_name="Администратор",
+            last_name=None,
+            username="admin",
+            audit_actor=AUDIT_ACTOR,
+            now_utc=CLOSED_TIME,
+        )
+
+    save_swiss_stage_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        direct_team_ids=[teams["Альфа"], teams["Бета"]],
+        elimination_team_ids=[teams["Гамма"], teams["Дельта"]],
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_TIME,
+    )
+    complete_contest(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ADMIN_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_TIME,
+    )
+
+    with database_connection(database_path) as connection:
+        connection.execute("DELETE FROM contests WHERE id = ?", (contest_id,))
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM swiss_stage_predictions"
+            ).fetchone()[0]
+            == 0
+        )
+        assert connection.execute("SELECT COUNT(*) FROM teams").fetchone()[0] == len(
+            teams
+        )
+
+
+def test_swiss_stage_schema_reinitialization_preserves_data(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    teams = _configure(database_path, contest_id=contest_id)
+    _save_alice_prediction(database_path, contest_id=contest_id, teams=teams)
+
+    initialize_database(database_path)
+    initialize_database(database_path)
+
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=OPEN_TIME,
+    )
+    assert details.swiss_stage_prediction.prediction is not None
+    assert len(details.swiss_stage_prediction.prediction.direct_teams) == 2
+
+
+def test_first_swiss_prediction_and_disabling_settings_are_serialized(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    teams = _configure(database_path, contest_id=contest_id)
+    barrier = Barrier(2)
+
+    def save_prediction() -> str:
+        barrier.wait()
+        try:
+            _save_alice_prediction(
+                database_path,
+                contest_id=contest_id,
+                teams=teams,
+            )
+        except ValueError:
+            return "rejected"
+        return "saved"
+
+    def disable_settings() -> str:
+        barrier.wait()
+        try:
+            save_swiss_stage_prediction_settings(
+                database_path=database_path,
+                telegram_chat_id=CHAT_ID,
+                contest_id=contest_id,
+                enabled=False,
+                deadline_at=None,
+                direct_qualifier_count=2,
+                elimination_qualifier_count=2,
+                team_names=[],
+                audit_actor=AUDIT_ACTOR,
+            )
+        except SwissStagePredictionSettingsLockedError:
+            return "locked"
+        return "disabled"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        prediction_result = executor.submit(save_prediction)
+        settings_result = executor.submit(disable_settings)
+        outcomes = {prediction_result.result(), settings_result.result()}
+
+    assert outcomes in ({"saved", "locked"}, {"rejected", "disabled"})
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=OPEN_TIME,
+    )
+    if details.swiss_stage_prediction.is_enabled:
+        assert details.swiss_stage_prediction.prediction is not None
+        assert details.swiss_stage_prediction.settings_locked is True
+    else:
+        assert details.swiss_stage_prediction.prediction is None

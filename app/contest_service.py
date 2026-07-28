@@ -85,6 +85,14 @@ class ChampionPredictionSettingsLockedError(ValueError):
     """Raised when champion prediction settings are locked by a saved result."""
 
 
+class SwissStagePredictionSettingsLockedError(ValueError):
+    """Raised when Swiss-stage settings are locked by predictions or a result."""
+
+
+class SwissStageResultUnavailableError(ValueError):
+    """Raised when the Swiss-stage result cannot be saved yet."""
+
+
 @dataclass(frozen=True, slots=True)
 class ActiveContestSummary:
     id: int
@@ -156,6 +164,46 @@ class ChampionPredictionHistory:
     awarded_points: int | None
 
 
+SwissStageCategory = Literal["direct", "elimination"]
+
+
+@dataclass(frozen=True, slots=True)
+class SwissStageSelection:
+    direct_teams: tuple[TeamSummary, ...]
+    elimination_teams: tuple[TeamSummary, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SwissStageTeamAward:
+    team: TeamSummary
+    predicted_category: SwissStageCategory
+    actual_category: SwissStageCategory | None
+    points: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class SwissStagePredictionDetails:
+    is_enabled: bool
+    deadline_at: str | None
+    direct_qualifier_count: int
+    elimination_qualifier_count: int
+    candidates: tuple[TeamSummary, ...]
+    prediction: SwissStageSelection | None
+    actual_result: SwissStageSelection | None
+    is_open: bool
+    settings_locked: bool
+    awarded_points: int | None
+    awards: tuple[SwissStageTeamAward, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SwissStagePredictionHistory:
+    prediction: SwissStageSelection
+    actual_result: SwissStageSelection | None
+    awarded_points: int | None
+    awards: tuple[SwissStageTeamAward, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class LeaderboardTiebreakMetrics:
     exact_score_count: int
@@ -190,10 +238,12 @@ class ContestLeaderboardEntry:
     total_points: int
     match_predictions_count: int
     champion_prediction_count: int
+    swiss_stage_prediction_count: int
     total_matches_count: int
     tiebreak_metrics: LeaderboardTiebreakMetrics
     prediction_history: tuple[MatchSummary, ...] = ()
     champion_prediction_history: ChampionPredictionHistory | None = None
+    swiss_stage_prediction_history: SwissStagePredictionHistory | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +270,7 @@ class ContestDetails:
     is_active: bool
     match_prediction_publication: MatchPredictionPublicationSettings
     champion_prediction: ChampionPredictionDetails
+    swiss_stage_prediction: SwissStagePredictionDetails
     leaderboard: tuple[ContestLeaderboardEntry, ...]
     matches: tuple[MatchSummary, ...]
 
@@ -385,6 +436,12 @@ def get_contest_details(
             telegram_user_id=telegram_user_id,
             now_utc=resolved_now_utc,
         )
+        swiss_stage_prediction = _get_swiss_stage_prediction_details(
+            connection,
+            contest_id=contest_id,
+            telegram_user_id=telegram_user_id,
+            now_utc=resolved_now_utc,
+        )
         match_prediction_publication = _get_match_prediction_publication_settings(
             connection,
             contest_id=contest_id,
@@ -420,6 +477,12 @@ def get_contest_details(
                 SELECT champion_predictions.user_id
                 FROM champion_predictions
                 WHERE champion_predictions.contest_id = ?
+
+                UNION
+
+                SELECT swiss_stage_predictions.user_id
+                FROM swiss_stage_predictions
+                WHERE swiss_stage_predictions.contest_id = ?
             ),
             score_points AS (
                 SELECT
@@ -467,6 +530,27 @@ def get_contest_details(
                     AND contests.champion_team_id IS NOT NULL
                     AND champion_predictions.predicted_team_id =
                     contests.champion_team_id
+
+                UNION ALL
+
+                SELECT
+                    swiss_stage_predictions.user_id,
+                    CASE
+                        WHEN swiss_stage_prediction_selections.category =
+                            swiss_stage_result_selections.category
+                        THEN 2
+                        ELSE 1
+                    END AS points
+                FROM swiss_stage_prediction_selections
+                JOIN swiss_stage_predictions
+                    ON swiss_stage_predictions.id =
+                    swiss_stage_prediction_selections.prediction_id
+                JOIN swiss_stage_result_selections
+                    ON swiss_stage_result_selections.contest_id =
+                    swiss_stage_prediction_selections.contest_id
+                    AND swiss_stage_result_selections.team_id =
+                    swiss_stage_prediction_selections.team_id
+                WHERE swiss_stage_predictions.contest_id = ?
             ),
             score_totals AS (
                 SELECT
@@ -604,6 +688,19 @@ def get_contest_details(
                     ) THEN 1
                     ELSE 0
                 END AS champion_prediction_count,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM swiss_stage_predictions
+                        JOIN swiss_stage_prediction_settings
+                            ON swiss_stage_prediction_settings.contest_id =
+                            swiss_stage_predictions.contest_id
+                        WHERE swiss_stage_predictions.contest_id = ?
+                            AND swiss_stage_predictions.user_id = users.id
+                            AND swiss_stage_prediction_settings.enabled = 1
+                    ) THEN 1
+                    ELSE 0
+                END AS swiss_stage_prediction_count,
                 (
                     SELECT COUNT(*)
                     FROM matches
@@ -629,6 +726,9 @@ def get_contest_details(
             ORDER BY users.id ASC
             """,
             (
+                contest_id,
+                contest_id,
+                contest_id,
                 contest_id,
                 contest_id,
                 contest_id,
@@ -722,6 +822,12 @@ def get_contest_details(
             """,
             (contest_id,),
         ).fetchall()
+        leaderboard_swiss_stage_prediction_rows = (
+            _get_swiss_stage_prediction_history_rows(
+                connection,
+                contest_id=contest_id,
+            )
+        )
 
         return ContestDetails(
             id=int(contest_row["id"]),
@@ -731,6 +837,7 @@ def get_contest_details(
             is_active=bool(contest_row["is_active"]),
             match_prediction_publication=match_prediction_publication,
             champion_prediction=champion_prediction,
+            swiss_stage_prediction=swiss_stage_prediction,
             leaderboard=_contest_leaderboard_from_rows(
                 leaderboard_rows,
                 contest_slug=str(contest_row["slug"]),
@@ -743,6 +850,13 @@ def get_contest_details(
                         leaderboard_champion_prediction_rows,
                     )
                     if not champion_prediction.is_open
+                    else {}
+                ),
+                swiss_stage_prediction_history_by_user=(
+                    _leaderboard_swiss_stage_prediction_history_by_user(
+                        leaderboard_swiss_stage_prediction_rows,
+                    )
+                    if not swiss_stage_prediction.is_open
                     else {}
                 ),
             ),
@@ -817,6 +931,36 @@ def complete_contest(
             raise ContestCompletionUnavailableError(
                 "Сначала укажите фактического чемпиона."
             )
+
+        swiss_stage_row = _get_swiss_stage_configuration_row(
+            connection,
+            contest_id=contest_id,
+        )
+        if swiss_stage_row is not None and bool(swiss_stage_row["enabled"]):
+            if swiss_stage_row["deadline_at"] is None:
+                raise ContestCompletionUnavailableError(
+                    "Сначала укажите дедлайн прогноза на швейцарский этап."
+                )
+            if _is_swiss_stage_prediction_open(
+                str(swiss_stage_row["deadline_at"]),
+                now_utc=resolved_now_utc,
+            ):
+                raise ContestCompletionUnavailableError(
+                    "Конкурс можно завершить после закрытия прогнозов "
+                    "на швейцарский этап."
+                )
+            swiss_stage_result = connection.execute(
+                """
+                SELECT 1
+                FROM swiss_stage_results
+                WHERE contest_id = ?
+                """,
+                (contest_id,),
+            ).fetchone()
+            if swiss_stage_result is None:
+                raise ContestCompletionUnavailableError(
+                    "Сначала укажите фактические итоги швейцарского этапа."
+                )
 
         actor_user_id = _upsert_user(
             connection,
@@ -2299,6 +2443,376 @@ def save_contest_champion(
         return _team_summary_from_row(team_row)
 
 
+def save_swiss_stage_prediction_settings(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    enabled: bool,
+    deadline_at: str | None,
+    direct_qualifier_count: int,
+    elimination_qualifier_count: int,
+    team_names: list[str],
+    audit_actor: AuditActor,
+) -> None:
+    normalized_enabled = _normalize_swiss_stage_enabled(enabled)
+    normalized_direct_count = _normalize_swiss_stage_limit(
+        direct_qualifier_count,
+        field_name="Количество прямых проходов",
+    )
+    normalized_elimination_count = _normalize_swiss_stage_limit(
+        elimination_qualifier_count,
+        field_name="Количество проходов через элиминейшн-раунд",
+    )
+    normalized_team_names = _normalize_swiss_stage_team_names(team_names)
+    if normalized_enabled:
+        if deadline_at is None:
+            raise ValueError("Укажите, когда прогноз на швейцарский этап закрывается.")
+        normalized_deadline_at = _normalize_swiss_stage_deadline_at(deadline_at)
+        if not normalized_team_names:
+            raise ValueError("Добавьте хотя бы одну команду швейцарского этапа.")
+        if normalized_direct_count + normalized_elimination_count > len(
+            normalized_team_names
+        ):
+            raise ValueError(
+                "Сумма лимитов прохода не может превышать количество команд."
+            )
+    else:
+        normalized_deadline_at = (
+            _normalize_swiss_stage_deadline_at(deadline_at)
+            if deadline_at is not None
+            else None
+        )
+        if normalized_team_names and (
+            normalized_direct_count + normalized_elimination_count
+            > len(normalized_team_names)
+        ):
+            raise ValueError(
+                "Сумма лимитов прохода не может превышать количество команд."
+            )
+
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        if _are_swiss_stage_settings_locked(connection, contest_id=contest_id):
+            raise SwissStagePredictionSettingsLockedError(
+                "Настройки прогноза на швейцарский этап нельзя изменить "
+                "после сохранения первого прогноза или результата."
+            )
+
+        before_state = _swiss_stage_snapshot(connection, contest_id=contest_id)
+        connection.execute(
+            """
+            INSERT INTO swiss_stage_prediction_settings (
+                contest_id,
+                enabled,
+                deadline_at,
+                direct_qualifier_count,
+                elimination_qualifier_count
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(contest_id) DO UPDATE SET
+                enabled = excluded.enabled,
+                deadline_at = excluded.deadline_at,
+                direct_qualifier_count = excluded.direct_qualifier_count,
+                elimination_qualifier_count =
+                    excluded.elimination_qualifier_count,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                contest_id,
+                int(normalized_enabled),
+                normalized_deadline_at,
+                normalized_direct_count,
+                normalized_elimination_count,
+            ),
+        )
+        connection.execute(
+            """
+            DELETE FROM swiss_stage_prediction_candidates
+            WHERE contest_id = ?
+            """,
+            (contest_id,),
+        )
+        for position, team_name in enumerate(normalized_team_names):
+            team_id, _ = _find_or_create_team(
+                connection,
+                team_name=team_name,
+            )
+            connection.execute(
+                """
+                INSERT INTO swiss_stage_prediction_candidates (
+                    contest_id,
+                    team_id,
+                    position
+                )
+                VALUES (?, ?, ?)
+                """,
+                (contest_id, team_id, position),
+            )
+
+        after_state = _swiss_stage_snapshot(connection, contest_id=contest_id)
+        if before_state != after_state:
+            _record_audit(
+                connection,
+                audit_actor=audit_actor,
+                telegram_chat_id=telegram_chat_id,
+                event_type=AuditEventType.SWISS_STAGE_SETTINGS_UPDATED,
+                entity_type=AuditEntityType.SWISS_STAGE_PREDICTION,
+                entity_id=contest_id,
+                contest_id=contest_id,
+                before_state=before_state,
+                after_state=after_state,
+            )
+
+
+def save_swiss_stage_prediction(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    direct_team_ids: list[int],
+    elimination_team_ids: list[int],
+    now_utc: datetime | None = None,
+) -> SwissStageSelection:
+    normalized_direct_ids, normalized_elimination_ids = (
+        _normalize_swiss_stage_team_id_sets(
+            direct_team_ids,
+            elimination_team_ids,
+        )
+    )
+    resolved_now_utc = _resolve_now_utc(now_utc)
+
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        configuration_row = _require_enabled_swiss_stage_configuration(
+            connection,
+            contest_id=contest_id,
+        )
+        deadline_at = configuration_row["deadline_at"]
+        if deadline_at is None:
+            raise PredictionUnavailableError(
+                "Для прогноза на швейцарский этап не задан дедлайн."
+            )
+        if not _is_swiss_stage_prediction_open(
+            str(deadline_at),
+            now_utc=resolved_now_utc,
+        ):
+            raise PredictionUnavailableError("Прогноз на швейцарский этап уже закрыт.")
+        _validate_swiss_stage_selection(
+            connection,
+            contest_id=contest_id,
+            direct_team_ids=normalized_direct_ids,
+            elimination_team_ids=normalized_elimination_ids,
+            direct_qualifier_count=int(configuration_row["direct_qualifier_count"]),
+            elimination_qualifier_count=int(
+                configuration_row["elimination_qualifier_count"]
+            ),
+        )
+
+        user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+        connection.execute(
+            """
+            INSERT INTO swiss_stage_predictions (contest_id, user_id)
+            VALUES (?, ?)
+            ON CONFLICT(contest_id, user_id) DO UPDATE SET
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (contest_id, user_id),
+        )
+        prediction_row = connection.execute(
+            """
+            SELECT id
+            FROM swiss_stage_predictions
+            WHERE contest_id = ? AND user_id = ?
+            """,
+            (contest_id, user_id),
+        ).fetchone()
+        if prediction_row is None:
+            raise RuntimeError("Не удалось сохранить прогноз на швейцарский этап.")
+        prediction_id = int(prediction_row["id"])
+        connection.execute(
+            """
+            DELETE FROM swiss_stage_prediction_selections
+            WHERE prediction_id = ?
+            """,
+            (prediction_id,),
+        )
+        _insert_swiss_stage_selections(
+            connection,
+            table_name="swiss_stage_prediction_selections",
+            owner_column="prediction_id",
+            owner_id=prediction_id,
+            contest_id=contest_id,
+            direct_team_ids=normalized_direct_ids,
+            elimination_team_ids=normalized_elimination_ids,
+        )
+        return _swiss_stage_selection_from_ids(
+            connection,
+            direct_team_ids=normalized_direct_ids,
+            elimination_team_ids=normalized_elimination_ids,
+        )
+
+
+def save_swiss_stage_result(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    direct_team_ids: list[int],
+    elimination_team_ids: list[int],
+    audit_actor: AuditActor,
+    now_utc: datetime | None = None,
+) -> SwissStageSelection:
+    normalized_direct_ids, normalized_elimination_ids = (
+        _normalize_swiss_stage_team_id_sets(
+            direct_team_ids,
+            elimination_team_ids,
+        )
+    )
+    resolved_now_utc = _resolve_now_utc(now_utc)
+
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        configuration_row = _require_enabled_swiss_stage_configuration(
+            connection,
+            contest_id=contest_id,
+            result_operation=True,
+        )
+        deadline_at = configuration_row["deadline_at"]
+        if deadline_at is None:
+            raise SwissStageResultUnavailableError(
+                "Для прогноза на швейцарский этап не задан дедлайн."
+            )
+        if _is_swiss_stage_prediction_open(
+            str(deadline_at),
+            now_utc=resolved_now_utc,
+        ):
+            raise SwissStageResultUnavailableError(
+                "Итоги швейцарского этапа можно указать после дедлайна."
+            )
+        _validate_swiss_stage_selection(
+            connection,
+            contest_id=contest_id,
+            direct_team_ids=normalized_direct_ids,
+            elimination_team_ids=normalized_elimination_ids,
+            direct_qualifier_count=int(configuration_row["direct_qualifier_count"]),
+            elimination_qualifier_count=int(
+                configuration_row["elimination_qualifier_count"]
+            ),
+        )
+
+        existing_result = connection.execute(
+            """
+            SELECT 1
+            FROM swiss_stage_results
+            WHERE contest_id = ?
+            """,
+            (contest_id,),
+        ).fetchone()
+        existing_selection_rows = connection.execute(
+            """
+            SELECT team_id, category
+            FROM swiss_stage_result_selections
+            WHERE contest_id = ?
+            ORDER BY category, team_id
+            """,
+            (contest_id,),
+        ).fetchall()
+        existing_direct_ids = tuple(
+            int(row["team_id"])
+            for row in existing_selection_rows
+            if row["category"] == "direct"
+        )
+        existing_elimination_ids = tuple(
+            int(row["team_id"])
+            for row in existing_selection_rows
+            if row["category"] == "elimination"
+        )
+        if (
+            existing_result is not None
+            and set(existing_direct_ids) == set(normalized_direct_ids)
+            and set(existing_elimination_ids) == set(normalized_elimination_ids)
+        ):
+            return _swiss_stage_selection_from_ids(
+                connection,
+                direct_team_ids=existing_direct_ids,
+                elimination_team_ids=existing_elimination_ids,
+            )
+
+        before_state = _swiss_stage_snapshot(connection, contest_id=contest_id)
+        connection.execute(
+            """
+            INSERT INTO swiss_stage_results (contest_id)
+            VALUES (?)
+            ON CONFLICT(contest_id) DO UPDATE SET
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (contest_id,),
+        )
+        connection.execute(
+            """
+            DELETE FROM swiss_stage_result_selections
+            WHERE contest_id = ?
+            """,
+            (contest_id,),
+        )
+        _insert_swiss_stage_selections(
+            connection,
+            table_name="swiss_stage_result_selections",
+            owner_column=None,
+            owner_id=None,
+            contest_id=contest_id,
+            direct_team_ids=normalized_direct_ids,
+            elimination_team_ids=normalized_elimination_ids,
+        )
+        after_state = _swiss_stage_snapshot(connection, contest_id=contest_id)
+        _record_audit(
+            connection,
+            audit_actor=audit_actor,
+            telegram_chat_id=telegram_chat_id,
+            event_type=(
+                AuditEventType.SWISS_STAGE_RESULT_SET
+                if existing_result is None
+                else AuditEventType.SWISS_STAGE_RESULT_CHANGED
+            ),
+            entity_type=AuditEntityType.SWISS_STAGE_PREDICTION,
+            entity_id=contest_id,
+            contest_id=contest_id,
+            before_state=before_state,
+            after_state=after_state,
+        )
+        return _swiss_stage_selection_from_ids(
+            connection,
+            direct_team_ids=normalized_direct_ids,
+            elimination_team_ids=normalized_elimination_ids,
+        )
+
+
 def create_world_cup_2026_contest(
     *,
     database_path: Path,
@@ -2883,6 +3397,126 @@ def _get_champion_prediction_details(
     )
 
 
+def _get_swiss_stage_prediction_details(
+    connection,
+    *,
+    contest_id: int,
+    telegram_user_id: int | None,
+    now_utc: datetime,
+) -> SwissStagePredictionDetails:
+    configuration_row = connection.execute(
+        """
+        SELECT
+            contests.is_active,
+            COALESCE(swiss_stage_prediction_settings.enabled, 0) AS enabled,
+            swiss_stage_prediction_settings.deadline_at,
+            COALESCE(
+                swiss_stage_prediction_settings.direct_qualifier_count,
+                4
+            ) AS direct_qualifier_count,
+            COALESCE(
+                swiss_stage_prediction_settings.elimination_qualifier_count,
+                4
+            ) AS elimination_qualifier_count
+        FROM contests
+        LEFT JOIN swiss_stage_prediction_settings
+            ON swiss_stage_prediction_settings.contest_id = contests.id
+        WHERE contests.id = ?
+        """,
+        (contest_id,),
+    ).fetchone()
+    if configuration_row is None:
+        raise RuntimeError("Не удалось найти настройки прогноза на швейцарский этап.")
+
+    candidates = tuple(
+        _team_summary_from_row(row)
+        for row in _get_swiss_stage_candidate_rows(
+            connection,
+            contest_id=contest_id,
+        )
+    )
+    prediction_rows = connection.execute(
+        """
+        SELECT
+            teams.id,
+            teams.name,
+            swiss_stage_prediction_selections.category
+        FROM swiss_stage_predictions
+        JOIN users
+            ON users.id = swiss_stage_predictions.user_id
+        JOIN swiss_stage_prediction_selections
+            ON swiss_stage_prediction_selections.prediction_id =
+            swiss_stage_predictions.id
+        JOIN teams
+            ON teams.id = swiss_stage_prediction_selections.team_id
+        WHERE swiss_stage_predictions.contest_id = ?
+            AND users.telegram_user_id = ?
+        ORDER BY
+            swiss_stage_prediction_selections.category,
+            teams.name COLLATE NOCASE,
+            teams.id
+        """,
+        (contest_id, telegram_user_id),
+    ).fetchall()
+    result_rows = connection.execute(
+        """
+        SELECT
+            teams.id,
+            teams.name,
+            swiss_stage_result_selections.category
+        FROM swiss_stage_result_selections
+        JOIN teams
+            ON teams.id = swiss_stage_result_selections.team_id
+        WHERE swiss_stage_result_selections.contest_id = ?
+        ORDER BY
+            swiss_stage_result_selections.category,
+            teams.name COLLATE NOCASE,
+            teams.id
+        """,
+        (contest_id,),
+    ).fetchall()
+    prediction = _swiss_stage_selection_from_rows(prediction_rows)
+    actual_result = _swiss_stage_selection_from_rows(result_rows)
+    awards = _swiss_stage_awards_from_rows(
+        prediction_rows,
+        result_rows=result_rows,
+    )
+    deadline_at = configuration_row["deadline_at"]
+    deadline_at_value = str(deadline_at) if deadline_at is not None else None
+    is_enabled = bool(configuration_row["enabled"])
+
+    return SwissStagePredictionDetails(
+        is_enabled=is_enabled,
+        deadline_at=deadline_at_value,
+        direct_qualifier_count=int(configuration_row["direct_qualifier_count"]),
+        elimination_qualifier_count=int(
+            configuration_row["elimination_qualifier_count"]
+        ),
+        candidates=candidates,
+        prediction=prediction,
+        actual_result=actual_result,
+        is_open=(
+            is_enabled
+            and bool(configuration_row["is_active"])
+            and deadline_at_value is not None
+            and _is_swiss_stage_prediction_open(
+                deadline_at_value,
+                now_utc=now_utc,
+            )
+        ),
+        settings_locked=_are_swiss_stage_settings_locked(
+            connection,
+            contest_id=contest_id,
+        ),
+        awarded_points=(
+            sum(award.points or 0 for award in awards)
+            if prediction is not None and actual_result is not None
+            else None
+        ),
+        awards=awards if actual_result is not None else (),
+    )
+
+
 def _get_match_prediction_publication_settings(
     connection,
     *,
@@ -2999,6 +3633,291 @@ def _get_champion_candidate_team_row(
     ).fetchone()
 
 
+def _get_swiss_stage_configuration_row(
+    connection,
+    *,
+    contest_id: int,
+):
+    return connection.execute(
+        """
+        SELECT
+            contest_id,
+            enabled,
+            deadline_at,
+            direct_qualifier_count,
+            elimination_qualifier_count
+        FROM swiss_stage_prediction_settings
+        WHERE contest_id = ?
+        """,
+        (contest_id,),
+    ).fetchone()
+
+
+def _require_enabled_swiss_stage_configuration(
+    connection,
+    *,
+    contest_id: int,
+    result_operation: bool = False,
+):
+    row = _get_swiss_stage_configuration_row(
+        connection,
+        contest_id=contest_id,
+    )
+    if row is None or not bool(row["enabled"]):
+        if result_operation:
+            raise SwissStageResultUnavailableError(
+                "Сначала включите прогноз на швейцарский этап."
+            )
+        raise PredictionUnavailableError(
+            "Прогноз на швейцарский этап в этом конкурсе выключен."
+        )
+    return row
+
+
+def _get_swiss_stage_candidate_rows(connection, *, contest_id: int):
+    return connection.execute(
+        """
+        SELECT teams.id, teams.name
+        FROM swiss_stage_prediction_candidates
+        JOIN teams ON teams.id = swiss_stage_prediction_candidates.team_id
+        WHERE swiss_stage_prediction_candidates.contest_id = ?
+        ORDER BY
+            swiss_stage_prediction_candidates.position,
+            teams.id
+        """,
+        (contest_id,),
+    ).fetchall()
+
+
+def _are_swiss_stage_settings_locked(connection, *, contest_id: int) -> bool:
+    row = connection.execute(
+        """
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM swiss_stage_predictions
+                WHERE contest_id = ?
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM swiss_stage_results
+                WHERE contest_id = ?
+            ) AS is_locked
+        """,
+        (contest_id, contest_id),
+    ).fetchone()
+    return bool(row["is_locked"]) if row is not None else False
+
+
+def _swiss_stage_snapshot(
+    connection,
+    *,
+    contest_id: int,
+) -> dict[str, object] | None:
+    configuration_row = _get_swiss_stage_configuration_row(
+        connection,
+        contest_id=contest_id,
+    )
+    if configuration_row is None:
+        return None
+    result_rows = connection.execute(
+        """
+        SELECT team_id, category
+        FROM swiss_stage_result_selections
+        WHERE contest_id = ?
+        ORDER BY category, team_id
+        """,
+        (contest_id,),
+    ).fetchall()
+    return {
+        "enabled": bool(configuration_row["enabled"]),
+        "deadline_at": configuration_row["deadline_at"],
+        "direct_qualifier_count": int(configuration_row["direct_qualifier_count"]),
+        "elimination_qualifier_count": int(
+            configuration_row["elimination_qualifier_count"]
+        ),
+        "teams": [
+            {"id": team.id, "name": team.name}
+            for team in (
+                _team_summary_from_row(row)
+                for row in _get_swiss_stage_candidate_rows(
+                    connection,
+                    contest_id=contest_id,
+                )
+            )
+        ],
+        "actual_result": {
+            "direct_team_ids": [
+                int(row["team_id"])
+                for row in result_rows
+                if row["category"] == "direct"
+            ],
+            "elimination_team_ids": [
+                int(row["team_id"])
+                for row in result_rows
+                if row["category"] == "elimination"
+            ],
+        }
+        if result_rows
+        else None,
+    }
+
+
+def _validate_swiss_stage_selection(
+    connection,
+    *,
+    contest_id: int,
+    direct_team_ids: tuple[int, ...],
+    elimination_team_ids: tuple[int, ...],
+    direct_qualifier_count: int,
+    elimination_qualifier_count: int,
+) -> None:
+    if len(direct_team_ids) != direct_qualifier_count:
+        raise ValueError(
+            f"Выберите ровно {direct_qualifier_count} команд для прямого прохода."
+        )
+    if len(elimination_team_ids) != elimination_qualifier_count:
+        raise ValueError(
+            "Выберите ровно "
+            f"{elimination_qualifier_count} команд для элиминейшн-раунда."
+        )
+    selected_ids = (*direct_team_ids, *elimination_team_ids)
+    placeholders = ", ".join("?" for _ in selected_ids)
+    candidate_count = connection.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM swiss_stage_prediction_candidates
+        WHERE contest_id = ?
+            AND team_id IN ({placeholders})
+        """,
+        (contest_id, *selected_ids),
+    ).fetchone()[0]
+    if int(candidate_count) != len(selected_ids):
+        raise ValueError(
+            "Все выбранные команды должны участвовать в швейцарском этапе."
+        )
+
+
+def _insert_swiss_stage_selections(
+    connection,
+    *,
+    table_name: str,
+    owner_column: str | None,
+    owner_id: int | None,
+    contest_id: int,
+    direct_team_ids: tuple[int, ...],
+    elimination_team_ids: tuple[int, ...],
+) -> None:
+    selections = (
+        *((team_id, "direct") for team_id in direct_team_ids),
+        *((team_id, "elimination") for team_id in elimination_team_ids),
+    )
+    if table_name == "swiss_stage_prediction_selections":
+        if owner_column != "prediction_id" or owner_id is None:
+            raise RuntimeError("Некорректная запись прогноза швейцарского этапа.")
+        connection.executemany(
+            """
+            INSERT INTO swiss_stage_prediction_selections (
+                prediction_id,
+                contest_id,
+                team_id,
+                category
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (owner_id, contest_id, team_id, category)
+                for team_id, category in selections
+            ],
+        )
+        return
+    if table_name != "swiss_stage_result_selections" or owner_column is not None:
+        raise RuntimeError("Некорректная запись результата швейцарского этапа.")
+    connection.executemany(
+        """
+        INSERT INTO swiss_stage_result_selections (
+            contest_id,
+            team_id,
+            category
+        )
+        VALUES (?, ?, ?)
+        """,
+        [(contest_id, team_id, category) for team_id, category in selections],
+    )
+
+
+def _swiss_stage_selection_from_ids(
+    connection,
+    *,
+    direct_team_ids: tuple[int, ...],
+    elimination_team_ids: tuple[int, ...],
+) -> SwissStageSelection:
+    selected_ids = (*direct_team_ids, *elimination_team_ids)
+    placeholders = ", ".join("?" for _ in selected_ids)
+    rows = connection.execute(
+        f"""
+        SELECT id, name
+        FROM teams
+        WHERE id IN ({placeholders})
+        """,
+        selected_ids,
+    ).fetchall()
+    teams_by_id = {int(row["id"]): _team_summary_from_row(row) for row in rows}
+    return SwissStageSelection(
+        direct_teams=tuple(teams_by_id[team_id] for team_id in direct_team_ids),
+        elimination_teams=tuple(
+            teams_by_id[team_id] for team_id in elimination_team_ids
+        ),
+    )
+
+
+def _swiss_stage_selection_from_rows(rows) -> SwissStageSelection | None:
+    if not rows:
+        return None
+    direct_teams: list[TeamSummary] = []
+    elimination_teams: list[TeamSummary] = []
+    for row in rows:
+        team = _team_summary_from_row(row)
+        if row["category"] == "direct":
+            direct_teams.append(team)
+        else:
+            elimination_teams.append(team)
+    return SwissStageSelection(
+        direct_teams=tuple(direct_teams),
+        elimination_teams=tuple(elimination_teams),
+    )
+
+
+def _swiss_stage_awards_from_rows(
+    prediction_rows,
+    *,
+    result_rows,
+) -> tuple[SwissStageTeamAward, ...]:
+    actual_categories = {int(row["id"]): str(row["category"]) for row in result_rows}
+    has_result = bool(result_rows)
+    awards: list[SwissStageTeamAward] = []
+    for row in prediction_rows:
+        predicted_category = str(row["category"])
+        actual_category = actual_categories.get(int(row["id"]))
+        points = None
+        if has_result:
+            if actual_category is None:
+                points = 0
+            elif actual_category == predicted_category:
+                points = 2
+            else:
+                points = 1
+        awards.append(
+            SwissStageTeamAward(
+                team=_team_summary_from_row(row),
+                predicted_category=predicted_category,
+                actual_category=actual_category,
+                points=points,
+            )
+        )
+    return tuple(awards)
+
+
 def _is_contest_completed(
     connection,
     *,
@@ -3106,6 +4025,118 @@ def _normalize_champion_team_id(
         raise ValueError(f"{field_name} должен быть идентификатором команды.")
 
     return value
+
+
+def _normalize_swiss_stage_enabled(value: bool) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(
+            "Настройка прогноза на швейцарский этап должна быть логическим значением."
+        )
+    return value
+
+
+def _normalize_swiss_stage_limit(value: int, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} должно быть положительным целым числом.")
+    return value
+
+
+def _normalize_swiss_stage_team_names(values: list[str]) -> tuple[str, ...]:
+    if not isinstance(values, list):
+        raise ValueError("Список команд должен быть массивом.")
+    normalized_names: list[str] = []
+    normalized_keys: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError("Название команды должно быть строкой.")
+        name = _normalize_team_name(
+            value,
+            field_name="Название команды",
+        )
+        key = name.casefold()
+        if key in normalized_keys:
+            raise ValueError("Команда не должна повторяться в списке.")
+        normalized_keys.add(key)
+        normalized_names.append(name)
+    return tuple(normalized_names)
+
+
+def _normalize_swiss_stage_team_id_sets(
+    direct_team_ids: list[int],
+    elimination_team_ids: list[int],
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    direct_ids = _normalize_swiss_stage_team_ids(
+        direct_team_ids,
+        field_name="Команды прямого прохода",
+    )
+    elimination_ids = _normalize_swiss_stage_team_ids(
+        elimination_team_ids,
+        field_name="Команды элиминейшн-раунда",
+    )
+    if set(direct_ids) & set(elimination_ids):
+        raise ValueError("Одна команда не может находиться в обеих категориях.")
+    return direct_ids, elimination_ids
+
+
+def _normalize_swiss_stage_team_ids(
+    values: list[int],
+    *,
+    field_name: str,
+) -> tuple[int, ...]:
+    if not isinstance(values, list):
+        raise ValueError(f"{field_name} должны быть массивом идентификаторов.")
+    normalized_ids: list[int] = []
+    seen_ids: set[int] = set()
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{field_name} должны содержать идентификаторы команд.")
+        if value in seen_ids:
+            raise ValueError("Команда не должна повторяться в одной категории.")
+        seen_ids.add(value)
+        normalized_ids.append(value)
+    return tuple(normalized_ids)
+
+
+def _normalize_swiss_stage_deadline_at(value: str) -> str:
+    normalized_value = value.strip()
+    if not normalized_value:
+        raise ValueError("Укажите, когда прогноз на швейцарский этап закрывается.")
+    try:
+        parsed_value = datetime.fromisoformat(normalized_value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(
+            "Некорректная дата и время закрытия прогноза на швейцарский этап."
+        ) from error
+    if parsed_value.tzinfo is None or parsed_value.utcoffset() is None:
+        raise ValueError(
+            "Дата и время закрытия прогноза на швейцарский этап должны "
+            "содержать часовой пояс."
+        )
+    return (
+        parsed_value.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _is_swiss_stage_prediction_open(
+    deadline_at: str,
+    *,
+    now_utc: datetime,
+) -> bool:
+    try:
+        deadline_utc = datetime.fromisoformat(deadline_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RuntimeError(
+            "У конкурса сохранён некорректный дедлайн прогноза на швейцарский этап."
+        ) from error
+    if deadline_utc.tzinfo is None or deadline_utc.utcoffset() is None:
+        raise RuntimeError(
+            "У конкурса сохранён дедлайн прогноза на швейцарский этап "
+            "без часового пояса."
+        )
+    return deadline_utc.astimezone(timezone.utc) > now_utc
 
 
 def _team_summary_from_row(row) -> TeamSummary:
@@ -3499,6 +4530,83 @@ def _leaderboard_champion_prediction_history_by_user(
     return history_by_user
 
 
+def _get_swiss_stage_prediction_history_rows(
+    connection,
+    *,
+    contest_id: int,
+):
+    prediction_rows = connection.execute(
+        """
+        SELECT
+            swiss_stage_predictions.user_id,
+            teams.id,
+            teams.name,
+            swiss_stage_prediction_selections.category
+        FROM swiss_stage_predictions
+        JOIN swiss_stage_prediction_selections
+            ON swiss_stage_prediction_selections.prediction_id =
+            swiss_stage_predictions.id
+        JOIN teams
+            ON teams.id = swiss_stage_prediction_selections.team_id
+        WHERE swiss_stage_predictions.contest_id = ?
+        ORDER BY
+            swiss_stage_predictions.user_id,
+            swiss_stage_prediction_selections.category,
+            teams.name COLLATE NOCASE,
+            teams.id
+        """,
+        (contest_id,),
+    ).fetchall()
+    result_rows = connection.execute(
+        """
+        SELECT
+            teams.id,
+            teams.name,
+            swiss_stage_result_selections.category
+        FROM swiss_stage_result_selections
+        JOIN teams
+            ON teams.id = swiss_stage_result_selections.team_id
+        WHERE swiss_stage_result_selections.contest_id = ?
+        ORDER BY
+            swiss_stage_result_selections.category,
+            teams.name COLLATE NOCASE,
+            teams.id
+        """,
+        (contest_id,),
+    ).fetchall()
+    return prediction_rows, result_rows
+
+
+def _leaderboard_swiss_stage_prediction_history_by_user(
+    rows,
+) -> dict[int, SwissStagePredictionHistory]:
+    prediction_rows, result_rows = rows
+    rows_by_user: dict[int, list[object]] = {}
+    for row in prediction_rows:
+        rows_by_user.setdefault(int(row["user_id"]), []).append(row)
+    actual_result = _swiss_stage_selection_from_rows(result_rows)
+    history_by_user: dict[int, SwissStagePredictionHistory] = {}
+    for user_id, user_rows in rows_by_user.items():
+        prediction = _swiss_stage_selection_from_rows(user_rows)
+        if prediction is None:
+            continue
+        awards = _swiss_stage_awards_from_rows(
+            user_rows,
+            result_rows=result_rows,
+        )
+        history_by_user[user_id] = SwissStagePredictionHistory(
+            prediction=prediction,
+            actual_result=actual_result,
+            awarded_points=(
+                sum(award.points or 0 for award in awards)
+                if actual_result is not None
+                else None
+            ),
+            awards=awards if actual_result is not None else (),
+        )
+    return history_by_user
+
+
 def _contest_leaderboard_from_rows(
     rows,
     *,
@@ -3507,9 +4615,13 @@ def _contest_leaderboard_from_rows(
     champion_prediction_history_by_user: (
         dict[int, ChampionPredictionHistory] | None
     ) = None,
+    swiss_stage_prediction_history_by_user: (
+        dict[int, SwissStagePredictionHistory] | None
+    ) = None,
 ) -> tuple[ContestLeaderboardEntry, ...]:
     history_by_user = prediction_history_by_user or {}
     champion_history_by_user = champion_prediction_history_by_user or {}
+    swiss_stage_history_by_user = swiss_stage_prediction_history_by_user or {}
     leaderboard: list[ContestLeaderboardEntry] = []
 
     sorted_rows = sorted(
@@ -3533,10 +4645,18 @@ def _contest_leaderboard_from_rows(
                 total_points=total_points,
                 match_predictions_count=int(row["match_predictions_count"]),
                 champion_prediction_count=int(row["champion_prediction_count"]),
+                swiss_stage_prediction_count=(
+                    int(row["swiss_stage_prediction_count"])
+                    if "swiss_stage_prediction_count" in row.keys()
+                    else 0
+                ),
                 total_matches_count=int(row["total_matches_count"]),
                 tiebreak_metrics=_leaderboard_tiebreak_metrics(row),
                 prediction_history=history_by_user.get(int(row["user_id"]), ()),
                 champion_prediction_history=champion_history_by_user.get(
+                    int(row["user_id"]),
+                ),
+                swiss_stage_prediction_history=swiss_stage_history_by_user.get(
                     int(row["user_id"]),
                 ),
             )

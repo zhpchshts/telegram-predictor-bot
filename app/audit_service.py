@@ -20,6 +20,9 @@ class AuditEventType(StrEnum):
     MATCH_RESULT_CHANGED = "match_result_changed"
     CONTEST_CHAMPION_SET = "contest_champion_set"
     CONTEST_CHAMPION_CHANGED = "contest_champion_changed"
+    SWISS_STAGE_SETTINGS_UPDATED = "swiss_stage_settings_updated"
+    SWISS_STAGE_RESULT_SET = "swiss_stage_result_set"
+    SWISS_STAGE_RESULT_CHANGED = "swiss_stage_result_changed"
     SUPERMODERATOR_ASSIGNED = "supermoderator_assigned"
     SUPERMODERATOR_REVOKED = "supermoderator_revoked"
 
@@ -27,6 +30,7 @@ class AuditEventType(StrEnum):
 class AuditEntityType(StrEnum):
     CONTEST = "contest"
     MATCH = "match"
+    SWISS_STAGE_PREDICTION = "swiss_stage_prediction"
     SUPERMODERATOR_ASSIGNMENT = "supermoderator_assignment"
 
 
