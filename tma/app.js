@@ -2506,8 +2506,8 @@ function getSwissStagePrediction(contest) {
     return {
       is_enabled: false,
       deadline_at: null,
-      direct_qualifier_count: 4,
-      elimination_qualifier_count: 4,
+      direct_qualifier_count: 3,
+      elimination_qualifier_count: 5,
       candidates: [],
       prediction: null,
       actual_result: null,
@@ -2527,12 +2527,12 @@ function getSwissStagePrediction(contest) {
       prediction.direct_qualifier_count,
     )
       ? prediction.direct_qualifier_count
-      : 4,
+      : 3,
     elimination_qualifier_count: Number.isSafeInteger(
       prediction.elimination_qualifier_count,
     )
       ? prediction.elimination_qualifier_count
-      : 4,
+      : 5,
     candidates: Array.isArray(prediction.candidates)
       ? prediction.candidates
       : [],

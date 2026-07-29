@@ -106,6 +106,24 @@ def _save_alice_prediction(
     )
 
 
+def test_swiss_stage_defaults_to_three_direct_and_five_playoff_teams(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        now_utc=OPEN_TIME,
+    )
+
+    prediction = details.swiss_stage_prediction
+    assert prediction.is_enabled is False
+    assert prediction.direct_qualifier_count == 3
+    assert prediction.elimination_qualifier_count == 5
+
+
 def test_swiss_stage_settings_create_candidates_without_matches_and_are_audited(
     database_path: Path,
 ) -> None:

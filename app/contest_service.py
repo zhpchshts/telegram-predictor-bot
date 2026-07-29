@@ -3412,11 +3412,11 @@ def _get_swiss_stage_prediction_details(
             swiss_stage_prediction_settings.deadline_at,
             COALESCE(
                 swiss_stage_prediction_settings.direct_qualifier_count,
-                4
+                3
             ) AS direct_qualifier_count,
             COALESCE(
                 swiss_stage_prediction_settings.elimination_qualifier_count,
-                4
+                5
             ) AS elimination_qualifier_count
         FROM contests
         LEFT JOIN swiss_stage_prediction_settings

@@ -243,9 +243,9 @@ CREATE TABLE IF NOT EXISTS swiss_stage_prediction_settings (
     contest_id INTEGER PRIMARY KEY REFERENCES contests(id) ON DELETE CASCADE,
     enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
     deadline_at TEXT,
-    direct_qualifier_count INTEGER NOT NULL DEFAULT 4
+    direct_qualifier_count INTEGER NOT NULL DEFAULT 3
         CHECK (direct_qualifier_count > 0),
-    elimination_qualifier_count INTEGER NOT NULL DEFAULT 4
+    elimination_qualifier_count INTEGER NOT NULL DEFAULT 5
         CHECK (elimination_qualifier_count > 0),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

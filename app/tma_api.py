@@ -175,8 +175,8 @@ class SaveContestChampionRequest(BaseModel):
 class SaveSwissStagePredictionSettingsRequest(BaseModel):
     enabled: bool
     deadline_at: str | None = None
-    direct_qualifier_count: SqliteInteger = 4
-    elimination_qualifier_count: SqliteInteger = 4
+    direct_qualifier_count: SqliteInteger = 3
+    elimination_qualifier_count: SqliteInteger = 5
     team_names: list[str] = Field(default_factory=list)
 
 
@@ -1703,8 +1703,8 @@ def _serialize_contest_details(contest) -> dict[str, object]:
         or contest.swiss_stage_prediction.deadline_at is not None
         or contest.swiss_stage_prediction.candidates
         or contest.swiss_stage_prediction.settings_locked
-        or contest.swiss_stage_prediction.direct_qualifier_count != 4
-        or contest.swiss_stage_prediction.elimination_qualifier_count != 4
+        or contest.swiss_stage_prediction.direct_qualifier_count != 3
+        or contest.swiss_stage_prediction.elimination_qualifier_count != 5
     ):
         result["swiss_stage_prediction"] = _serialize_swiss_stage_prediction(
             contest.swiss_stage_prediction

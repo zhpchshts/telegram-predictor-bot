@@ -323,6 +323,17 @@ def test_integer_request_fields_preserve_numeric_string_coercion() -> None:
     assert payload.predicted_advancing_team_id == 3
 
 
+def test_swiss_stage_settings_request_defaults_to_three_plus_five() -> None:
+    payload = tma_api.SaveSwissStagePredictionSettingsRequest.model_validate(
+        {
+            "enabled": False,
+        }
+    )
+
+    assert payload.direct_qualifier_count == 3
+    assert payload.elimination_qualifier_count == 5
+
+
 def test_telegram_user_id_target_rejects_value_outside_sqlite_range() -> None:
     with pytest.raises(TelegramUserIdInvalidError):
         _parse_telegram_user_id_target(str(2**63))

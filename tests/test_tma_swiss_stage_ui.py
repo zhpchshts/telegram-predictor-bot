@@ -121,6 +121,15 @@ def test_empty_swiss_stage_deadline_uses_general_local_default() -> None:
     ) < settings_source.index("|| getDefaultDateTimeLocal()")
 
 
+def test_swiss_stage_ui_defaults_to_three_plus_five() -> None:
+    prediction_source = _function_source("getSwissStagePrediction")
+
+    assert "direct_qualifier_count: 3" in prediction_source
+    assert "elimination_qualifier_count: 5" in prediction_source
+    assert "? prediction.direct_qualifier_count\n      : 3" in prediction_source
+    assert "? prediction.elimination_qualifier_count\n      : 5" in (prediction_source)
+
+
 def test_swiss_stage_settings_match_champion_settings_copy_and_state() -> None:
     champion_source = _function_source("createChampionPredictionSettingsDisclosure")
     champion_card_source = _function_source("createChampionAdministrationCard")
