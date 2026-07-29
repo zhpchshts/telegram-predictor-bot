@@ -36,6 +36,7 @@ from app.contest_service import (
     get_completed_contests,
 )
 from app.database import create_connection, initialize_database
+from tests.support import ensure_contest_teams
 
 
 TELEGRAM_CHAT_ID = -1001234567890
@@ -76,6 +77,11 @@ def create_test_match(
     starts_at_utc: str = "2026-06-11T18:00:00Z",
     idempotency_key: str = "create-match-1",
 ):
+    home_team_id, away_team_id = ensure_contest_teams(
+        database_path,
+        contest_id=contest_id,
+        names=(home_team_name, away_team_name),
+    )
     return create_match(
         database_path=database_path,
         telegram_chat_id=TELEGRAM_CHAT_ID,
@@ -84,8 +90,8 @@ def create_test_match(
         first_name="Eugene",
         last_name="Sabir",
         username="evsab",
-        home_team_name=home_team_name,
-        away_team_name=away_team_name,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
         starts_at_utc=starts_at_utc,
         idempotency_key=idempotency_key,
         audit_actor=AUDIT_ACTOR,
@@ -674,12 +680,10 @@ def test_create_match_creates_teams_stage_event_and_request(
         "away_team": {
             "id": 2,
             "name": "Бразилия",
-            "was_created": True,
         },
         "home_team": {
             "id": 1,
             "name": "Аргентина",
-            "was_created": True,
         },
         "scoring_rule_set_id": 1,
         "stage": {
@@ -788,67 +792,6 @@ def test_get_contest_details_rejects_contest_from_other_chat(
             telegram_chat_id=-1009876543210,
             contest_id=contest.id,
         )
-
-
-def test_create_match_reuses_team_regardless_of_letter_case(
-    tmp_path: Path,
-) -> None:
-    database_path = tmp_path / "predictor.db"
-    initialize_database(database_path)
-    contest = create_contest(database_path=database_path).contest
-
-    first_result = create_test_match(
-        database_path=database_path,
-        contest_id=contest.id,
-        home_team_name="Аргентина",
-        away_team_name="Бразилия",
-        idempotency_key="first-match",
-    )
-    second_result = create_test_match(
-        database_path=database_path,
-        contest_id=contest.id,
-        home_team_name="аргентина",
-        away_team_name="Франция",
-        starts_at_utc="2026-06-12T18:00:00Z",
-        idempotency_key="second-match",
-    )
-
-    assert first_result.was_created is True
-    assert second_result.was_created is True
-
-    with create_connection(database_path) as connection:
-        teams = connection.execute(
-            """
-            SELECT id, name
-            FROM teams
-            ORDER BY id ASC
-            """
-        ).fetchall()
-        match_rows = connection.execute(
-            """
-            SELECT id, home_team_id, away_team_id
-            FROM matches
-            ORDER BY id ASC
-            """
-        ).fetchall()
-
-    assert [dict(team) for team in teams] == [
-        {"id": 1, "name": "Аргентина"},
-        {"id": 2, "name": "Бразилия"},
-        {"id": 3, "name": "Франция"},
-    ]
-    assert [dict(match) for match in match_rows] == [
-        {
-            "id": first_result.match.id,
-            "home_team_id": 1,
-            "away_team_id": 2,
-        },
-        {
-            "id": second_result.match.id,
-            "home_team_id": 1,
-            "away_team_id": 3,
-        },
-    ]
 
 
 def test_save_match_prediction_creates_updates_and_does_not_write_event(
@@ -2344,7 +2287,7 @@ def test_update_match_start_changes_future_match_and_writes_events(
 
     assert updated_match.starts_at_utc == "2030-06-12T18:30:45Z"
     with create_connection(database_path) as connection:
-        legacy_event = connection.execute(
+        event_log_event = connection.execute(
             """
             SELECT payload_json
             FROM event_log
@@ -2359,8 +2302,8 @@ def test_update_match_start_changes_future_match_and_writes_events(
             """
         ).fetchone()
 
-    assert legacy_event is not None
-    assert json.loads(legacy_event["payload_json"]) == {
+    assert event_log_event is not None
+    assert json.loads(event_log_event["payload_json"]) == {
         "before": {"starts_at_utc": "2030-06-11T18:00:00Z"},
         "after": {"starts_at_utc": "2030-06-12T18:30:45Z"},
     }

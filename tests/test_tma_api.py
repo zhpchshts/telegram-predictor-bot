@@ -397,7 +397,7 @@ def test_telegram_admin_resolves_assigns_lists_and_revokes_supermoderator(
     resolved = client.post(
         "/api/tma/access/users/resolve",
         headers=build_tma_headers(),
-        json={"username": "@Target_User"},
+        json={"target": "@Target_User"},
     )
 
     assert resolved.status_code == 200
@@ -618,7 +618,7 @@ def test_non_admin_cannot_use_username_resolver(monkeypatch, tmp_path: Path) -> 
     response = client.post(
         "/api/tma/access/users/resolve",
         headers=build_tma_headers(),
-        json={"username": "target_user"},
+        json={"target": "target_user"},
     )
 
     assert response.status_code == 403
@@ -689,7 +689,7 @@ def test_resolve_is_unavailable_without_mtproto_configuration(
     response = client.post(
         "/api/tma/access/users/resolve",
         headers=build_tma_headers(),
-        json={"username": "target_user"},
+        json={"target": "target_user"},
     )
 
     assert response.status_code == 503
@@ -2363,16 +2363,16 @@ def test_tournament_teams_api_saves_actual_list_and_locks_after_match(
         "lock_reasons": [],
     }
 
-    legacy_payload_response = client.post(
+    invalid_payload_response = client.post(
         f"/api/tma/contests/{contest_id}/matches",
-        headers=build_tma_headers(idempotency_key="legacy-names"),
+        headers=build_tma_headers(idempotency_key="invalid-team-names"),
         json={
             "home_team_name": "Team Liquid",
             "away_team_name": "Team Spirit",
             "starts_at_utc": "2030-06-11T18:00:00Z",
         },
     )
-    assert legacy_payload_response.status_code == 422
+    assert invalid_payload_response.status_code == 422
 
     match_response = client.post(
         f"/api/tma/contests/{contest_id}/matches",

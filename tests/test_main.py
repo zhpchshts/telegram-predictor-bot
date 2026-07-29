@@ -218,11 +218,6 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         "initialize_database",
         lambda _path: startup_steps.append("initialize-database"),
     )
-    monkeypatch.setattr(
-        main,
-        "restore_legacy_champion_result_reconciliations",
-        lambda **_kwargs: startup_steps.append("restore-legacy-publications"),
-    )
     monkeypatch.setattr(main, "Bot", FakeBot)
     monkeypatch.setattr(
         main,
@@ -269,8 +264,7 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
     assert session_closed is True
     assert mtproto_started is True
     assert mtproto_closed is True
-    assert startup_steps[:3] == [
+    assert startup_steps[:2] == [
         "initialize-database",
-        "restore-legacy-publications",
         "contest-publication-worker",
     ]

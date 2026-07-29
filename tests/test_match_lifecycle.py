@@ -19,6 +19,7 @@ from app.contest_service import (
 )
 from app.database import create_connection, initialize_database
 from app.match_lifecycle import start_due_matches
+from tests.support import ensure_contest_teams
 
 
 TELEGRAM_CHAT_ID = -1001234567890
@@ -47,6 +48,11 @@ def _create_contest(database_path: Path, *, suffix: str = "1"):
 
 
 def _create_match(database_path: Path, *, contest_id: int, suffix: str = "1"):
+    home_team_id, away_team_id = ensure_contest_teams(
+        database_path,
+        contest_id=contest_id,
+        names=(f"Home {suffix}", f"Away {suffix}"),
+    )
     return create_match(
         database_path=database_path,
         telegram_chat_id=TELEGRAM_CHAT_ID,
@@ -55,8 +61,8 @@ def _create_match(database_path: Path, *, contest_id: int, suffix: str = "1"):
         first_name="Eugene",
         last_name=None,
         username=None,
-        home_team_name=f"Home {suffix}",
-        away_team_name=f"Away {suffix}",
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
         starts_at_utc="2026-06-11T18:00:00Z",
         idempotency_key=f"match-{suffix}",
         audit_actor=AUDIT_ACTOR,

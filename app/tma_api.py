@@ -197,8 +197,9 @@ class SaveSwissStageSelectionRequest(BaseModel):
 
 
 class ResolveRoleTargetRequest(BaseModel):
-    target: str | None = None
-    username: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    target: str
 
 
 class TelegramUserIdInvalidError(ValueError):
@@ -548,14 +549,7 @@ async def resolve_tma_role_target(
     ],
     management: Annotated[RoleManagementContext, Depends(_authorize_role_management)],
 ) -> dict[str, object]:
-    target = payload.target if payload.target is not None else payload.username
-    if target is None:
-        raise _application_http_error(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            code="role_target_invalid",
-            message="Укажите положительный Telegram ID или точный username.",
-        )
-    target = target.strip()
+    target = payload.target.strip()
     if not target:
         raise _application_http_error(
             status_code=status.HTTP_400_BAD_REQUEST,

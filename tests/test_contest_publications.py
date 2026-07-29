@@ -5,7 +5,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +14,6 @@ from app import contest_publications
 from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
     ChampionPredictionSettingsLockedError,
-    ContestCompletionUnavailableError,
     LeaderboardTiebreakReason,
     complete_contest,
     create_match,
@@ -41,11 +39,11 @@ from app.publication_outbox import (
     finish_publication_failure,
     finish_publication_success,
     prepare_scheduled_reconciliation,
-    restore_legacy_champion_result_reconciliations,
     revise_existing_publication,
     serialize_service_time,
 )
 from app.publication_worker import process_due_contest_publications
+from tests.support import ensure_contest_teams
 
 
 CHAT_ID = -1001234567890
@@ -118,7 +116,7 @@ class FailingBot(RecordingBot):
         return await super().send_rich_message(chat_id, rich_message=rich_message)
 
 
-def test_publication_schema_is_additive_idempotent_and_empty(tmp_path: Path) -> None:
+def test_current_publication_schema_is_idempotent_and_empty(tmp_path: Path) -> None:
     database_path = tmp_path / "predictor.db"
     initialize_database(database_path)
     initialize_database(database_path)
@@ -136,173 +134,6 @@ def test_publication_schema_is_additive_idempotent_and_empty(tmp_path: Path) -> 
     assert "contest_publications" in tables
     assert "contest_publication_messages" in tables
     assert publication_count == 0
-
-
-def test_publication_schema_rebuild_preserves_rows_and_foreign_keys(
-    tmp_path: Path,
-) -> None:
-    database_path = tmp_path / "predictor.db"
-    initialize_database(database_path)
-    with database_connection(database_path) as connection:
-        chat_id = connection.execute(
-            "INSERT INTO chats (telegram_chat_id, title) VALUES (-1001, 'chat')"
-        ).lastrowid
-        contest_id = connection.execute(
-            """
-            INSERT INTO contests (
-                chat_id, name, slug, match_prediction_publication_enabled
-            ) VALUES (?, 'contest', 'contest', 1)
-            """,
-            (chat_id,),
-        ).lastrowid
-        connection.execute(
-            """
-            INSERT INTO contest_publications (
-                id, contest_id, publication_type, entity_id,
-                desired_revision, settled_revision, desired_action,
-                delivery_status, first_event_id, latest_event_id,
-                reconcile_at, claim_token, claim_expires_at, attempt_count,
-                next_attempt_at, last_error, created_at, updated_at
-            ) VALUES (
-                77, ?, 'champion_result', ?, 5, 3, 'publish', 'pending',
-                41, 42, '2026-07-21T10:00:00.000000Z', 'claim-77',
-                '2026-07-21T10:01:30.000000Z', 4,
-                '2026-07-21T10:02:00.000000Z', 'temporary failure',
-                '2026-07-21T09:00:00.000000Z',
-                '2026-07-21T09:30:00.000000Z'
-            )
-            """,
-            (contest_id, contest_id),
-        )
-        connection.execute(
-            """
-            INSERT INTO contest_publication_messages (
-                publication_id, part_number, telegram_message_id,
-                content_hash, content_text, part_status, last_error,
-                sent_at, updated_at
-            ) VALUES (
-                77, 2, 9001, 'hash', '<p>saved content</p>', 'active', NULL,
-                '2026-07-21T09:05:00.000000Z',
-                '2026-07-21T09:06:00.000000Z'
-            )
-            """
-        )
-
-    connection = sqlite3.connect(database_path)
-    try:
-        connection.execute("PRAGMA foreign_keys = OFF")
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
-            """
-            CREATE TABLE contest_publications_old (
-                id INTEGER PRIMARY KEY,
-                contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
-                publication_type TEXT NOT NULL CHECK (
-                    publication_type IN (
-                        'match_result', 'champion_result', 'contest_completed'
-                    )
-                ),
-                entity_id INTEGER NOT NULL,
-                desired_revision INTEGER NOT NULL DEFAULT 1 CHECK (
-                    desired_revision >= 1
-                ),
-                settled_revision INTEGER NOT NULL DEFAULT 0 CHECK (
-                    settled_revision >= 0 AND settled_revision <= desired_revision
-                ),
-                desired_action TEXT NOT NULL DEFAULT 'publish' CHECK (
-                    desired_action IN ('publish', 'withdraw')
-                ),
-                delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
-                    delivery_status IN (
-                        'pending', 'published', 'withdrawn', 'terminal_failed'
-                    )
-                ),
-                first_event_id INTEGER NOT NULL,
-                latest_event_id INTEGER NOT NULL,
-                reconcile_at TEXT,
-                claim_token TEXT,
-                claim_expires_at TEXT,
-                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-                next_attempt_at TEXT,
-                last_error TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE (contest_id, publication_type, entity_id),
-                CHECK (
-                    (claim_token IS NULL AND claim_expires_at IS NULL)
-                    OR (claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)
-                )
-            )
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO contest_publications_old
-            SELECT * FROM contest_publications
-            """
-        )
-        connection.execute("DROP TABLE contest_publications")
-        connection.execute(
-            "ALTER TABLE contest_publications_old RENAME TO contest_publications"
-        )
-        connection.execute("COMMIT")
-        connection.execute("PRAGMA foreign_keys = ON")
-    finally:
-        connection.close()
-
-    for _ in range(2):
-        initialize_database(database_path)
-        with database_connection(database_path) as connection:
-            publication = connection.execute(
-                "SELECT * FROM contest_publications WHERE id = 77"
-            ).fetchone()
-            message = connection.execute(
-                """
-                SELECT * FROM contest_publication_messages
-                WHERE publication_id = 77 AND part_number = 2
-                """
-            ).fetchone()
-            assert publication is not None
-            assert tuple(publication) == (
-                77,
-                contest_id,
-                "champion_result",
-                contest_id,
-                5,
-                3,
-                "publish",
-                "pending",
-                41,
-                42,
-                "2026-07-21T10:00:00.000000Z",
-                "claim-77",
-                "2026-07-21T10:01:30.000000Z",
-                4,
-                "2026-07-21T10:02:00.000000Z",
-                "temporary failure",
-                "2026-07-21T09:00:00.000000Z",
-                "2026-07-21T09:30:00.000000Z",
-            )
-            assert message is not None
-            assert int(message["publication_id"]) == 77
-            assert message["content_text"] == "<p>saved content</p>"
-            assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-            assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-
-    with database_connection(database_path) as connection:
-        connection.execute(
-            """
-            INSERT INTO contest_publications (
-                contest_id, publication_type, entity_id,
-                first_event_id, latest_event_id, created_at, updated_at
-            ) VALUES (
-                ?, 'champion_predictions', ?, 50, 50,
-                '2026-07-21T10:00:00.000000Z',
-                '2026-07-21T10:00:00.000000Z'
-            )
-            """,
-            (contest_id, contest_id),
-        )
 
 
 def test_champion_predictions_follow_deadline_and_render_current_sorted_list(
@@ -1036,6 +867,11 @@ def test_deleted_published_match_id_can_be_reused_in_same_contest(
         == 1
     )
 
+    home_team_id, away_team_id = ensure_contest_teams(
+        database_path,
+        contest_id=first_contest_id,
+        names=("Бразилия", "Аргентина"),
+    )
     second_match = create_match(
         database_path=database_path,
         telegram_chat_id=CHAT_ID,
@@ -1044,8 +880,8 @@ def test_deleted_published_match_id_can_be_reused_in_same_contest(
         first_name="Анна",
         last_name="Иванова",
         username="anna",
-        home_team_name="Бразилия",
-        away_team_name="Аргентина",
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
         starts_at_utc="2026-06-11T12:00:00Z",
         idempotency_key="match-2",
         audit_actor=AUDIT_ACTOR,
@@ -1427,6 +1263,11 @@ def _create_contest_and_match(database_path: Path):
         idempotency_key="contest-1",
         audit_actor=AUDIT_ACTOR,
     ).contest
+    home_team_id, away_team_id = ensure_contest_teams(
+        database_path,
+        contest_id=contest.id,
+        names=("Франция", "Испания"),
+    )
     match = create_match(
         database_path=database_path,
         telegram_chat_id=CHAT_ID,
@@ -1435,8 +1276,8 @@ def _create_contest_and_match(database_path: Path):
         first_name="Анна",
         last_name="Иванова",
         username="anna",
-        home_team_name="Франция",
-        away_team_name="Испания",
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
         starts_at_utc="2026-06-11T12:00:00Z",
         idempotency_key="match-1",
         audit_actor=AUDIT_ACTOR,
@@ -1445,6 +1286,11 @@ def _create_contest_and_match(database_path: Path):
 
 
 def _create_replacement_match(database_path: Path, *, contest_id: int):
+    home_team_id, away_team_id = ensure_contest_teams(
+        database_path,
+        contest_id=contest_id,
+        names=("Бразилия", "Аргентина"),
+    )
     return create_match(
         database_path=database_path,
         telegram_chat_id=CHAT_ID,
@@ -1453,8 +1299,8 @@ def _create_replacement_match(database_path: Path, *, contest_id: int):
         first_name="Анна",
         last_name="Иванова",
         username="anna",
-        home_team_name="Бразилия",
-        away_team_name="Аргентина",
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
         starts_at_utc="2026-06-11T12:00:00Z",
         idempotency_key="replacement-match",
         audit_actor=AUDIT_ACTOR,
@@ -2439,7 +2285,7 @@ def test_champion_renderer_rejects_open_deadline_for_completed_contest(
         event_id = connection.execute(
             """
             INSERT INTO event_log (contest_id, event_type, entity_type, entity_id)
-            VALUES (?, 'legacy.champion_recorded', 'contest', ?)
+            VALUES (?, 'test.champion_recorded', 'contest', ?)
             """,
             (contest_id, contest_id),
         ).lastrowid
@@ -2498,7 +2344,7 @@ def test_master_switch_cancels_existing_champion_reconciliation(tmp_path: Path) 
         event_id = connection.execute(
             """
             INSERT INTO event_log (contest_id, event_type, entity_type, entity_id)
-            VALUES (?, 'legacy.champion_reconcile', 'contest', ?)
+            VALUES (?, 'test.champion_reconcile', 'contest', ?)
             """,
             (contest_id, contest_id),
         ).lastrowid
@@ -2850,325 +2696,6 @@ def test_completed_contest_final_dependencies_override_adverse_event_order(
     assert "Прогнозы на чемпиона" in str(bot.sent[0]["text"])
     assert "Чемпион турнира" in str(bot.sent[1]["text"])
     assert "Итоговый рейтинг" in str(bot.sent[2]["text"])
-
-
-def test_legacy_champion_result_reconciliation_is_restored_and_published(
-    tmp_path: Path,
-) -> None:
-    database_path = tmp_path / "predictor.db"
-    contest_id, match = _create_contest_and_match(database_path)
-    _enable_publications(database_path, contest_id=contest_id)
-    save_champion_prediction_settings(
-        database_path=database_path,
-        telegram_chat_id=CHAT_ID,
-        contest_id=contest_id,
-        telegram_user_id=USER_ID,
-        first_name="Анна",
-        last_name="Иванова",
-        username="anna",
-        enabled=True,
-        deadline_at="2026-06-11T11:00:00Z",
-        points=5,
-        now_utc=_datetime(9),
-        audit_actor=AUDIT_ACTOR,
-    )
-    save_champion_prediction(
-        database_path=database_path,
-        telegram_chat_id=CHAT_ID,
-        contest_id=contest_id,
-        telegram_user_id=USER_ID,
-        first_name="Анна",
-        last_name="Иванова",
-        username="anna",
-        predicted_team_id=match.home_team_id,
-        now_utc=_datetime(10),
-    )
-    _save_result(database_path, contest_id=contest_id, match=match)
-
-    assert (
-        asyncio.run(
-            process_due_contest_publications(
-                bot=RecordingBot(),
-                database_path=database_path,
-            )
-        )
-        == 2
-    )
-
-    now_value = serialize_service_time(_datetime(10))
-    with database_connection(database_path) as connection:
-        connection.execute(
-            "UPDATE contests SET champion_team_id = ? WHERE id = ?",
-            (match.home_team_id, contest_id),
-        )
-        event_id = connection.execute(
-            """
-            INSERT INTO event_log (
-                contest_id, event_type, entity_type, entity_id
-            )
-            VALUES (?, 'legacy.champion_recorded', 'contest', ?)
-            """,
-            (contest_id, contest_id),
-        ).lastrowid
-        assert event_id is not None
-        publication_id = connection.execute(
-            """
-            INSERT INTO contest_publications (
-                contest_id, publication_type, entity_id, desired_revision,
-                settled_revision, desired_action, delivery_status,
-                first_event_id, latest_event_id, reconcile_at, created_at,
-                updated_at
-            )
-            VALUES (?, 'champion_result', ?, 1, 1, 'withdraw', 'withdrawn',
-                    ?, ?, NULL, ?, ?)
-            """,
-            (contest_id, contest_id, event_id, event_id, now_value, now_value),
-        ).lastrowid
-        assert publication_id is not None
-
-    assert (
-        restore_legacy_champion_result_reconciliations(
-            database_path=database_path,
-            now_utc=_datetime(10),
-        )
-        == 1
-    )
-    with database_connection(database_path) as connection:
-        restored_publication = tuple(
-            connection.execute(
-                """
-                SELECT
-                    desired_revision,
-                    settled_revision,
-                    desired_action,
-                    first_event_id,
-                    latest_event_id,
-                    reconcile_at,
-                    updated_at
-                FROM contest_publications
-                WHERE id = ?
-                """,
-                (publication_id,),
-            ).fetchone()
-        )
-    assert restored_publication == (
-        1,
-        1,
-        "withdraw",
-        event_id,
-        event_id,
-        serialize_service_time(_datetime(11)),
-        serialize_service_time(_datetime(10)),
-    )
-    assert (
-        claim_next_publication(
-            database_path=database_path,
-            now_utc=_datetime(10),
-        )
-        is None
-    )
-
-    assert (
-        restore_legacy_champion_result_reconciliations(
-            database_path=database_path,
-            now_utc=_datetime(10),
-        )
-        == 0
-    )
-    with database_connection(database_path) as connection:
-        repeated_publication = tuple(
-            connection.execute(
-                """
-                SELECT
-                    desired_revision,
-                    settled_revision,
-                    desired_action,
-                    first_event_id,
-                    latest_event_id,
-                    reconcile_at,
-                    updated_at
-                FROM contest_publications
-                WHERE id = ?
-                """,
-                (publication_id,),
-            ).fetchone()
-        )
-    assert repeated_publication == restored_publication
-
-    result_bot = RecordingBot()
-    assert (
-        asyncio.run(
-            process_due_contest_publications(
-                bot=result_bot,
-                database_path=database_path,
-            )
-        )
-        == 1
-    )
-    assert len(result_bot.sent) == 1
-    assert "Чемпион турнира" in str(result_bot.sent[0]["text"])
-
-    with database_connection(database_path) as connection:
-        champion_publications = connection.execute(
-            """
-            SELECT id, desired_revision, settled_revision, desired_action,
-                   reconcile_at
-            FROM contest_publications
-            WHERE contest_id = ? AND publication_type = 'champion_result'
-            """,
-            (contest_id,),
-        ).fetchall()
-        contest_is_active = connection.execute(
-            "SELECT is_active FROM contests WHERE id = ?",
-            (contest_id,),
-        ).fetchone()[0]
-        champion_event_count = connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM event_log
-            WHERE contest_id = ?
-              AND event_type IN (
-                  'contest.champion_recorded',
-                  'contest.champion_corrected'
-              )
-            """,
-            (contest_id,),
-        ).fetchone()[0]
-    assert [tuple(row) for row in champion_publications] == [
-        (publication_id, 2, 2, "publish", None)
-    ]
-    assert contest_is_active == 1
-    assert champion_event_count == 0
-
-    complete_contest(
-        database_path=database_path,
-        telegram_chat_id=CHAT_ID,
-        contest_id=contest_id,
-        telegram_user_id=USER_ID,
-        first_name="Анна",
-        last_name="Иванова",
-        username="anna",
-        now_utc=_datetime(12),
-        audit_actor=AUDIT_ACTOR,
-    )
-
-    final_bot = RecordingBot()
-    assert (
-        asyncio.run(
-            process_due_contest_publications(
-                bot=final_bot,
-                database_path=database_path,
-            )
-        )
-        == 1
-    )
-    assert len(final_bot.sent) == 1
-    assert "Итоговый рейтинг" in str(final_bot.sent[0]["text"])
-
-
-def test_legacy_reconciliation_does_not_create_missing_champion_result(
-    tmp_path: Path,
-) -> None:
-    database_path = tmp_path / "predictor.db"
-    contest_id, match = _create_contest_and_match(database_path)
-    save_champion_prediction_settings(
-        database_path=database_path,
-        telegram_chat_id=CHAT_ID,
-        contest_id=contest_id,
-        telegram_user_id=USER_ID,
-        first_name="Анна",
-        last_name="Иванова",
-        username="anna",
-        enabled=True,
-        deadline_at="2026-06-11T11:00:00Z",
-        points=5,
-        now_utc=_datetime(9),
-        audit_actor=AUDIT_ACTOR,
-    )
-    _save_result(database_path, contest_id=contest_id, match=match)
-    with database_connection(database_path) as connection:
-        connection.execute(
-            "UPDATE contests SET champion_team_id = ? WHERE id = ?",
-            (match.home_team_id, contest_id),
-        )
-
-    _enable_publications(database_path, contest_id=contest_id)
-    assert (
-        restore_legacy_champion_result_reconciliations(
-            database_path=database_path,
-            now_utc=_datetime(10),
-        )
-        == 0
-    )
-    with database_connection(database_path) as connection:
-        champion_result_count = connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM contest_publications
-            WHERE contest_id = ? AND publication_type = 'champion_result'
-            """,
-            (contest_id,),
-        ).fetchone()[0]
-    assert champion_result_count == 0
-
-
-def test_completion_before_champion_deadline_rejects_legacy_champion(
-    tmp_path: Path,
-) -> None:
-    database_path = tmp_path / "predictor.db"
-    contest_id, match = _create_contest_and_match(database_path)
-    save_champion_prediction_settings(
-        database_path=database_path,
-        telegram_chat_id=CHAT_ID,
-        contest_id=contest_id,
-        telegram_user_id=USER_ID,
-        first_name="Анна",
-        last_name="Иванова",
-        username="anna",
-        enabled=True,
-        deadline_at="2026-06-11T11:00:00Z",
-        points=5,
-        now_utc=_datetime(9),
-        audit_actor=AUDIT_ACTOR,
-    )
-    _save_result(database_path, contest_id=contest_id, match=match)
-    with database_connection(database_path) as connection:
-        connection.execute(
-            "UPDATE contests SET champion_team_id = ? WHERE id = ?",
-            (match.home_team_id, contest_id),
-        )
-
-    with pytest.raises(
-        ContestCompletionUnavailableError,
-        match="Конкурс можно завершить после закрытия прогнозов на чемпиона",
-    ):
-        complete_contest(
-            database_path=database_path,
-            telegram_chat_id=CHAT_ID,
-            contest_id=contest_id,
-            telegram_user_id=USER_ID,
-            first_name="Анна",
-            last_name="Иванова",
-            username="anna",
-            now_utc=_datetime(10),
-            audit_actor=AUDIT_ACTOR,
-        )
-
-    with database_connection(database_path) as connection:
-        contest_is_active = connection.execute(
-            "SELECT is_active FROM contests WHERE id = ?",
-            (contest_id,),
-        ).fetchone()[0]
-        completion_event_count = connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM event_log
-            WHERE contest_id = ? AND event_type = 'contest.completed'
-            """,
-            (contest_id,),
-        ).fetchone()[0]
-    assert contest_is_active == 1
-    assert completion_event_count == 0
 
 
 def _enable_publications(database_path: Path, *, contest_id: int) -> None:

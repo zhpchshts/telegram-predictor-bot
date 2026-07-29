@@ -20,6 +20,7 @@ from app.contest_service import (
     save_contest_champion,
 )
 from app.database import database_connection, initialize_database
+from tests.support import ensure_contest_teams
 
 
 CHAT_ID = -1001234567890
@@ -64,6 +65,16 @@ def _create_matches(
     *,
     contest_id: int,
 ) -> tuple[int, int, int, int]:
+    (
+        spain_team_id,
+        france_team_id,
+        germany_team_id,
+        portugal_team_id,
+    ) = ensure_contest_teams(
+        database_path,
+        contest_id=contest_id,
+        names=("Испания", "Франция", "Германия", "Португалия"),
+    )
     first_match = create_match(
         database_path=database_path,
         telegram_chat_id=CHAT_ID,
@@ -72,8 +83,8 @@ def _create_matches(
         first_name="Администратор",
         last_name=None,
         username="admin",
-        home_team_name="Испания",
-        away_team_name="Франция",
+        home_team_id=spain_team_id,
+        away_team_id=france_team_id,
         starts_at_utc="2029-06-14T12:00:00Z",
         idempotency_key="create-first-match",
         audit_actor=AUDIT_ACTOR,
@@ -86,8 +97,8 @@ def _create_matches(
         first_name="Администратор",
         last_name=None,
         username="admin",
-        home_team_name="Германия",
-        away_team_name="Португалия",
+        home_team_id=germany_team_id,
+        away_team_id=portugal_team_id,
         starts_at_utc="2029-06-15T12:00:00Z",
         idempotency_key="create-second-match",
         audit_actor=AUDIT_ACTOR,

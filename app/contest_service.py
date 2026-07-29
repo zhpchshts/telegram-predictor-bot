@@ -1199,51 +1199,22 @@ def create_match(
     first_name: str,
     last_name: str | None,
     username: str | None,
-    home_team_id: int | None = None,
-    away_team_id: int | None = None,
-    home_team_name: str | None = None,
-    away_team_name: str | None = None,
+    home_team_id: int,
+    away_team_id: int,
     starts_at_utc: str,
     idempotency_key: str,
     audit_actor: AuditActor,
 ) -> MatchCreationResult:
-    uses_team_ids = home_team_id is not None or away_team_id is not None
-    uses_team_names = home_team_name is not None or away_team_name is not None
-    if uses_team_ids == uses_team_names:
-        raise ValueError("Передайте идентификаторы первой и второй команды турнира.")
-
-    normalized_home_team_id: int | None = None
-    normalized_away_team_id: int | None = None
-    normalized_home_team_name: str | None = None
-    normalized_away_team_name: str | None = None
-    if uses_team_ids:
-        if home_team_id is None or away_team_id is None:
-            raise ValueError(
-                "Передайте идентификаторы первой и второй команды турнира."
-            )
-        normalized_home_team_id = _normalize_team_id(
-            home_team_id,
-            field_name="Первая команда",
-        )
-        normalized_away_team_id = _normalize_team_id(
-            away_team_id,
-            field_name="Вторая команда",
-        )
-        if normalized_home_team_id == normalized_away_team_id:
-            raise ValueError("В матче должны участвовать разные команды.")
-    else:
-        if home_team_name is None or away_team_name is None:
-            raise ValueError("Укажите первую и вторую команду.")
-        normalized_home_team_name = _normalize_team_name(
-            home_team_name,
-            field_name="Название первой команды",
-        )
-        normalized_away_team_name = _normalize_team_name(
-            away_team_name,
-            field_name="Название второй команды",
-        )
-        if normalized_home_team_name.casefold() == normalized_away_team_name.casefold():
-            raise ValueError("В матче должны участвовать разные команды.")
+    normalized_home_team_id = _normalize_team_id(
+        home_team_id,
+        field_name="Первая команда",
+    )
+    normalized_away_team_id = _normalize_team_id(
+        away_team_id,
+        field_name="Вторая команда",
+    )
+    if normalized_home_team_id == normalized_away_team_id:
+        raise ValueError("В матче должны участвовать разные команды.")
 
     normalized_starts_at_utc = _normalize_starts_at_utc(starts_at_utc)
     normalized_idempotency_key = _normalize_match_idempotency_key(idempotency_key)
@@ -1262,64 +1233,24 @@ def create_match(
             last_name=last_name,
             username=username,
         )
-        if uses_team_ids:
-            assert normalized_home_team_id is not None
-            assert normalized_away_team_id is not None
-            home_team_row = _get_contest_team_row(
-                connection,
-                contest_id=contest_id,
-                team_id=normalized_home_team_id,
+        home_team_row = _get_contest_team_row(
+            connection,
+            contest_id=contest_id,
+            team_id=normalized_home_team_id,
+        )
+        away_team_row = _get_contest_team_row(
+            connection,
+            contest_id=contest_id,
+            team_id=normalized_away_team_id,
+        )
+        if home_team_row is None or away_team_row is None:
+            raise ValueError(
+                "Обе команды матча должны входить в список команд турнира."
             )
-            away_team_row = _get_contest_team_row(
-                connection,
-                contest_id=contest_id,
-                team_id=normalized_away_team_id,
-            )
-            if home_team_row is None or away_team_row is None:
-                raise ValueError(
-                    "Обе команды матча должны входить в список команд турнира."
-                )
-            resolved_home_team_id = int(home_team_row["id"])
-            resolved_away_team_id = int(away_team_row["id"])
-            resolved_home_team_name = str(home_team_row["name"])
-            resolved_away_team_name = str(away_team_row["name"])
-            home_team_was_created = False
-            away_team_was_created = False
-        else:
-            assert normalized_home_team_name is not None
-            assert normalized_away_team_name is not None
-            resolved_home_team_id, home_team_was_created = _find_or_create_team(
-                connection,
-                team_name=normalized_home_team_name,
-            )
-            resolved_away_team_id, away_team_was_created = _find_or_create_team(
-                connection,
-                team_name=normalized_away_team_name,
-            )
-            _append_legacy_contest_team(
-                connection,
-                contest_id=contest_id,
-                team_id=resolved_home_team_id,
-            )
-            _append_legacy_contest_team(
-                connection,
-                contest_id=contest_id,
-                team_id=resolved_away_team_id,
-            )
-            home_team_row = _get_contest_team_row(
-                connection,
-                contest_id=contest_id,
-                team_id=resolved_home_team_id,
-            )
-            away_team_row = _get_contest_team_row(
-                connection,
-                contest_id=contest_id,
-                team_id=resolved_away_team_id,
-            )
-            if home_team_row is None or away_team_row is None:
-                raise RuntimeError("Не удалось добавить команды матча в турнир.")
-            resolved_home_team_name = str(home_team_row["name"])
-            resolved_away_team_name = str(away_team_row["name"])
+        resolved_home_team_id = int(home_team_row["id"])
+        resolved_away_team_id = int(away_team_row["id"])
+        resolved_home_team_name = str(home_team_row["name"])
+        resolved_away_team_name = str(away_team_row["name"])
 
         request_fingerprint = _build_match_request_fingerprint(
             home_team_id=resolved_home_team_id,
@@ -1435,12 +1366,10 @@ def create_match(
                 "away_team": {
                     "id": resolved_away_team_id,
                     "name": resolved_away_team_name,
-                    "was_created": away_team_was_created,
                 },
                 "home_team": {
                     "id": resolved_home_team_id,
                     "name": resolved_home_team_name,
-                    "was_created": home_team_was_created,
                 },
                 "scoring_rule_set_id": scoring_rule_set_id,
                 "stage": {
@@ -2645,7 +2574,6 @@ def save_swiss_stage_prediction_settings(
     deadline_at: str | None,
     direct_qualifier_count: int,
     elimination_qualifier_count: int,
-    team_names: list[str] | None = None,
     audit_actor: AuditActor,
 ) -> None:
     normalized_enabled = _normalize_swiss_stage_enabled(enabled)
@@ -2685,17 +2613,6 @@ def save_swiss_stage_prediction_settings(
             connection,
             contest_id=contest_id,
         )
-        if team_names is not None and (team_names or not existing_tournament_teams):
-            normalized_legacy_names = _normalize_tournament_team_names(team_names)
-            _replace_legacy_tournament_teams(
-                connection,
-                contest_id=contest_id,
-                team_names=normalized_legacy_names,
-            )
-            existing_tournament_teams = _get_tournament_team_rows(
-                connection,
-                contest_id=contest_id,
-            )
         tournament_team_count = len(existing_tournament_teams)
         if normalized_enabled and tournament_team_count == 0:
             raise ValueError("Сначала добавьте команды турнира.")
@@ -4545,74 +4462,6 @@ def _find_or_create_team(
         ).lastrowid
     )
     return team_id, True
-
-
-def _append_legacy_contest_team(
-    connection,
-    *,
-    contest_id: int,
-    team_id: int,
-) -> None:
-    if (
-        _get_contest_team_row(
-            connection,
-            contest_id=contest_id,
-            team_id=team_id,
-        )
-        is not None
-    ):
-        return
-    next_position = int(
-        connection.execute(
-            """
-            SELECT COALESCE(MAX(position) + 1, 0)
-            FROM contest_teams
-            WHERE contest_id = ?
-            """,
-            (contest_id,),
-        ).fetchone()[0]
-    )
-    connection.execute(
-        """
-        INSERT INTO contest_teams (contest_id, team_id, position)
-        VALUES (?, ?, ?)
-        """,
-        (contest_id, team_id, next_position),
-    )
-
-
-def _replace_legacy_tournament_teams(
-    connection,
-    *,
-    contest_id: int,
-    team_names: tuple[str, ...],
-) -> None:
-    before_details = _get_tournament_teams_details(
-        connection,
-        contest_id=contest_id,
-    )
-    team_ids = tuple(
-        _find_or_create_team(connection, team_name=team_name)[0]
-        for team_name in team_names
-    )
-    if tuple(team.id for team in before_details.teams) == team_ids:
-        return
-    if before_details.is_locked:
-        raise TournamentTeamsLockedError(
-            "Список команд нельзя изменить после создания матчей, "
-            "сохранения прогнозов или внесения результатов."
-        )
-    connection.execute(
-        "DELETE FROM contest_teams WHERE contest_id = ?",
-        (contest_id,),
-    )
-    connection.executemany(
-        """
-        INSERT INTO contest_teams (contest_id, team_id, position)
-        VALUES (?, ?, ?)
-        """,
-        [(contest_id, team_id, position) for position, team_id in enumerate(team_ids)],
-    )
 
 
 def _normalize_tournament_team_names(values: list[str]) -> tuple[str, ...]:

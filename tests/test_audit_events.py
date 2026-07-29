@@ -33,6 +33,7 @@ from app.supermoderator_service import (
     revoke_supermoderator,
 )
 from app.user_service import get_or_create_telegram_user, upsert_chat_actor
+from tests.support import ensure_contest_teams
 
 
 CHAT_ID = -1001234567890
@@ -60,6 +61,11 @@ def _create_contest(database_path: Path, *, key: str = "contest"):
 
 
 def _create_match(database_path: Path, contest_id: int, *, key: str = "match"):
+    home_team_id, away_team_id = ensure_contest_teams(
+        database_path,
+        contest_id=contest_id,
+        names=("Испания", "Франция"),
+    )
     return create_match(
         database_path=database_path,
         telegram_chat_id=CHAT_ID,
@@ -68,8 +74,8 @@ def _create_match(database_path: Path, contest_id: int, *, key: str = "match"):
         first_name="Администратор",
         last_name=None,
         username="admin",
-        home_team_name="Испания",
-        away_team_name="Франция",
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
         starts_at_utc="2026-06-01T12:00:00Z",
         idempotency_key=key,
         audit_actor=ACTOR,
@@ -81,18 +87,11 @@ def _events(database_path: Path) -> list[sqlite3.Row]:
         return connection.execute("SELECT * FROM audit_events ORDER BY id").fetchall()
 
 
-def test_audit_schema_is_added_without_removing_existing_data(tmp_path: Path) -> None:
-    database_path = tmp_path / "existing.db"
-    with sqlite3.connect(database_path) as connection:
-        connection.execute("CREATE TABLE legacy_data (value TEXT NOT NULL)")
-        connection.execute("INSERT INTO legacy_data VALUES ('preserved')")
-
+def test_current_audit_schema_has_required_columns_and_indexes(tmp_path: Path) -> None:
+    database_path = tmp_path / "audit.db"
     initialize_database(database_path)
 
     with create_connection(database_path) as connection:
-        assert connection.execute("SELECT value FROM legacy_data").fetchone()[0] == (
-            "preserved"
-        )
         columns = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(audit_events)").fetchall()
@@ -486,6 +485,11 @@ def test_invalid_missing_and_cross_chat_operations_do_not_add_events(
     initialize_database(database_path)
     contest = _create_contest(database_path)
     baseline_types = [event["event_type"] for event in _events(database_path)]
+    (team_id,) = ensure_contest_teams(
+        database_path,
+        contest_id=contest.id,
+        names=("Испания",),
+    )
 
     with pytest.raises(ValueError, match="different teams|разные команды"):
         create_match(
@@ -496,8 +500,8 @@ def test_invalid_missing_and_cross_chat_operations_do_not_add_events(
             first_name="Администратор",
             last_name=None,
             username="admin",
-            home_team_name="Испания",
-            away_team_name="Испания",
+            home_team_id=team_id,
+            away_team_id=team_id,
             starts_at_utc="2026-06-01T12:00:00Z",
             idempotency_key="invalid-match",
             audit_actor=ACTOR,

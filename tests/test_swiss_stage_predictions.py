@@ -18,6 +18,7 @@ from app.contest_service import (
     save_swiss_stage_prediction,
     save_swiss_stage_prediction_settings,
     save_swiss_stage_result,
+    save_tournament_teams,
 )
 from app.database import database_connection, initialize_database
 
@@ -66,6 +67,13 @@ def _configure(
     elimination_count: int = 2,
 ) -> dict[str, int]:
     names = team_names or ["Альфа", "Бета", "Гамма", "Дельта", "Эпсилон"]
+    save_tournament_teams(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        team_names=names,
+        audit_actor=AUDIT_ACTOR,
+    )
     save_swiss_stage_prediction_settings(
         database_path=database_path,
         telegram_chat_id=CHAT_ID,
@@ -74,7 +82,6 @@ def _configure(
         deadline_at=DEADLINE,
         direct_qualifier_count=direct_count,
         elimination_qualifier_count=elimination_count,
-        team_names=names,
         audit_actor=AUDIT_ACTOR,
     )
     details = get_contest_details(
@@ -163,8 +170,7 @@ def test_swiss_stage_settings_create_candidates_without_matches_and_are_audited(
 @pytest.mark.parametrize(
     ("team_names", "direct_count", "elimination_count", "message"),
     [
-        ([], 1, 1, "Добавьте хотя бы одну команду"),
-        (["А", " а "], 1, 1, "не должна повторяться"),
+        ([], 1, 1, "Сначала добавьте команды турнира"),
         (["А", "Б"], 0, 1, "положительным целым"),
         (["А", "Б"], 2, 1, "не может превышать"),
     ],
@@ -177,6 +183,14 @@ def test_swiss_stage_settings_validate_candidates_and_limits(
     message: str,
 ) -> None:
     contest_id = _create_contest(database_path)
+    if team_names:
+        save_tournament_teams(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            team_names=team_names,
+            audit_actor=AUDIT_ACTOR,
+        )
     with pytest.raises(ValueError, match=message):
         save_swiss_stage_prediction_settings(
             database_path=database_path,
@@ -186,7 +200,6 @@ def test_swiss_stage_settings_validate_candidates_and_limits(
             deadline_at=DEADLINE,
             direct_qualifier_count=direct_count,
             elimination_qualifier_count=elimination_count,
-            team_names=team_names,
             audit_actor=AUDIT_ACTOR,
         )
 
@@ -233,7 +246,6 @@ def test_swiss_stage_prediction_is_atomic_replace_and_locks_settings(
             deadline_at=None,
             direct_qualifier_count=2,
             elimination_qualifier_count=2,
-            team_names=[],
             audit_actor=AUDIT_ACTOR,
         )
 
@@ -566,7 +578,6 @@ def test_first_swiss_prediction_and_disabling_settings_are_serialized(
                 deadline_at=None,
                 direct_qualifier_count=2,
                 elimination_qualifier_count=2,
-                team_names=[],
                 audit_actor=AUDIT_ACTOR,
             )
         except SwissStagePredictionSettingsLockedError:
