@@ -6,7 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from app.access_control import (
     AccessDecision,
@@ -42,6 +42,7 @@ from app.contest_service import (
     PredictionUnavailableError,
     SwissStagePredictionSettingsLockedError,
     SwissStageResultUnavailableError,
+    TournamentTeamsLockedError,
     complete_contest,
     create_match,
     create_world_cup_2026_contest,
@@ -59,6 +60,7 @@ from app.contest_service import (
     save_swiss_stage_prediction,
     save_swiss_stage_prediction_settings,
     save_swiss_stage_result,
+    save_tournament_teams,
     update_match_start,
 )
 from app.tma_context import TmaContext, TmaContextError, build_tma_context
@@ -133,9 +135,17 @@ class CreateContestRequest(BaseModel):
 
 
 class CreateMatchRequest(BaseModel):
-    home_team_name: str
-    away_team_name: str
+    model_config = ConfigDict(extra="forbid")
+
+    home_team_id: SqliteInteger
+    away_team_id: SqliteInteger
     starts_at_utc: str
+
+
+class SaveTournamentTeamsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    team_names: list[str]
 
 
 class UpdateMatchStartRequest(BaseModel):
@@ -173,11 +183,12 @@ class SaveContestChampionRequest(BaseModel):
 
 
 class SaveSwissStagePredictionSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool
     deadline_at: str | None = None
     direct_qualifier_count: SqliteInteger = 3
     elimination_qualifier_count: SqliteInteger = 5
-    team_names: list[str] = Field(default_factory=list)
 
 
 class SaveSwissStageSelectionRequest(BaseModel):
@@ -964,6 +975,46 @@ async def delete_tma_contest(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.put("/contests/{contest_id}/teams")
+async def save_tma_tournament_teams(
+    contest_id: SqliteInteger,
+    payload: SaveTournamentTeamsRequest,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
+) -> JSONResponse:
+    settings = load_settings()
+    try:
+        tournament_teams = save_tournament_teams(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            team_names=payload.team_names,
+            audit_actor=_audit_actor(context.context, context.access),
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (ContestCompletedError, TournamentTeamsLockedError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        content={
+            "tournament_teams": _serialize_tournament_teams(tournament_teams),
+        },
+    )
+
+
 @router.post("/contests/{contest_id}/matches")
 async def create_tma_match(
     contest_id: SqliteInteger,
@@ -993,8 +1044,8 @@ async def create_tma_match(
             first_name=context.user.first_name,
             last_name=context.user.last_name,
             username=context.user.username,
-            home_team_name=payload.home_team_name,
-            away_team_name=payload.away_team_name,
+            home_team_id=payload.home_team_id,
+            away_team_id=payload.away_team_id,
             starts_at_utc=payload.starts_at_utc,
             idempotency_key=idempotency_key,
             audit_actor=_audit_actor(context.context, context.access),
@@ -1289,7 +1340,6 @@ async def save_tma_swiss_stage_prediction_settings(
             deadline_at=payload.deadline_at,
             direct_qualifier_count=payload.direct_qualifier_count,
             elimination_qualifier_count=payload.elimination_qualifier_count,
-            team_names=payload.team_names,
             audit_actor=_audit_actor(context.context, context.access),
         )
         contest = get_contest_details(
@@ -1687,6 +1737,7 @@ def _serialize_contest_details(contest) -> dict[str, object]:
         "slug": contest.slug,
         "created_at": contest.created_at,
         "is_active": contest.is_active,
+        "tournament_teams": _serialize_tournament_teams(contest.tournament_teams),
         "match_prediction_publication": _serialize_match_prediction_publication(
             contest.match_prediction_publication
         ),
@@ -1748,6 +1799,14 @@ def _serialize_team_summary(team) -> dict[str, object]:
     return {
         "id": team.id,
         "name": team.name,
+    }
+
+
+def _serialize_tournament_teams(tournament_teams) -> dict[str, object]:
+    return {
+        "teams": [_serialize_team_summary(team) for team in tournament_teams.teams],
+        "is_locked": tournament_teams.is_locked,
+        "lock_reasons": list(tournament_teams.lock_reasons),
     }
 
 

@@ -57,6 +57,10 @@ const AUDIT_EVENT_PRESENTATIONS = Object.freeze({
     label: "Изменён чемпион",
     group: "Чемпион",
   }),
+  tournament_teams_updated: Object.freeze({
+    label: "Изменены команды турнира",
+    group: "Конкурсы",
+  }),
   swiss_stage_settings_updated: Object.freeze({
     label: "Изменены настройки швейцарского этапа",
     group: "Швейцарский этап",
@@ -2993,6 +2997,20 @@ function getChampionPrediction(contest) {
   };
 }
 
+function getTournamentTeams(contest) {
+  const tournamentTeams = contest?.tournament_teams;
+
+  return {
+    teams: Array.isArray(tournamentTeams?.teams)
+      ? tournamentTeams.teams
+      : [],
+    is_locked: tournamentTeams?.is_locked === true,
+    lock_reasons: Array.isArray(tournamentTeams?.lock_reasons)
+      ? tournamentTeams.lock_reasons
+      : [],
+  };
+}
+
 function getMatchPredictionPublication(contest) {
   const publication = contest?.match_prediction_publication;
 
@@ -3821,6 +3839,108 @@ function createMatchPredictionPublicationAdministrationCard(contest, onUpdated) 
   return item;
 }
 
+function createTournamentTeamsAdministrationCard(contest, state, onUpdated) {
+  const tournamentTeams = getTournamentTeams(contest);
+  const card = createElement("section", {
+    className: "info-card tournament-teams-card",
+  });
+  const title = createElement("h3", { text: "Команды турнира" });
+  const count = createElement("p", {
+    className: "subtitle",
+    text: `Сохранено команд: ${tournamentTeams.teams.length}.`,
+  });
+  const form = createElement("form", { className: "form-fields" });
+  const field = createElement("label", { className: "form-field" });
+  const input = document.createElement("textarea");
+  input.className = "text-input swiss-stage-teams-input";
+  input.rows = Math.min(
+    12,
+    Math.max(6, tournamentTeams.teams.length || 6),
+  );
+  input.placeholder = "По одной команде в строке";
+  input.value = tournamentTeams.teams.map((team) => team.name).join("\n");
+  input.disabled = tournamentTeams.is_locked;
+  field.append(
+    createElement("span", {
+      className: "form-field-label",
+      text: "Одна команда на строку",
+    }),
+    input,
+  );
+  const message = createElement("p", { className: "form-message" });
+  setFormMessage(
+    message,
+    state.tournamentTeamsMessage || "",
+    state.tournamentTeamsMessageType || "",
+  );
+  const actions = createElement("div", { className: "form-actions" });
+  const submitButton = createActionButton(
+    "Сохранить команды",
+    "primary-action-button",
+    "submit",
+  );
+  submitButton.disabled = tournamentTeams.is_locked;
+  actions.append(submitButton);
+  form.append(field);
+
+  if (tournamentTeams.is_locked) {
+    form.append(
+      createElement("p", {
+        className: "match-prediction-closed",
+        text: (
+          "Список команд нельзя изменить после создания матчей, сохранения " +
+          "прогнозов или внесения результатов."
+        ),
+      }),
+    );
+  } else {
+    form.append(
+      createElement("p", {
+        className: "form-hint",
+        text: "Пустые строки будут пропущены, порядок команд сохранится.",
+      }),
+    );
+  }
+  form.append(message, actions);
+  card.append(title, count, form);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const teamNames = input.value.split(/\r?\n/);
+    submitButton.disabled = true;
+    submitButton.textContent = "Сохраняем…";
+    try {
+      const result = await apiRequest(
+        `/api/tma/contests/${contest.id}/teams`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ team_names: teamNames }),
+        },
+      );
+      if (!result?.tournament_teams) {
+        throw new Error("Сервер вернул некорректный список команд.");
+      }
+      onUpdated(result.tournament_teams);
+    } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
+      setFormMessage(
+        message,
+        error instanceof Error
+          ? error.message
+          : "Не удалось сохранить команды турнира.",
+        "error",
+      );
+      submitButton.disabled = false;
+      submitButton.textContent = "Сохранить команды";
+    }
+  });
+
+  return card;
+}
+
 function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   if (prediction.settings_locked) {
     return createElement("p", {
@@ -3844,7 +3964,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   const overview = createElement("span", {
     className: "match-form-overview",
     text: prediction.is_enabled
-      ? "Срок, команды и лимиты"
+      ? "Срок и лимиты"
       : "Включить прогноз",
   });
   const description = createElement("p", {
@@ -3916,21 +4036,10 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
     eliminationInput,
   );
   limits.append(directField, eliminationField);
-  const teamsField = createElement("label", { className: "form-field" });
-  const teamsInput = document.createElement("textarea");
-  teamsInput.className = "text-input swiss-stage-teams-input";
-  teamsInput.rows = 8;
-  teamsInput.placeholder = "По одной команде в строке";
-  teamsInput.value = prediction.candidates
-    .map((team) => team.name)
-    .join("\n");
-  teamsField.append(
-    createElement("span", {
-      className: "form-field-label",
-      text: "Команды этапа",
-    }),
-    teamsInput,
-  );
+  const tournamentTeamsHint = createElement("p", {
+    className: "form-hint",
+    text: `Используются команды турнира: ${prediction.candidates.length}.`,
+  });
   const message = createElement("p", { className: "form-message" });
   const actions = createElement("div", { className: "form-actions" });
   const submitButton = createActionButton(
@@ -3959,11 +4068,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
     enabledField,
     deadlineField,
     limits,
-    teamsField,
-    createElement("p", {
-      className: "form-hint",
-      text: "Укажите по одной команде в строке.",
-    }),
+    tournamentTeamsHint,
     message,
     actions,
   );
@@ -3974,10 +4079,6 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
     const directCount = Number(directInput.value);
     const eliminationCount = Number(eliminationInput.value);
     const deadline = new Date(deadlineInput.value);
-    const teamNames = teamsInput.value
-      .split(/\r?\n/)
-      .map((name) => normalizeTeamName(name))
-      .filter(Boolean);
     if (
       !Number.isSafeInteger(directCount) ||
       directCount <= 0 ||
@@ -4004,7 +4105,6 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
             deadline_at: deadlineInput.value ? deadline.toISOString() : null,
             direct_qualifier_count: directCount,
             elimination_qualifier_count: eliminationCount,
-            team_names: teamNames,
           }),
         },
       );
@@ -4721,6 +4821,7 @@ function createMatchesCard(
 
 function createMatchFormCard(bootstrap, contest, state) {
   const draft = state.matchDraft || {};
+  const tournamentTeams = getTournamentTeams(contest).teams;
   const card = createElement("section", {
     className: "info-card contest-form-card match-form-card",
   });
@@ -4751,8 +4852,10 @@ function createMatchFormCard(bootstrap, contest, state) {
     className: "form-field-label",
     text: "Первая команда",
   });
-  const homeTeamInput = createElement("input", {
-    className: "text-input",
+  const homeTeamInput = createChampionTeamSelect(tournamentTeams, {
+    id: "match-home-team-id",
+    name: "match-home-team-id",
+    selectedTeamId: draft.homeTeamId ?? null,
   });
   const awayTeamField = createElement("label", {
     className: "form-field",
@@ -4761,8 +4864,10 @@ function createMatchFormCard(bootstrap, contest, state) {
     className: "form-field-label",
     text: "Вторая команда",
   });
-  const awayTeamInput = createElement("input", {
-    className: "text-input",
+  const awayTeamInput = createChampionTeamSelect(tournamentTeams, {
+    id: "match-away-team-id",
+    name: "match-away-team-id",
+    selectedTeamId: draft.awayTeamId ?? null,
   });
   const startsAtField = createElement("label", {
     className: "form-field",
@@ -4796,22 +4901,8 @@ function createMatchFormCard(bootstrap, contest, state) {
   summaryContent.append(title, overview);
   summary.append(summaryContent);
 
-  homeTeamInput.id = "match-home-team-name";
-  homeTeamInput.name = "match-home-team-name";
-  homeTeamInput.type = "text";
-  homeTeamInput.maxLength = CONTEST_NAME_MAX_LENGTH;
-  homeTeamInput.autocomplete = "off";
-  homeTeamInput.placeholder = "Например: Аргентина";
-  homeTeamInput.value = draft.homeTeamName || "";
   homeTeamInput.required = true;
 
-  awayTeamInput.id = "match-away-team-name";
-  awayTeamInput.name = "match-away-team-name";
-  awayTeamInput.type = "text";
-  awayTeamInput.maxLength = CONTEST_NAME_MAX_LENGTH;
-  awayTeamInput.autocomplete = "off";
-  awayTeamInput.placeholder = "Например: Бразилия";
-  awayTeamInput.value = draft.awayTeamName || "";
   awayTeamInput.required = true;
 
   startsAtInput.id = "match-starts-at";
@@ -4832,6 +4923,17 @@ function createMatchFormCard(bootstrap, contest, state) {
   awayTeamField.append(awayTeamLabel, awayTeamInput);
   startsAtField.append(startsAtLabel, startsAtInput);
   actions.append(submitButton);
+  if (tournamentTeams.length < 2) {
+    homeTeamInput.disabled = true;
+    awayTeamInput.disabled = true;
+    startsAtInput.disabled = true;
+    submitButton.disabled = true;
+    setFormMessage(
+      message,
+      "Сначала добавьте как минимум две команды турнира.",
+      "error",
+    );
+  }
   form.append(
     homeTeamField,
     awayTeamField,
@@ -4856,30 +4958,30 @@ function createMatchFormCard(bootstrap, contest, state) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
 
-    const homeTeamName = normalizeTeamName(homeTeamInput.value);
-    const awayTeamName = normalizeTeamName(awayTeamInput.value);
+    const homeTeamId = Number(homeTeamInput.value);
+    const awayTeamId = Number(awayTeamInput.value);
     const startsAtLocal = startsAtInput.value;
     const startsAt = new Date(startsAtLocal);
 
-    if (!homeTeamName) {
+    if (!Number.isSafeInteger(homeTeamId) || homeTeamId <= 0) {
       homeTeamInput.setAttribute("aria-invalid", "true");
-      setFormMessage(message, "Введите название первой команды.", "error");
+      setFormMessage(message, "Выберите первую команду.", "error");
       homeTeamInput.focus();
       return;
     }
 
     homeTeamInput.removeAttribute("aria-invalid");
 
-    if (!awayTeamName) {
+    if (!Number.isSafeInteger(awayTeamId) || awayTeamId <= 0) {
       awayTeamInput.setAttribute("aria-invalid", "true");
-      setFormMessage(message, "Введите название второй команды.", "error");
+      setFormMessage(message, "Выберите вторую команду.", "error");
       awayTeamInput.focus();
       return;
     }
 
     awayTeamInput.removeAttribute("aria-invalid");
 
-    if (homeTeamName.toLocaleLowerCase() === awayTeamName.toLocaleLowerCase()) {
+    if (homeTeamId === awayTeamId) {
       homeTeamInput.setAttribute("aria-invalid", "true");
       awayTeamInput.setAttribute("aria-invalid", "true");
       setFormMessage(
@@ -4908,8 +5010,8 @@ function createMatchFormCard(bootstrap, contest, state) {
     startsAtInput.removeAttribute("aria-invalid");
 
     const matchDraft = {
-      homeTeamName,
-      awayTeamName,
+      homeTeamId,
+      awayTeamId,
       startsAtLocal,
     };
     const idempotencyKey =
@@ -4928,8 +5030,8 @@ function createMatchFormCard(bootstrap, contest, state) {
             [IDEMPOTENCY_KEY_HEADER]: idempotencyKey,
           },
           body: JSON.stringify({
-            home_team_name: homeTeamName,
-            away_team_name: awayTeamName,
+            home_team_id: homeTeamId,
+            away_team_id: awayTeamId,
             starts_at_utc: startsAt.toISOString(),
           }),
         },
@@ -4944,24 +5046,7 @@ function createMatchFormCard(bootstrap, contest, state) {
       const successMessage = result.was_created
         ? `Матч «${matchName}» добавлен.`
         : `Матч «${matchName}» уже был добавлен ранее.`;
-      const currentMatches = Array.isArray(contest.matches)
-        ? contest.matches
-        : [];
-      const updatedContest = {
-        ...contest,
-        matches: [
-          ...currentMatches.filter((match) => match.id !== result.match.id),
-          result.match,
-        ].sort((left, right) => {
-          const startsAtDifference =
-            new Date(left.starts_at_utc).getTime() -
-            new Date(right.starts_at_utc).getTime();
-
-          return startsAtDifference || left.id - right.id;
-        }),
-      };
-
-      renderContestDetailsRoute(bootstrap, updatedContest, {
+      void openContest(bootstrap, contest.id, {
         ...state,
         activeTab: "matches",
         matchFormMessage: successMessage,
@@ -5168,6 +5253,21 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
   };
   const cards = [
     createContestManagementHeader(contest, bootstrap),
+    ...(isActive
+      ? [
+        createTournamentTeamsAdministrationCard(
+          contest,
+          managementState,
+          () => {
+            void openContest(bootstrap, contest.id, {
+              ...managementState,
+              tournamentTeamsMessage: "Команды турнира сохранены.",
+              tournamentTeamsMessageType: "success",
+            });
+          },
+        ),
+      ]
+      : []),
     createMatchesCard(
       contest,
       matches,
@@ -5568,6 +5668,12 @@ function buildAuditSummaryLines(event) {
         + `${getAuditTeamName(event, before.champion_team_id)} → `
         + `${getAuditTeamName(event, after.champion_team_id)}.`,
       ];
+    case "tournament_teams_updated":
+      return [
+        "Команды турнира: "
+        + `${formatAuditTeamList(before.teams)} → `
+        + `${formatAuditTeamList(after.teams)}.`,
+      ];
     case "swiss_stage_settings_updated":
       return ["Обновлены настройки прогноза на швейцарский этап."];
     case "swiss_stage_result_set":
@@ -5587,6 +5693,17 @@ function buildAuditSummaryLines(event) {
     default:
       return ["Сохранено административное действие."];
   }
+}
+
+function formatAuditTeamList(teams) {
+  if (!Array.isArray(teams) || teams.length === 0) {
+    return "нет";
+  }
+  return teams
+    .map((team) => (
+      team && typeof team.name === "string" ? team.name : `#${team?.id || "?"}`
+    ))
+    .join(", ");
 }
 
 function formatAuditStateValue(key, value, event) {

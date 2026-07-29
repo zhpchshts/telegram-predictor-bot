@@ -154,6 +154,15 @@ def test_swiss_stage_settings_match_champion_settings_copy_and_state() -> None:
     assert 'enabledInput.addEventListener("change", syncEnabledState)' in (swiss_source)
 
 
+def test_swiss_stage_settings_use_tournament_teams_without_separate_input() -> None:
+    settings_source = _function_source("createSwissStageSettingsForm")
+
+    assert "Используются команды турнира:" in settings_source
+    assert "prediction.candidates.length" in settings_source
+    assert "team_names" not in settings_source
+    assert "teamsInput" not in settings_source
+
+
 def test_tma_locked_settings_text_mentions_prediction_and_result() -> None:
     settings_source = _function_source("createSwissStageSettingsForm")
 

@@ -20,6 +20,7 @@ class AuditEventType(StrEnum):
     MATCH_RESULT_CHANGED = "match_result_changed"
     CONTEST_CHAMPION_SET = "contest_champion_set"
     CONTEST_CHAMPION_CHANGED = "contest_champion_changed"
+    TOURNAMENT_TEAMS_UPDATED = "tournament_teams_updated"
     SWISS_STAGE_SETTINGS_UPDATED = "swiss_stage_settings_updated"
     SWISS_STAGE_RESULT_SET = "swiss_stage_result_set"
     SWISS_STAGE_RESULT_CHANGED = "swiss_stage_result_changed"

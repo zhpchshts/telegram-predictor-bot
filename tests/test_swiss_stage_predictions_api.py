@@ -43,6 +43,13 @@ def test_swiss_stage_api_configures_predicts_and_records_result(
     contest = create_tma_contest(client)
     contest_id = int(contest["id"])
 
+    teams_response = client.put(
+        f"/api/tma/contests/{contest_id}/teams",
+        headers=build_tma_headers(),
+        json={"team_names": ["Альфа", "Бета", "Гамма"]},
+    )
+    assert teams_response.status_code == 200
+
     settings_response = client.put(
         f"/api/tma/contests/{contest_id}/swiss-stage-prediction/settings",
         headers=build_tma_headers(),
@@ -51,7 +58,6 @@ def test_swiss_stage_api_configures_predicts_and_records_result(
             "deadline_at": "2030-01-01T12:00:00Z",
             "direct_qualifier_count": 1,
             "elimination_qualifier_count": 1,
-            "team_names": ["Альфа", "Бета", "Гамма"],
         },
     )
     assert settings_response.status_code == 200
@@ -85,7 +91,6 @@ def test_swiss_stage_api_configures_predicts_and_records_result(
             "deadline_at": None,
             "direct_qualifier_count": 1,
             "elimination_qualifier_count": 1,
-            "team_names": [],
         },
     )
     assert locked_response.status_code == 409

@@ -209,6 +209,26 @@ def test_match_form_prefills_local_start_time_and_focuses_on_manual_open() -> No
     assert "homeTeamInput.focus()" in form_source
 
 
+def test_management_uses_tournament_team_list_and_ids_for_matches() -> None:
+    teams_source = _function_source("createTournamentTeamsAdministrationCard")
+    match_source = _function_source("createMatchFormCard")
+    management_source = _function_source("renderContestManagementScreen")
+
+    assert 'text: "Команды турнира"' in teams_source
+    assert "team_names: teamNames" in teams_source
+    assert "/teams`" in teams_source
+    assert "tournamentTeams.is_locked" in teams_source
+    assert "Список команд нельзя изменить после создания матчей" in teams_source
+    assert "createTournamentTeamsAdministrationCard" in management_source
+
+    assert "getTournamentTeams(contest).teams" in match_source
+    assert "createChampionTeamSelect(tournamentTeams" in match_source
+    assert "home_team_id: homeTeamId" in match_source
+    assert "away_team_id: awayTeamId" in match_source
+    assert "home_team_name: homeTeamName" not in match_source
+    assert "away_team_name: awayTeamName" not in match_source
+
+
 def test_empty_champion_deadline_uses_general_local_default() -> None:
     settings_source = _function_source("createChampionPredictionSettingsDisclosure")
 

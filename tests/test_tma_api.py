@@ -232,6 +232,45 @@ def create_tma_contest(
     return response.json()["contest"]
 
 
+def build_tma_match_payload(
+    client: TestClient,
+    *,
+    contest_id: int,
+    home_team_name: str,
+    away_team_name: str,
+    starts_at_utc: str,
+) -> dict[str, object]:
+    details_response = client.get(
+        f"/api/tma/contests/{contest_id}",
+        headers=build_tma_headers(),
+    )
+    assert details_response.status_code == 200
+    tournament_teams = details_response.json()["contest"]["tournament_teams"]
+    current_names = [team["name"] for team in tournament_teams["teams"]]
+    normalized_current_names = {name.casefold() for name in current_names}
+    missing_names = [
+        name
+        for name in (home_team_name, away_team_name)
+        if name.casefold() not in normalized_current_names
+    ]
+    if missing_names:
+        save_response = client.put(
+            f"/api/tma/contests/{contest_id}/teams",
+            headers=build_tma_headers(),
+            json={"team_names": [*current_names, *missing_names]},
+        )
+        assert save_response.status_code == 200
+        tournament_teams = save_response.json()["tournament_teams"]
+    teams_by_name = {
+        team["name"].casefold(): team["id"] for team in tournament_teams["teams"]
+    }
+    return {
+        "home_team_id": teams_by_name[home_team_name.casefold()],
+        "away_team_id": teams_by_name[away_team_name.casefold()],
+        "starts_at_utc": starts_at_utc,
+    }
+
+
 def create_role_management_app(
     *,
     telegram_client=AdminTelegramAdministratorsClient,
@@ -1371,6 +1410,13 @@ def test_denied_match_creation_does_not_create_match_or_idempotency_record(
         client,
         idempotency_key="contest-before-enforcement",
     )
+    match_payload = build_tma_match_payload(
+        client,
+        contest_id=int(contest["id"]),
+        home_team_name="Аргентина",
+        away_team_name="Бразилия",
+        starts_at_utc="2030-06-11T18:00:00Z",
+    )
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
     client.app.dependency_overrides[get_telegram_administrators_client] = (
         FakeTelegramAdministratorsClient
@@ -1379,11 +1425,7 @@ def test_denied_match_creation_does_not_create_match_or_idempotency_record(
     response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="participant-match-denied"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=match_payload,
     )
 
     assert response.status_code == 403
@@ -1600,6 +1642,10 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
         ): "contest_management",
         ("DELETE", "/api/tma/contests/{contest_id}"): "contest_management",
         (
+            "PUT",
+            "/api/tma/contests/{contest_id}/teams",
+        ): "contest_management",
+        (
             "POST",
             "/api/tma/contests/{contest_id}/matches",
         ): "contest_management",
@@ -1679,11 +1725,13 @@ def test_participant_predictions_remain_available_with_enforcement(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="prediction-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2030-06-11T18:00:00Z",
+        ),
     )
     assert match_response.status_code == 201
     match = match_response.json()["match"]
@@ -1733,11 +1781,13 @@ def test_prediction_payload_cannot_replace_the_verified_author(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="spoofed-author-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2030-06-11T18:00:00Z",
+        ),
     )
     assert match_response.status_code == 201
     match = match_response.json()["match"]
@@ -1781,11 +1831,13 @@ def test_denied_administrative_operations_do_not_mutate_multiple_domain_areas(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="denied-mutations-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2030-06-11T18:00:00Z",
+        ),
     )
     assert match_response.status_code == 201
     match = match_response.json()["match"]
@@ -1854,11 +1906,13 @@ def test_participant_can_read_contest_matches_and_leaderboard_with_enforcement(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="readable-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2030-06-11T18:00:00Z",
+        ),
     )
     assert match_response.status_code == 201
     match = match_response.json()["match"]
@@ -2248,6 +2302,11 @@ def test_get_contest_returns_details_with_empty_matches(
             "slug": contest["slug"],
             "created_at": contest["created_at"],
             "is_active": True,
+            "tournament_teams": {
+                "teams": [],
+                "is_locked": False,
+                "lock_reasons": [],
+            },
             "match_prediction_publication": {
                 "is_enabled": False,
             },
@@ -2266,6 +2325,85 @@ def test_get_contest_returns_details_with_empty_matches(
             "matches": [],
         }
     }
+
+
+def test_tournament_teams_api_saves_actual_list_and_locks_after_match(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+    contest_id = int(contest["id"])
+
+    teams_response = client.put(
+        f"/api/tma/contests/{contest_id}/teams",
+        headers=build_tma_headers(),
+        json={
+            "team_names": [
+                "  Team   Liquid ",
+                "",
+                "Team Spirit",
+            ]
+        },
+    )
+    assert teams_response.status_code == 200
+    tournament_teams = teams_response.json()["tournament_teams"]
+    assert tournament_teams == {
+        "teams": [
+            {"id": 1, "name": "Team Liquid"},
+            {"id": 2, "name": "Team Spirit"},
+        ],
+        "is_locked": False,
+        "lock_reasons": [],
+    }
+
+    legacy_payload_response = client.post(
+        f"/api/tma/contests/{contest_id}/matches",
+        headers=build_tma_headers(idempotency_key="legacy-names"),
+        json={
+            "home_team_name": "Team Liquid",
+            "away_team_name": "Team Spirit",
+            "starts_at_utc": "2030-06-11T18:00:00Z",
+        },
+    )
+    assert legacy_payload_response.status_code == 422
+
+    match_response = client.post(
+        f"/api/tma/contests/{contest_id}/matches",
+        headers=build_tma_headers(idempotency_key="team-id-match"),
+        json={
+            "home_team_id": 1,
+            "away_team_id": 2,
+            "starts_at_utc": "2030-06-11T18:00:00Z",
+        },
+    )
+    assert match_response.status_code == 201
+
+    details_response = client.get(
+        f"/api/tma/contests/{contest_id}",
+        headers=build_tma_headers(),
+    )
+    assert details_response.status_code == 200
+    assert details_response.json()["contest"]["tournament_teams"] == {
+        "teams": [
+            {"id": 1, "name": "Team Liquid"},
+            {"id": 2, "name": "Team Spirit"},
+        ],
+        "is_locked": True,
+        "lock_reasons": ["match_exists"],
+    }
+    locked_response = client.put(
+        f"/api/tma/contests/{contest_id}/teams",
+        headers=build_tma_headers(),
+        json={"team_names": ["Team Liquid", "Team Spirit", "PARIVISION"]},
+    )
+    assert locked_response.status_code == 409
 
 
 def test_match_prediction_publication_settings_can_be_enabled(
@@ -2369,11 +2507,13 @@ def test_create_match_creates_match_and_returns_contest_details(
     response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="create-match-1"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2026-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2026-06-11T18:00:00Z",
+        ),
     )
 
     assert response.status_code == 201
@@ -2416,11 +2556,13 @@ def test_create_match_reuses_result_for_same_idempotency_key(
     )
     client = TestClient(create_app())
     contest = create_tma_contest(client)
-    request_data = {
-        "home_team_name": "Аргентина",
-        "away_team_name": "Бразилия",
-        "starts_at_utc": "2026-06-11T18:00:00Z",
-    }
+    request_data = build_tma_match_payload(
+        client,
+        contest_id=int(contest["id"]),
+        home_team_name="Аргентина",
+        away_team_name="Бразилия",
+        starts_at_utc="2026-06-11T18:00:00Z",
+    )
 
     first_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
@@ -2469,11 +2611,13 @@ def test_create_match_requires_idempotency_key(
     response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2026-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2026-06-11T18:00:00Z",
+        ),
     )
 
     assert response.status_code == 400
@@ -2519,11 +2663,13 @@ def test_save_match_prediction_creates_updates_and_returns_prediction(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="create-future-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2030-06-11T18:00:00Z",
+        ),
     )
 
     assert match_response.status_code == 201
@@ -2612,11 +2758,13 @@ def test_save_match_prediction_rejects_closed_match(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="create-closed-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2020-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2020-06-11T18:00:00Z",
+        ),
     )
     assert match_response.status_code == 201
     match_id = match_response.json()["match"]["id"]
@@ -2653,11 +2801,13 @@ def test_save_match_prediction_rejects_negative_score(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="create-future-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2030-06-11T18:00:00Z",
+        ),
     )
     assert match_response.status_code == 201
     match_id = match_response.json()["match"]["id"]
@@ -2693,11 +2843,13 @@ def test_save_match_prediction_rejects_boolean_and_oversized_values_before_write
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="create-validated-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2030-06-11T18:00:00Z",
+        ),
     )
     assert match_response.status_code == 201
     match = match_response.json()["match"]
@@ -2745,11 +2897,13 @@ def test_save_match_result_creates_updates_and_returns_result(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="create-result-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2020-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2020-06-11T18:00:00Z",
+        ),
     )
 
     assert match_response.status_code == 201
@@ -2838,11 +2992,13 @@ def test_get_contest_returns_prediction_score_after_result(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="create-score-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2030-06-11T18:00:00Z",
+        ),
     )
 
     assert match_response.status_code == 201
@@ -2937,11 +3093,13 @@ def test_save_match_result_rejects_match_before_start(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="create-future-result-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2030-06-11T18:00:00Z",
+        ),
     )
 
     assert match_response.status_code == 201
@@ -2980,11 +3138,13 @@ def test_save_match_result_rejects_negative_score(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="create-result-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2030-06-11T18:00:00Z",
+        ),
     )
 
     assert match_response.status_code == 201
@@ -3023,11 +3183,13 @@ def test_save_match_result_rejects_cancelled_match(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="create-cancelled-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2030-06-11T18:00:00Z",
+        ),
     )
 
     assert match_response.status_code == 201
@@ -3077,11 +3239,13 @@ def test_complete_contest_rejects_unfinished_match(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="unfinished-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2020-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2020-06-11T18:00:00Z",
+        ),
     )
 
     assert match_response.status_code == 201
@@ -3114,11 +3278,13 @@ def test_complete_contest_moves_it_to_completed_and_blocks_new_match(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="completed-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2020-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2020-06-11T18:00:00Z",
+        ),
     )
 
     assert match_response.status_code == 201
@@ -3175,8 +3341,8 @@ def test_complete_contest_moves_it_to_completed_and_blocks_new_match(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="match-after-completion"),
         json={
-            "home_team_name": "Франция",
-            "away_team_name": "Испания",
+            "home_team_id": match["home_team_id"],
+            "away_team_id": match["away_team_id"],
             "starts_at_utc": "2030-06-11T18:00:00Z",
         },
     )
@@ -3355,11 +3521,13 @@ def test_delete_match_returns_no_content_and_removes_match(
         headers=build_tma_headers(
             idempotency_key="create-match-for-deletion",
         ),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Франция",
-            "starts_at_utc": "2030-07-19T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Франция",
+            starts_at_utc="2030-07-19T18:00:00Z",
+        ),
     )
 
     assert create_match_response.status_code == 201
@@ -3401,11 +3569,13 @@ def test_update_match_start_returns_updated_match(
     create_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="match-for-start-update"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Франция",
-            "starts_at_utc": "2030-07-19T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Франция",
+            starts_at_utc="2030-07-19T18:00:00Z",
+        ),
     )
     match = create_response.json()["match"]
 
@@ -3437,11 +3607,13 @@ def test_update_match_start_rejects_past_new_time(
     create_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="match-for-invalid-start-update"),
-        json={
-            "home_team_name": "Испания",
-            "away_team_name": "Англия",
-            "starts_at_utc": "2030-07-19T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Испания",
+            away_team_name="Англия",
+            starts_at_utc="2030-07-19T18:00:00Z",
+        ),
     )
     match = create_response.json()["match"]
 
@@ -3480,11 +3652,13 @@ def test_update_match_start_hides_match_from_another_contest(
     create_response = client.post(
         f"/api/tma/contests/{source_contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="isolated-match-for-update"),
-        json={
-            "home_team_name": "Германия",
-            "away_team_name": "Италия",
-            "starts_at_utc": "2030-07-19T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(source_contest["id"]),
+            home_team_name="Германия",
+            away_team_name="Италия",
+            starts_at_utc="2030-07-19T18:00:00Z",
+        ),
     )
     match = create_response.json()["match"]
 
@@ -3522,11 +3696,13 @@ def test_participant_cannot_update_match_start(
     create_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="match-before-update-enforcement"),
-        json={
-            "home_team_name": "Нидерланды",
-            "away_team_name": "Португалия",
-            "starts_at_utc": "2030-07-19T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Нидерланды",
+            away_team_name="Португалия",
+            starts_at_utc="2030-07-19T18:00:00Z",
+        ),
     )
     match = create_response.json()["match"]
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
@@ -3600,11 +3776,13 @@ def test_delete_match_rejects_completed_contest(
         headers=build_tma_headers(
             idempotency_key="create-match-in-completed-contest",
         ),
-        json={
-            "home_team_name": "Испания",
-            "away_team_name": "Англия",
-            "starts_at_utc": "2020-07-19T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Испания",
+            away_team_name="Англия",
+            starts_at_utc="2020-07-19T18:00:00Z",
+        ),
     )
 
     assert create_match_response.status_code == 201
@@ -3657,11 +3835,13 @@ def test_get_contest_returns_leaderboard_completeness_with_champion_prediction(
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="create-champion-match"),
-        json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
-            "starts_at_utc": "2030-06-11T18:00:00Z",
-        },
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Аргентина",
+            away_team_name="Бразилия",
+            starts_at_utc="2030-06-11T18:00:00Z",
+        ),
     )
 
     assert match_response.status_code == 201

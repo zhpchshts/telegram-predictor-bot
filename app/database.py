@@ -159,6 +159,16 @@ CREATE TABLE IF NOT EXISTS teams (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS contest_teams (
+    contest_id INTEGER NOT NULL
+        REFERENCES contests(id) ON DELETE CASCADE,
+    team_id INTEGER NOT NULL
+        REFERENCES teams(id),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    PRIMARY KEY (contest_id, team_id),
+    UNIQUE (contest_id, position)
+);
+
 CREATE TABLE IF NOT EXISTS ties (
     id INTEGER PRIMARY KEY,
     stage_id INTEGER NOT NULL REFERENCES stages(id) ON DELETE CASCADE,
@@ -280,7 +290,7 @@ CREATE TABLE IF NOT EXISTS swiss_stage_prediction_selections (
     FOREIGN KEY (prediction_id, contest_id)
         REFERENCES swiss_stage_predictions(id, contest_id) ON DELETE CASCADE,
     FOREIGN KEY (contest_id, team_id)
-        REFERENCES swiss_stage_prediction_candidates(contest_id, team_id)
+        REFERENCES contest_teams(contest_id, team_id)
         ON DELETE CASCADE
 );
 
@@ -299,7 +309,7 @@ CREATE TABLE IF NOT EXISTS swiss_stage_result_selections (
     FOREIGN KEY (contest_id)
         REFERENCES swiss_stage_results(contest_id) ON DELETE CASCADE,
     FOREIGN KEY (contest_id, team_id)
-        REFERENCES swiss_stage_prediction_candidates(contest_id, team_id)
+        REFERENCES contest_teams(contest_id, team_id)
         ON DELETE CASCADE
 );
 
@@ -454,6 +464,9 @@ CREATE INDEX IF NOT EXISTS idx_champion_predictions_contest_id
 
 CREATE INDEX IF NOT EXISTS idx_champion_predictions_user_id
   ON champion_predictions(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_contest_teams_team_id
+    ON contest_teams(team_id);
 
 CREATE INDEX IF NOT EXISTS idx_swiss_stage_predictions_user_id
     ON swiss_stage_predictions(user_id);
@@ -741,12 +754,221 @@ def _migrate_contest_publications_for_champion_predictions(
         connection.close()
 
 
+def _backfill_contest_teams(connection: sqlite3.Connection) -> None:
+    contest_rows = connection.execute(
+        """
+        SELECT id
+        FROM contests
+        ORDER BY id
+        """
+    ).fetchall()
+    for contest_row in contest_rows:
+        contest_id = int(contest_row["id"])
+        existing_rows = connection.execute(
+            """
+            SELECT team_id, position
+            FROM contest_teams
+            WHERE contest_id = ?
+            ORDER BY position, team_id
+            """,
+            (contest_id,),
+        ).fetchall()
+        existing_team_ids = {int(row["team_id"]) for row in existing_rows}
+        next_position = (
+            max(int(row["position"]) for row in existing_rows) + 1
+            if existing_rows
+            else 0
+        )
+
+        source_rows = connection.execute(
+            """
+            WITH match_teams AS (
+                SELECT
+                    matches.home_team_id AS team_id,
+                    MIN(matches.created_at) AS first_used_at
+                FROM matches
+                JOIN stages ON stages.id = matches.stage_id
+                JOIN competitions
+                    ON competitions.id = stages.competition_id
+                WHERE competitions.contest_id = ?
+                GROUP BY matches.home_team_id
+
+                UNION ALL
+
+                SELECT
+                    matches.away_team_id AS team_id,
+                    MIN(matches.created_at) AS first_used_at
+                FROM matches
+                JOIN stages ON stages.id = matches.stage_id
+                JOIN competitions
+                    ON competitions.id = stages.competition_id
+                WHERE competitions.contest_id = ?
+                GROUP BY matches.away_team_id
+            ),
+            ordered_match_teams AS (
+                SELECT team_id, MIN(first_used_at) AS first_used_at
+                FROM match_teams
+                GROUP BY team_id
+            ),
+            champion_prediction_teams AS (
+                SELECT
+                    predicted_team_id AS team_id,
+                    MIN(submitted_at) AS first_used_at
+                FROM champion_predictions
+                WHERE contest_id = ?
+                GROUP BY predicted_team_id
+            )
+            SELECT team_id, source_order, item_order
+            FROM (
+                SELECT
+                    team_id,
+                    1 AS source_order,
+                    printf('%s:%020d', first_used_at, team_id) AS item_order
+                FROM ordered_match_teams
+
+                UNION ALL
+
+                SELECT
+                    team_id,
+                    2 AS source_order,
+                    printf('%s:%020d', first_used_at, team_id) AS item_order
+                FROM champion_prediction_teams
+
+                UNION ALL
+
+                SELECT
+                    champion_team_id AS team_id,
+                    3 AS source_order,
+                    printf('%020d', champion_team_id) AS item_order
+                FROM contests
+                WHERE id = ? AND champion_team_id IS NOT NULL
+            )
+            ORDER BY source_order, item_order
+            """,
+            (contest_id, contest_id, contest_id, contest_id),
+        ).fetchall()
+        for source_row in source_rows:
+            team_id = int(source_row["team_id"])
+            if team_id in existing_team_ids:
+                continue
+            connection.execute(
+                """
+                INSERT INTO contest_teams (contest_id, team_id, position)
+                VALUES (?, ?, ?)
+                """,
+                (contest_id, team_id, next_position),
+            )
+            existing_team_ids.add(team_id)
+            next_position += 1
+
+
+def _migrate_swiss_stage_selection_foreign_keys(database_path: Path) -> None:
+    connection = create_connection(database_path)
+    try:
+        prediction_foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(swiss_stage_prediction_selections)"
+        ).fetchall()
+        result_foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(swiss_stage_result_selections)"
+        ).fetchall()
+        if any(
+            str(row["table"]) == "contest_teams" for row in prediction_foreign_keys
+        ) and any(str(row["table"]) == "contest_teams" for row in result_foreign_keys):
+            return
+        if connection.in_transaction:
+            raise RuntimeError(
+                "Swiss-stage schema migration must start outside a transaction."
+            )
+
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            connection.executescript(
+                """
+                BEGIN IMMEDIATE;
+
+                CREATE TABLE swiss_stage_prediction_selections_new (
+                    prediction_id INTEGER NOT NULL,
+                    contest_id INTEGER NOT NULL,
+                    team_id INTEGER NOT NULL,
+                    category TEXT NOT NULL
+                        CHECK (category IN ('direct', 'elimination')),
+                    PRIMARY KEY (prediction_id, team_id),
+                    FOREIGN KEY (prediction_id, contest_id)
+                        REFERENCES swiss_stage_predictions(id, contest_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (contest_id, team_id)
+                        REFERENCES contest_teams(contest_id, team_id)
+                        ON DELETE CASCADE
+                );
+
+                INSERT INTO swiss_stage_prediction_selections_new (
+                    prediction_id,
+                    contest_id,
+                    team_id,
+                    category
+                )
+                SELECT prediction_id, contest_id, team_id, category
+                FROM swiss_stage_prediction_selections;
+
+                CREATE TABLE swiss_stage_result_selections_new (
+                    contest_id INTEGER NOT NULL,
+                    team_id INTEGER NOT NULL,
+                    category TEXT NOT NULL
+                        CHECK (category IN ('direct', 'elimination')),
+                    PRIMARY KEY (contest_id, team_id),
+                    FOREIGN KEY (contest_id)
+                        REFERENCES swiss_stage_results(contest_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (contest_id, team_id)
+                        REFERENCES contest_teams(contest_id, team_id)
+                        ON DELETE CASCADE
+                );
+
+                INSERT INTO swiss_stage_result_selections_new (
+                    contest_id,
+                    team_id,
+                    category
+                )
+                SELECT contest_id, team_id, category
+                FROM swiss_stage_result_selections;
+
+                DROP TABLE swiss_stage_prediction_selections;
+                DROP TABLE swiss_stage_result_selections;
+                ALTER TABLE swiss_stage_prediction_selections_new
+                    RENAME TO swiss_stage_prediction_selections;
+                ALTER TABLE swiss_stage_result_selections_new
+                    RENAME TO swiss_stage_result_selections;
+
+                CREATE INDEX idx_swiss_stage_prediction_selections_contest
+                    ON swiss_stage_prediction_selections(contest_id);
+
+                COMMIT;
+                """
+            )
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
+
+        foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_key_errors:
+            raise RuntimeError(
+                "Foreign key violations found after Swiss-stage schema migration."
+            )
+    finally:
+        connection.close()
+
+
 def initialize_database(database_path: Path) -> None:
     _migrate_contest_publications_for_champion_predictions(database_path)
     with create_connection(database_path) as connection:
         connection.executescript(SCHEMA)
         _migrate_contests_for_champion_predictions(connection)
         _migrate_contest_publication_messages(connection)
+        _backfill_contest_teams(connection)
+    _migrate_swiss_stage_selection_foreign_keys(database_path)
 
 
 @contextmanager

@@ -469,6 +469,14 @@ def test_deleted_contest_acceptance_flow_is_readable_through_tma_api(
     )
     assert publication_response.status_code == 200
 
+    teams_response = client.put(
+        f"/api/tma/contests/{contest_id}/teams",
+        headers=_build_headers(),
+        json={"team_names": ["Испания", "Франция"]},
+    )
+    assert teams_response.status_code == 200
+    teams = teams_response.json()["tournament_teams"]["teams"]
+
     create_match_headers = {
         **_build_headers(),
         "Idempotency-Key": "audit-acceptance-match",
@@ -477,8 +485,8 @@ def test_deleted_contest_acceptance_flow_is_readable_through_tma_api(
         f"/api/tma/contests/{contest_id}/matches",
         headers=create_match_headers,
         json={
-            "home_team_name": "Испания",
-            "away_team_name": "Франция",
+            "home_team_id": teams[0]["id"],
+            "away_team_id": teams[1]["id"],
             "starts_at_utc": "2030-06-01T12:00:00Z",
         },
     )
@@ -510,6 +518,7 @@ def test_deleted_contest_acceptance_flow_is_readable_through_tma_api(
         "contest_deleted",
         "match_deleted",
         "match_created",
+        "tournament_teams_updated",
         "contest_updated",
         "contest_created",
     ]

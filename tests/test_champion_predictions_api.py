@@ -97,6 +97,13 @@ def create_tma_match(
     contest_id: int,
     idempotency_key: str,
 ) -> dict[str, object]:
+    teams_response = client.put(
+        f"/api/tma/contests/{contest_id}/teams",
+        headers=build_tma_headers(),
+        json={"team_names": ["Аргентина", "Бразилия"]},
+    )
+    assert teams_response.status_code == 200
+    teams = teams_response.json()["tournament_teams"]["teams"]
     response = client.post(
         f"/api/tma/contests/{contest_id}/matches",
         headers={
@@ -104,8 +111,8 @@ def create_tma_match(
             "Idempotency-Key": idempotency_key,
         },
         json={
-            "home_team_name": "Аргентина",
-            "away_team_name": "Бразилия",
+            "home_team_id": teams[0]["id"],
+            "away_team_id": teams[1]["id"],
             "starts_at_utc": "2020-06-11T18:00:00Z",
         },
     )
