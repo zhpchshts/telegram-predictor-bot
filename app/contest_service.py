@@ -2474,7 +2474,11 @@ def save_contest_champion(
         if not bool(configuration_row["champion_prediction_enabled"]):
             raise ChampionUnavailableError("Сначала включите прогноз на чемпиона.")
 
-        if not _is_contest_completed(connection, contest_id=contest_id):
+        if not _is_contest_completed(
+            connection,
+            contest_id=contest_id,
+            allow_no_matches=True,
+        ):
             raise ChampionUnavailableError(
                 "Чемпиона можно указать после завершения всех матчей конкурса."
             )
@@ -3544,6 +3548,7 @@ def _get_champion_prediction_details(
     is_tournament_completed = _is_contest_completed(
         connection,
         contest_id=contest_id,
+        allow_no_matches=is_enabled,
     )
     deadline_at = configuration_row["champion_prediction_deadline_at"]
     deadline_at_value = str(deadline_at) if deadline_at is not None else None
@@ -4089,6 +4094,7 @@ def _is_contest_completed(
     connection,
     *,
     contest_id: int,
+    allow_no_matches: bool = False,
 ) -> bool:
     completion_row = connection.execute(
         """
@@ -4116,7 +4122,9 @@ def _is_contest_completed(
     total_matches = int(completion_row["total_matches"])
     completed_matches = int(completion_row["completed_matches"] or 0)
 
-    return total_matches > 0 and total_matches == completed_matches
+    return (
+        allow_no_matches or total_matches > 0
+    ) and total_matches == completed_matches
 
 
 def _is_champion_prediction_open(

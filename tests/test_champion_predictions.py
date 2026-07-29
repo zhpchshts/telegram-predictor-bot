@@ -247,6 +247,66 @@ def test_champion_prediction_card_lists_candidates_and_saves_selection(
     assert prediction_count == 1
 
 
+def test_champion_can_be_recorded_without_matches_after_deadline(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    spain_team_id, _ = ensure_contest_teams(
+        database_path,
+        contest_id=contest_id,
+        names=("Spain", "France"),
+    )
+    _configure_champion_prediction(
+        database_path,
+        contest_id=contest_id,
+    )
+    save_champion_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_TELEGRAM_USER_ID,
+        first_name="Alice",
+        last_name=None,
+        username="alice",
+        predicted_team_id=spain_team_id,
+        now_utc=OPEN_PREDICTION_TIME,
+    )
+
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_TELEGRAM_USER_ID,
+        now_utc=CLOSED_PREDICTION_TIME,
+    )
+    assert details.matches == ()
+    assert details.champion_prediction.is_tournament_completed is True
+
+    champion = save_contest_champion(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+        first_name="Admin",
+        last_name=None,
+        username="admin",
+        champion_team_id=spain_team_id,
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_PREDICTION_TIME,
+    )
+    assert champion.id == spain_team_id
+
+    updated_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_TELEGRAM_USER_ID,
+        now_utc=CLOSED_PREDICTION_TIME,
+    )
+    assert updated_details.champion_prediction.actual_champion == champion
+    assert updated_details.champion_prediction.awarded_points == 5
+
+
 def test_champion_prediction_rejects_non_candidate_and_closed_deadline(
     database_path: Path,
 ) -> None:
