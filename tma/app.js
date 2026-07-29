@@ -3026,7 +3026,7 @@ function formatLocalDateTime(date) {
   return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
-function getDefaultMatchStartsAtLocal(now = new Date()) {
+function getDefaultDateTimeLocal(now = new Date()) {
   const startsAt = new Date(now.getTime());
 
   startsAt.setSeconds(0, 0);
@@ -3178,9 +3178,9 @@ function createChampionPredictionSettingsDisclosure(
   deadlineInput.name = `contest-${contest.id}-champion-deadline`;
   deadlineInput.type = "datetime-local";
   deadlineInput.step = "60";
-  deadlineInput.value = formatDateTimeLocalValue(
-    championPrediction.deadline_at,
-  );
+  deadlineInput.value =
+    formatDateTimeLocalValue(championPrediction.deadline_at)
+    || getDefaultDateTimeLocal();
 
   pointsInput.id = `contest-${contest.id}-champion-points`;
   pointsInput.name = `contest-${contest.id}-champion-points`;
@@ -3856,7 +3856,9 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   deadlineInput.className = "text-input";
   deadlineInput.type = "datetime-local";
   deadlineInput.step = "60";
-  deadlineInput.value = formatDateTimeLocalValue(prediction.deadline_at);
+  deadlineInput.value =
+    formatDateTimeLocalValue(prediction.deadline_at)
+    || getDefaultDateTimeLocal();
   deadlineField.append(
     createElement("span", {
       className: "form-field-label",
@@ -4783,7 +4785,7 @@ function createMatchFormCard(bootstrap, contest, state) {
   startsAtInput.type = "datetime-local";
   startsAtInput.step = "60";
   startsAtInput.value =
-    draft.startsAtLocal || getDefaultMatchStartsAtLocal();
+    draft.startsAtLocal || getDefaultDateTimeLocal();
   startsAtInput.required = true;
 
   setFormMessage(

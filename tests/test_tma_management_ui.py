@@ -185,7 +185,7 @@ def test_participant_contour_does_not_render_administrative_forms() -> None:
 
 def test_match_form_prefills_local_start_time_and_focuses_on_manual_open() -> None:
     local_format_source = _function_source("formatLocalDateTime")
-    default_time_source = _function_source("getDefaultMatchStartsAtLocal")
+    default_time_source = _function_source("getDefaultDateTimeLocal")
     form_source = _function_source("createMatchFormCard")
 
     assert "date.getFullYear()" in local_format_source
@@ -200,13 +200,32 @@ def test_match_form_prefills_local_start_time_and_focuses_on_manual_open() -> No
     assert "startsAt.setMinutes(startsAt.getMinutes() + 3)" in default_time_source
     assert "return formatLocalDateTime(startsAt)" in default_time_source
 
-    assert "draft.startsAtLocal || getDefaultMatchStartsAtLocal()" in form_source
+    assert "draft.startsAtLocal || getDefaultDateTimeLocal()" in form_source
     assert "const wasInitiallyOpen = disclosure.open" in form_source
     assert 'disclosure.addEventListener("toggle"' in form_source
     assert "disclosure.open" in form_source
     assert "!wasInitiallyOpen" in form_source
     assert "!state.matchDraft" in form_source
     assert "homeTeamInput.focus()" in form_source
+
+
+def test_empty_champion_deadline_uses_general_local_default() -> None:
+    settings_source = _function_source("createChampionPredictionSettingsDisclosure")
+
+    assert "formatDateTimeLocalValue(championPrediction.deadline_at)" in settings_source
+    assert "|| getDefaultDateTimeLocal()" in settings_source
+    assert settings_source.index(
+        "formatDateTimeLocalValue(championPrediction.deadline_at)"
+    ) < settings_source.index("|| getDefaultDateTimeLocal()")
+
+
+def test_existing_match_edit_keeps_match_time_and_current_edit_value() -> None:
+    editing_source = _function_source("createMatchStartEditingSection")
+
+    assert "isCurrentMatch && state.matchStartEditValue" in editing_source
+    assert "? state.matchStartEditValue" in editing_source
+    assert ": formatDateTimeLocalValue(match.starts_at_utc)" in editing_source
+    assert "getDefaultDateTimeLocal" not in editing_source
 
 
 def test_scheduled_match_card_shows_static_time_until_start() -> None:

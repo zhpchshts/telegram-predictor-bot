@@ -110,6 +110,16 @@ def test_tma_formats_swiss_stage_audit_result_with_team_names() -> None:
     assert "formatAuditSwissStageResult(after.actual_result, event)" in (summary_source)
 
 
+def test_empty_swiss_stage_deadline_uses_general_local_default() -> None:
+    settings_source = _function_source("createSwissStageSettingsForm")
+
+    assert "formatDateTimeLocalValue(prediction.deadline_at)" in settings_source
+    assert "|| getDefaultDateTimeLocal()" in settings_source
+    assert settings_source.index(
+        "formatDateTimeLocalValue(prediction.deadline_at)"
+    ) < settings_source.index("|| getDefaultDateTimeLocal()")
+
+
 def test_tma_locked_settings_text_mentions_prediction_and_result() -> None:
     settings_source = _function_source("createSwissStageSettingsForm")
 
