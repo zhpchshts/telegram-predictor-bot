@@ -181,3 +181,56 @@ def test_participant_contour_does_not_render_administrative_forms() -> None:
     assert "createMatchFormCard" not in details_source
     assert "createContestCompletionCard" not in details_source
     assert "createContestDeletionCard" not in details_source
+
+
+def test_match_form_prefills_local_start_time_and_focuses_on_manual_open() -> None:
+    local_format_source = _function_source("formatLocalDateTime")
+    default_time_source = _function_source("getDefaultMatchStartsAtLocal")
+    form_source = _function_source("createMatchFormCard")
+
+    assert "date.getFullYear()" in local_format_source
+    assert "date.getMonth() + 1" in local_format_source
+    assert "date.getDate()" in local_format_source
+    assert "date.getHours()" in local_format_source
+    assert "date.getMinutes()" in local_format_source
+    assert "toISOString()" not in local_format_source
+
+    assert "const startsAt = new Date(now.getTime())" in default_time_source
+    assert "startsAt.setSeconds(0, 0)" in default_time_source
+    assert "startsAt.setMinutes(startsAt.getMinutes() + 3)" in default_time_source
+    assert "return formatLocalDateTime(startsAt)" in default_time_source
+
+    assert "draft.startsAtLocal || getDefaultMatchStartsAtLocal()" in form_source
+    assert "const wasInitiallyOpen = disclosure.open" in form_source
+    assert 'disclosure.addEventListener("toggle"' in form_source
+    assert "disclosure.open" in form_source
+    assert "!wasInitiallyOpen" in form_source
+    assert "!state.matchDraft" in form_source
+    assert "homeTeamInput.focus()" in form_source
+
+
+def test_scheduled_match_card_shows_static_time_until_start() -> None:
+    plural_source = _function_source("getRussianPlural")
+    starts_in_source = _function_source("formatMatchStartsIn")
+    item_source = _function_source("createMatchListItem")
+
+    assert "lastTwoDigits >= 11 && lastTwoDigits <= 14" in plural_source
+    assert "lastDigit === 1" in plural_source
+    assert "lastDigit >= 2 && lastDigit <= 4" in plural_source
+
+    assert 'match.status !== "scheduled"' in starts_in_source
+    assert "remainingMilliseconds <= 0" in starts_in_source
+    assert "Math.floor(remainingMilliseconds / 60_000)" in starts_in_source
+    assert "Math.floor(totalMinutes / (24 * 60))" in starts_in_source
+    assert "Math.floor((totalMinutes % (24 * 60)) / 60)" in starts_in_source
+    assert "const minutes = totalMinutes % 60" in starts_in_source
+    assert '"Начнётся через "' in starts_in_source
+    assert '"день", "дня", "дней"' in starts_in_source
+    assert '"час", "часа", "часов"' in starts_in_source
+    assert '"минуту", "минуты", "минут"' in starts_in_source
+
+    assert "const startsInText = formatMatchStartsIn(match)" in item_source
+    assert "if (startsInText)" in item_source
+    assert 'className: "match-meta match-starts-in"' in item_source
+    assert "setInterval" not in item_source
+    assert "setTimeout" not in item_source

@@ -782,9 +782,8 @@ summary:focus-visible {
 }
 
 .match-card-meta {
-  display: flex;
-  gap: 8px;
-  align-items: center;
+  display: grid;
+  gap: 3px;
 }
 
 .match-meta {

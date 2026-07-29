@@ -247,6 +247,52 @@ function formatMatchStartsAt(startsAtUtc) {
   }).format(startsAt);
 }
 
+function getRussianPlural(value, one, few, many) {
+  const absoluteValue = Math.abs(value);
+  const lastTwoDigits = absoluteValue % 100;
+  const lastDigit = absoluteValue % 10;
+
+  if (lastTwoDigits >= 11 && lastTwoDigits <= 14) {
+    return many;
+  }
+  if (lastDigit === 1) {
+    return one;
+  }
+  if (lastDigit >= 2 && lastDigit <= 4) {
+    return few;
+  }
+  return many;
+}
+
+function formatMatchStartsIn(match, now = new Date()) {
+  if (match.status !== "scheduled") {
+    return "";
+  }
+
+  const startsAt = new Date(match.starts_at_utc);
+  const remainingMilliseconds = startsAt.getTime() - now.getTime();
+
+  if (
+    Number.isNaN(startsAt.getTime())
+    || Number.isNaN(now.getTime())
+    || remainingMilliseconds <= 0
+  ) {
+    return "";
+  }
+
+  const totalMinutes = Math.floor(remainingMilliseconds / 60_000);
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+
+  return (
+    "Начнётся через "
+    + `${days} ${getRussianPlural(days, "день", "дня", "дней")}, `
+    + `${hours} ${getRussianPlural(hours, "час", "часа", "часов")}, `
+    + `${minutes} ${getRussianPlural(minutes, "минуту", "минуты", "минут")}`
+  );
+}
+
 function formatRoleAssignmentDate(value) {
   const date = new Date(value.endsWith("Z") ? value : `${value}Z`);
 
@@ -2967,6 +3013,10 @@ function formatDateTimeLocalValue(utcValue) {
     return "";
   }
 
+  return formatLocalDateTime(date);
+}
+
+function formatLocalDateTime(date) {
   const year = String(date.getFullYear());
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
@@ -2974,6 +3024,15 @@ function formatDateTimeLocalValue(utcValue) {
   const minutes = String(date.getMinutes()).padStart(2, "0");
 
   return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function getDefaultMatchStartsAtLocal(now = new Date()) {
+  const startsAt = new Date(now.getTime());
+
+  startsAt.setSeconds(0, 0);
+  startsAt.setMinutes(startsAt.getMinutes() + 3);
+
+  return formatLocalDateTime(startsAt);
 }
 
 function createChampionTeamSelect(
@@ -4421,10 +4480,19 @@ function createMatchListItem(
     className: "match-meta",
     text: `Начало: ${formatMatchStartsAt(match.starts_at_utc)}`,
   });
+  const startsInText = formatMatchStartsIn(match);
   const sections = [header, meta];
 
   header.append(teams, status);
   meta.append(startsAt);
+  if (startsInText) {
+    meta.append(
+      createElement("p", {
+        className: "match-meta match-starts-in",
+        text: startsInText,
+      }),
+    );
+  }
 
   if (
     showResults
@@ -4688,6 +4756,7 @@ function createMatchFormCard(bootstrap, contest, state) {
 
   disclosure.className = "match-form-disclosure";
   disclosure.open = Boolean(state.matchFormMessage || state.matchDraft);
+  const wasInitiallyOpen = disclosure.open;
   summaryContent.append(title, overview);
   summary.append(summaryContent);
 
@@ -4713,7 +4782,8 @@ function createMatchFormCard(bootstrap, contest, state) {
   startsAtInput.name = "match-starts-at";
   startsAtInput.type = "datetime-local";
   startsAtInput.step = "60";
-  startsAtInput.value = draft.startsAtLocal || "";
+  startsAtInput.value =
+    draft.startsAtLocal || getDefaultMatchStartsAtLocal();
   startsAtInput.required = true;
 
   setFormMessage(
@@ -4736,6 +4806,16 @@ function createMatchFormCard(bootstrap, contest, state) {
   );
   disclosure.append(summary, description, form);
   card.append(disclosure);
+
+  disclosure.addEventListener("toggle", () => {
+    if (
+      disclosure.open
+      && !wasInitiallyOpen
+      && !state.matchDraft
+    ) {
+      homeTeamInput.focus();
+    }
+  });
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
