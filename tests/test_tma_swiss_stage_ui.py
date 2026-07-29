@@ -32,9 +32,10 @@ def _function_source(name: str) -> str:
 def test_tma_contains_mobile_swiss_stage_prediction_controls() -> None:
     source = _source()
 
-    assert "Итоги швейцарского этапа" in source
+    assert "Прогноз на швейцарскую систему" in source
     assert "Пройдут напрямую:" in source
-    assert "Через элиминейшн-раунд:" in source
+    assert "Через стыковой раунд:" in source
+    assert "элиминейшн" not in source.lower()
     assert "createSwissStageTeamSelector" in source
     assert "data-category='direct'" in source
     assert "data-category='elimination'" in source
@@ -102,7 +103,7 @@ def test_tma_formats_swiss_stage_audit_result_with_team_names() -> None:
     assert "value?.elimination_team_ids" in formatter_source
     assert "getAuditTeamName(event, teamId)" in formatter_source
     assert "Прошли напрямую:" in formatter_source
-    assert "через элиминейшн-раунд:" in formatter_source
+    assert "через стыковой раунд:" in formatter_source
     assert 'key === "actual_result"' in state_value_source
     assert "formatAuditSwissStageResult(value, event)" in state_value_source
     assert 'case "swiss_stage_result_set"' in summary_source
@@ -118,6 +119,30 @@ def test_empty_swiss_stage_deadline_uses_general_local_default() -> None:
     assert settings_source.index(
         "formatDateTimeLocalValue(prediction.deadline_at)"
     ) < settings_source.index("|| getDefaultDateTimeLocal()")
+
+
+def test_swiss_stage_settings_match_champion_settings_copy_and_state() -> None:
+    champion_source = _function_source("createChampionPredictionSettingsDisclosure")
+    champion_card_source = _function_source("createChampionAdministrationCard")
+    swiss_source = _function_source("createSwissStageSettingsForm")
+    swiss_card_source = _function_source("createSwissStageAdministrationCard")
+    swiss_status_source = _function_source("createSwissStageStatus")
+
+    for settings_source in (champion_source, swiss_source):
+        assert 'text: "Настройки прогноза"' in settings_source
+        assert 'text: "Включить прогноз"' in settings_source
+        assert 'text: "Прогноз закрывается"' in settings_source
+        assert "summaryContent.append(title, overview)" in settings_source
+        assert "disclosure.append(summary, description, form)" in settings_source
+
+    assert 'text: "Прогноз на чемпиона"' in champion_card_source
+    assert 'text: "Прогноз на швейцарскую систему"' in swiss_card_source
+    assert 'status.textContent = "Не настроен"' in swiss_status_source
+    assert "deadlineInput.disabled = !isEnabled" in swiss_source
+    assert "deadlineInput.required = isEnabled" in swiss_source
+    assert "isEnabled !== prediction.is_enabled" in swiss_source
+    assert 'deadlineField.classList.toggle("is-disabled", !isEnabled)' in swiss_source
+    assert 'enabledInput.addEventListener("change", syncEnabledState)' in (swiss_source)
 
 
 def test_tma_locked_settings_text_mentions_prediction_and_result() -> None:

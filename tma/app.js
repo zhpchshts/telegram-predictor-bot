@@ -1407,7 +1407,7 @@ function createLeaderboardSwissStagePredictionHistory(prediction) {
   header.append(
     createElement("span", {
       className: "leaderboard-history-title",
-      text: "Итоги швейцарского этапа",
+      text: "Прогноз на швейцарскую систему",
     }),
     createElement("span", {
       className: "leaderboard-history-points",
@@ -1425,7 +1425,7 @@ function createLeaderboardSwissStagePredictionHistory(prediction) {
         .join(", ") || "—",
     ),
     createLeaderboardHistoryRow(
-      "Элиминейшн",
+      "Стыковой раунд",
       prediction?.prediction?.elimination_teams
         ?.map((team) => team.name)
         .join(", ") || "—",
@@ -2561,7 +2561,7 @@ function createSwissStageStatus(prediction) {
     className: "champion-card-status",
   });
   if (!prediction.is_enabled) {
-    status.textContent = "Выключен";
+    status.textContent = "Не настроен";
     status.classList.add("champion-card-status--disabled");
   } else if (prediction.actual_result) {
     status.textContent = "Итоги внесены";
@@ -2584,14 +2584,14 @@ function createSwissStageMeta(prediction) {
     createElement("p", {
       className: "match-meta",
       text: prediction.deadline_at
-        ? `Дедлайн: ${formatMatchStartsAt(prediction.deadline_at)}`
-        : "Дедлайн не задан.",
+        ? `Прогноз закрывается: ${formatMatchStartsAt(prediction.deadline_at)}`
+        : "Время закрытия прогноза не задано.",
     }),
     createElement("p", {
       className: "match-meta",
       text: (
         `Напрямую: ${prediction.direct_qualifier_count}; ` +
-        `через элиминейшн-раунд: ` +
+        `через стыковой раунд: ` +
         `${prediction.elimination_qualifier_count}.`
       ),
     }),
@@ -2665,7 +2665,7 @@ function createSwissStageTeamSelector(
       `${prediction.direct_qualifier_count}`
     );
     eliminationProgress.textContent = (
-      `Через элиминейшн-раунд: ${eliminationIds.size} из ` +
+      `Через стыковой раунд: ${eliminationIds.size} из ` +
       `${prediction.elimination_qualifier_count}`
     );
     submitButton.disabled = (
@@ -2711,7 +2711,7 @@ function createSwissStageTeamSelector(
       "swiss-stage-choice",
     );
     const eliminationButton = createActionButton(
-      "Элиминейшн",
+      "Стыковой раунд",
       "swiss-stage-choice",
     );
     directButton.type = "button";
@@ -2794,7 +2794,7 @@ function createSwissStageReadonlySelection(title, selection) {
     }),
     createElement("p", {
       text: (
-        "Через элиминейшн-раунд: " +
+        "Через стыковой раунд: " +
         (
           selection?.elimination_teams
             ?.map((team) => team.name)
@@ -2812,8 +2812,8 @@ function getSwissStageCategoryLabel(category, mode = "actual") {
   }
   if (category === "elimination") {
     return mode === "predicted"
-      ? "пройдёт через элиминейшн-раунд"
-      : "прошла через элиминейшн-раунд";
+      ? "пройдёт через стыковой раунд"
+      : "прошла через стыковой раунд";
   }
   return "не прошла";
 }
@@ -2891,7 +2891,7 @@ function createSwissStagePredictionCard(contest, onUpdated) {
   header.append(
     createElement("strong", {
       className: "match-teams",
-      text: "Итоги швейцарского этапа",
+      text: "Прогноз на швейцарскую систему",
     }),
     createSwissStageStatus(prediction),
   );
@@ -3098,9 +3098,7 @@ function createChampionPredictionSettingsDisclosure(
   });
   const title = createElement("span", {
     className: "match-form-title",
-    text: championPrediction.is_enabled
-      ? "Настройки прогноза чемпиона"
-      : "Настроить прогноз чемпиона",
+    text: "Настройки прогноза",
   });
   const overview = createElement("span", {
     className: "match-form-overview",
@@ -3123,7 +3121,7 @@ function createChampionPredictionSettingsDisclosure(
   });
   const enabledInput = createElement("input");
   const enabledText = createElement("span", {
-    text: "Включить прогноз на чемпиона",
+    text: "Включить прогноз",
   });
   const deadlineField = createElement("label", {
     className: "form-field",
@@ -3159,7 +3157,7 @@ function createChampionPredictionSettingsDisclosure(
     className: "form-actions",
   });
   const submitButton = createActionButton(
-    championPrediction.is_enabled ? "Сохранить настройки" : "Включить прогноз",
+    "Сохранить настройки",
     "primary-action-button",
     "submit",
   );
@@ -3197,13 +3195,12 @@ function createChampionPredictionSettingsDisclosure(
     deadlineInput.required = isEnabled;
     deadlineField.classList.toggle("is-disabled", !isEnabled);
     hint.hidden = !isEnabled;
-    submitButton.textContent = isEnabled
-      ? (
-        championPrediction.is_enabled
-          ? "Сохранить настройки"
-          : "Включить прогноз"
-      )
-      : "Выключить прогноз";
+    submitButton.textContent = "Сохранить настройки";
+    if (isEnabled !== championPrediction.is_enabled) {
+      submitButton.textContent = isEnabled
+        ? "Включить прогноз"
+        : "Выключить прогноз";
+    }
   }
 
   syncEnabledState();
@@ -3837,9 +3834,28 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   const disclosure = document.createElement("details");
   disclosure.className = "match-form-disclosure champion-settings-disclosure";
   const summary = document.createElement("summary");
-  summary.textContent = prediction.is_enabled
-    ? "Изменить настройки"
-    : "Включить прогноз";
+  const summaryContent = createElement("div", {
+    className: "match-form-summary-content",
+  });
+  const title = createElement("span", {
+    className: "match-form-title",
+    text: "Настройки прогноза",
+  });
+  const overview = createElement("span", {
+    className: "match-form-overview",
+    text: prediction.is_enabled
+      ? "Срок, команды и лимиты"
+      : "Включить прогноз",
+  });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: (
+      "Укажите, до какого времени можно выбрать команды и сколько команд пройдёт " +
+      "напрямую и через стыковой раунд."
+    ),
+  });
+  summaryContent.append(title, overview);
+  summary.append(summaryContent);
   const form = createElement("form", { className: "form-fields" });
   const enabledField = createElement("label", {
     className: "champion-enable-option",
@@ -3849,7 +3865,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   enabledInput.checked = prediction.is_enabled;
   enabledField.append(
     enabledInput,
-    createElement("span", { text: "Прогноз включён" }),
+    createElement("span", { text: "Включить прогноз" }),
   );
   const deadlineField = createElement("label", { className: "form-field" });
   const deadlineInput = document.createElement("input");
@@ -3862,7 +3878,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   deadlineField.append(
     createElement("span", {
       className: "form-field-label",
-      text: "Дедлайн",
+      text: "Прогноз закрывается",
     }),
     deadlineInput,
   );
@@ -3895,7 +3911,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   eliminationField.append(
     createElement("span", {
       className: "form-field-label",
-      text: "Через элиминейшн",
+      text: "Через стыковой раунд",
     }),
     eliminationInput,
   );
@@ -3922,6 +3938,22 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
     "primary-action-button",
     "submit",
   );
+  function syncEnabledState() {
+    const isEnabled = enabledInput.checked;
+
+    deadlineInput.disabled = !isEnabled;
+    deadlineInput.required = isEnabled;
+    deadlineField.classList.toggle("is-disabled", !isEnabled);
+    submitButton.textContent = "Сохранить настройки";
+    if (isEnabled !== prediction.is_enabled) {
+      submitButton.textContent = isEnabled
+        ? "Включить прогноз"
+        : "Выключить прогноз";
+    }
+  }
+
+  syncEnabledState();
+  enabledInput.addEventListener("change", syncEnabledState);
   actions.append(submitButton);
   form.append(
     enabledField,
@@ -3935,7 +3967,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
     message,
     actions,
   );
-  disclosure.append(summary, form);
+  disclosure.append(summary, description, form);
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -3992,7 +4024,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
         "error",
       );
       submitButton.disabled = false;
-      submitButton.textContent = "Сохранить настройки";
+      syncEnabledState();
     }
   });
   return disclosure;
@@ -4007,7 +4039,7 @@ function createSwissStageAdministrationCard(contest, onUpdated) {
   header.append(
     createElement("strong", {
       className: "match-teams",
-      text: "Итоги швейцарского этапа",
+      text: "Прогноз на швейцарскую систему",
     }),
     createSwissStageStatus(prediction),
   );
@@ -4018,7 +4050,9 @@ function createSwissStageAdministrationCard(contest, onUpdated) {
     item.append(
       createElement("p", {
         className: "match-prediction-closed",
-        text: "Настройте команды, дедлайн и количество проходящих команд.",
+        text: (
+          "Включите прогноз, задайте срок закрытия и количество проходящих команд."
+        ),
       }),
     );
   }
@@ -4079,7 +4113,7 @@ function createChampionAdministrationCard(contest, state, onUpdated) {
       createElement("p", {
         className: "match-prediction-closed",
         text: (
-          "Включите прогноз, задайте дедлайн и количество баллов. " +
+          "Включите прогноз, задайте срок закрытия и количество баллов. " +
           "Участники будут выбирать чемпиона на вкладке «Прогнозы»."
         ),
       }),
@@ -5379,7 +5413,7 @@ function formatAuditSwissStageResult(value, event) {
   );
   return (
     `Прошли напрямую: ${formatTeams(directTeamIds)}; `
-    + `через элиминейшн-раунд: ${formatTeams(eliminationTeamIds)}`
+    + `через стыковой раунд: ${formatTeams(eliminationTeamIds)}`
   );
 }
 
@@ -5639,7 +5673,7 @@ function getAuditStateFieldLabel(key) {
     enabled: "Прогноз включён",
     deadline_at: "Дедлайн",
     direct_qualifier_count: "Пройдут напрямую",
-    elimination_qualifier_count: "Через элиминейшн-раунд",
+    elimination_qualifier_count: "Через стыковой раунд",
     teams: "Команды этапа",
     actual_result: "Фактический результат",
   };

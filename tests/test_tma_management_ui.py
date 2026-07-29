@@ -219,6 +219,16 @@ def test_empty_champion_deadline_uses_general_local_default() -> None:
     ) < settings_source.index("|| getDefaultDateTimeLocal()")
 
 
+def test_champion_settings_action_matches_the_persisted_enabled_state() -> None:
+    settings_source = _function_source("createChampionPredictionSettingsDisclosure")
+
+    assert 'submitButton.textContent = "Сохранить настройки"' in settings_source
+    assert "isEnabled !== championPrediction.is_enabled" in settings_source
+    assert "prediction.is_enabled" not in settings_source
+    assert '? "Включить прогноз"' in settings_source
+    assert ': "Выключить прогноз"' in settings_source
+
+
 def test_existing_match_edit_keeps_match_time_and_current_edit_value() -> None:
     editing_source = _function_source("createMatchStartEditingSection")
 
