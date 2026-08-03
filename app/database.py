@@ -82,6 +82,9 @@ CREATE TABLE IF NOT EXISTS contests (
   chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   slug TEXT NOT NULL UNIQUE,
+  template_key TEXT NOT NULL DEFAULT 'world_cup_2026' CHECK (
+    template_key IN ('world_cup_2026', 'the_international_2026')
+  ),
   is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
   champion_prediction_enabled INTEGER NOT NULL DEFAULT 0
     CHECK (champion_prediction_enabled IN (0, 1)),
@@ -111,7 +114,13 @@ CREATE TABLE IF NOT EXISTS competitions (
     name TEXT NOT NULL,
     season TEXT NOT NULL,
     competition_type TEXT NOT NULL CHECK (
-        competition_type IN ('world_cup', 'champions_league', 'europa_league', 'other')
+        competition_type IN (
+            'world_cup',
+            'champions_league',
+            'europa_league',
+            'the_international',
+            'other'
+        )
     ),
     is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -189,6 +198,7 @@ CREATE TABLE IF NOT EXISTS matches (
     home_team_id INTEGER NOT NULL REFERENCES teams(id),
     away_team_id INTEGER NOT NULL REFERENCES teams(id),
     starts_at_utc TEXT NOT NULL,
+    best_of INTEGER CHECK (best_of IS NULL OR best_of IN (3, 5)),
     status TEXT NOT NULL DEFAULT 'scheduled' CHECK (
         status IN ('scheduled', 'started', 'finished', 'cancelled')
     ),
@@ -237,6 +247,14 @@ CREATE TABLE IF NOT EXISTS tie_predictions (
     submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (tie_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS champion_prediction_candidates (
+  contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+  team_id INTEGER NOT NULL REFERENCES teams(id),
+  position INTEGER NOT NULL CHECK (position >= 0),
+  PRIMARY KEY (contest_id, team_id),
+  UNIQUE (contest_id, position)
 );
 
 CREATE TABLE IF NOT EXISTS champion_predictions (
@@ -464,6 +482,9 @@ CREATE INDEX IF NOT EXISTS idx_champion_predictions_contest_id
 
 CREATE INDEX IF NOT EXISTS idx_champion_predictions_user_id
   ON champion_predictions(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_champion_prediction_candidates_team_id
+  ON champion_prediction_candidates(team_id);
 
 CREATE INDEX IF NOT EXISTS idx_contest_teams_team_id
     ON contest_teams(team_id);

@@ -21,6 +21,7 @@ from app.contest_service import (
     MatchUpdateUnavailableError,
     PredictionUnavailableError,
     create_match,
+    create_the_international_2026_contest,
     delete_match,
     create_world_cup_2026_contest,
     delete_contest,
@@ -68,6 +69,26 @@ def create_contest(
     )
 
 
+def create_ti_contest(
+    *,
+    database_path: Path,
+    contest_name: str = "The International 2026",
+    idempotency_key: str = "create-ti-contest-1",
+):
+    return create_the_international_2026_contest(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        chat_title="Dota 2 predictions",
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        contest_name=contest_name,
+        idempotency_key=idempotency_key,
+        audit_actor=AUDIT_ACTOR,
+    )
+
+
 def create_test_match(
     *,
     database_path: Path,
@@ -75,6 +96,7 @@ def create_test_match(
     home_team_name: str = "Аргентина",
     away_team_name: str = "Бразилия",
     starts_at_utc: str = "2026-06-11T18:00:00Z",
+    best_of: int | None = None,
     idempotency_key: str = "create-match-1",
 ):
     home_team_id, away_team_id = ensure_contest_teams(
@@ -93,6 +115,7 @@ def create_test_match(
         home_team_id=home_team_id,
         away_team_id=away_team_id,
         starts_at_utc=starts_at_utc,
+        best_of=best_of,
         idempotency_key=idempotency_key,
         audit_actor=AUDIT_ACTOR,
     )
@@ -147,7 +170,7 @@ def save_test_prediction(
     match_id: int,
     predicted_home_score: int = 2,
     predicted_away_score: int = 1,
-    predicted_advancing_team_id: int = 1,
+    predicted_advancing_team_id: int | None = 1,
     now_utc: datetime = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
 ):
     return save_match_prediction(
@@ -173,7 +196,7 @@ def save_test_result(
     match_id: int,
     home_score: int = 2,
     away_score: int = 1,
-    advancing_team_id: int = 1,
+    advancing_team_id: int | None = 1,
     now_utc: datetime = datetime(
         2026,
         6,
@@ -428,6 +451,86 @@ def test_create_world_cup_2026_contest_creates_related_entities_and_event_log(
         "contest_id": result.contest.id,
     }
     assert request["request_fingerprint"]
+
+
+def test_create_the_international_2026_contest_uses_ti_template_and_rules(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+
+    result = create_ti_contest(database_path=database_path)
+
+    assert result.was_created is True
+    assert result.contest.slug.startswith("the-international-2026-")
+
+    with create_connection(database_path) as connection:
+        contest = connection.execute(
+            """
+            SELECT template_key, champion_prediction_points
+            FROM contests
+            WHERE id = ?
+            """,
+            (result.contest.id,),
+        ).fetchone()
+        competition = connection.execute(
+            """
+            SELECT name, season, competition_type
+            FROM competitions
+            WHERE contest_id = ?
+            """,
+            (result.contest.id,),
+        ).fetchone()
+        scoring_rule_set = connection.execute(
+            """
+            SELECT
+                exact_score_points,
+                goal_difference_points,
+                outcome_points,
+                advancing_team_points
+            FROM scoring_rule_sets
+            WHERE competition_id = (
+                SELECT id
+                FROM competitions
+                WHERE contest_id = ?
+            )
+            """,
+            (result.contest.id,),
+        ).fetchone()
+
+    assert dict(contest) == {
+        "template_key": "the_international_2026",
+        "champion_prediction_points": 4,
+    }
+    assert dict(competition) == {
+        "name": "The International",
+        "season": "2026",
+        "competition_type": "the_international",
+    }
+    assert dict(scoring_rule_set) == {
+        "exact_score_points": 2,
+        "goal_difference_points": 0,
+        "outcome_points": 1,
+        "advancing_team_points": 0,
+    }
+
+
+def test_contest_creation_idempotency_distinguishes_templates(tmp_path: Path) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+
+    create_contest(
+        database_path=database_path,
+        contest_name="Predictions",
+        idempotency_key="same-request",
+    )
+
+    with pytest.raises(ContestCreationConflictError):
+        create_ti_contest(
+            database_path=database_path,
+            contest_name="Predictions",
+            idempotency_key="same-request",
+        )
 
 
 def test_create_world_cup_2026_contest_reuses_result_for_same_idempotency_key(
@@ -707,6 +810,81 @@ def test_create_match_creates_teams_stage_event_and_request(
         "match_id": result.match.id,
     }
     assert request["request_fingerprint"]
+
+
+def test_ti_match_requires_best_of_and_stores_series_format(tmp_path: Path) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_ti_contest(database_path=database_path).contest
+
+    with pytest.raises(ValueError, match="Bo3.*Bo5"):
+        create_test_match(database_path=database_path, contest_id=contest.id)
+
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        best_of=3,
+    ).match
+
+    assert match.best_of == 3
+
+
+def test_football_match_keeps_best_of_empty(tmp_path: Path) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+    ).match
+
+    assert match.best_of is None
+
+
+def test_ti_prediction_derives_winner_and_rejects_incomplete_score(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_ti_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        best_of=3,
+    ).match
+
+    prediction = save_test_prediction(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        predicted_home_score=2,
+        predicted_away_score=1,
+        predicted_advancing_team_id=None,
+    ).prediction
+
+    assert prediction.advancing_team_id == match.home_team_id
+
+    with pytest.raises(ValueError, match="Bo3"):
+        save_test_prediction(
+            database_path=database_path,
+            contest_id=contest.id,
+            match_id=match.id,
+            predicted_home_score=1,
+            predicted_away_score=0,
+            predicted_advancing_team_id=None,
+        )
+
+    result = save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        home_score=1,
+        away_score=2,
+        advancing_team_id=None,
+    ).result
+
+    assert result.advancing_team_id == match.away_team_id
 
 
 def test_create_match_reuses_result_for_same_idempotency_key(

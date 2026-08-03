@@ -40,6 +40,51 @@ DEFAULT_GOAL_DIFFERENCE_POINTS = 2
 DEFAULT_OUTCOME_POINTS = 1
 DEFAULT_ADVANCING_TEAM_POINTS = 1
 
+THE_INTERNATIONAL_2026_COMPETITION_NAME = "The International"
+THE_INTERNATIONAL_2026_SEASON = "2026"
+THE_INTERNATIONAL_2026_COMPETITION_TYPE = "the_international"
+
+
+@dataclass(frozen=True, slots=True)
+class _ContestTemplate:
+    key: str
+    slug_prefix: str
+    competition_name: str
+    competition_season: str
+    competition_type: str
+    exact_score_points: int
+    goal_difference_points: int
+    outcome_points: int
+    advancing_team_points: int
+    champion_prediction_points: int
+
+
+WORLD_CUP_2026_TEMPLATE = _ContestTemplate(
+    key="world_cup_2026",
+    slug_prefix="world-cup-2026",
+    competition_name=WORLD_CUP_2026_COMPETITION_NAME,
+    competition_season=WORLD_CUP_2026_SEASON,
+    competition_type=WORLD_CUP_2026_COMPETITION_TYPE,
+    exact_score_points=DEFAULT_EXACT_SCORE_POINTS,
+    goal_difference_points=DEFAULT_GOAL_DIFFERENCE_POINTS,
+    outcome_points=DEFAULT_OUTCOME_POINTS,
+    advancing_team_points=DEFAULT_ADVANCING_TEAM_POINTS,
+    champion_prediction_points=5,
+)
+
+THE_INTERNATIONAL_2026_TEMPLATE = _ContestTemplate(
+    key="the_international_2026",
+    slug_prefix="the-international-2026",
+    competition_name=THE_INTERNATIONAL_2026_COMPETITION_NAME,
+    competition_season=THE_INTERNATIONAL_2026_SEASON,
+    competition_type=THE_INTERNATIONAL_2026_COMPETITION_TYPE,
+    exact_score_points=2,
+    goal_difference_points=0,
+    outcome_points=1,
+    advancing_team_points=0,
+    champion_prediction_points=4,
+)
+
 
 class ContestCreationConflictError(ValueError):
     """Raised when an idempotency key is reused with different request data."""
@@ -102,6 +147,7 @@ class ActiveContestSummary:
     id: int
     name: str
     slug: str
+    template_key: str
     created_at: str
 
 
@@ -270,6 +316,7 @@ class ContestLeaderboardEntry:
 class MatchSummary:
     id: int
     tie_id: int
+    best_of: int | None
     home_team_id: int
     home_team_name: str
     away_team_id: int
@@ -286,6 +333,7 @@ class ContestDetails:
     id: int
     name: str
     slug: str
+    template_key: str
     created_at: str
     is_active: bool
     tournament_teams: TournamentTeamsDetails
@@ -326,6 +374,7 @@ def get_active_contests(
                 contests.id,
                 contests.name,
                 contests.slug,
+                contests.template_key,
                 contests.created_at
             FROM contests
             JOIN chats ON chats.id = contests.chat_id
@@ -351,6 +400,7 @@ def get_completed_contests(
                 contests.id,
                 contests.name,
                 contests.slug,
+                contests.template_key,
                 contests.created_at
             FROM contests
             JOIN chats ON chats.id = contests.chat_id
@@ -399,6 +449,7 @@ def get_contest_details(
             SELECT
                 matches.id,
                 matches.tie_id,
+                matches.best_of,
                 home_team.id AS home_team_id,
                 home_team.name AS home_team_name,
                 away_team.id AS away_team_id,
@@ -775,6 +826,7 @@ def get_contest_details(
                 match_predictions.user_id,
                 matches.id,
                 matches.tie_id,
+                matches.best_of,
                 home_team.id AS home_team_id,
                 home_team.name AS home_team_name,
                 away_team.id AS away_team_id,
@@ -858,6 +910,7 @@ def get_contest_details(
             id=int(contest_row["id"]),
             name=str(contest_row["name"]),
             slug=str(contest_row["slug"]),
+            template_key=str(contest_row["template_key"]),
             created_at=str(contest_row["created_at"]),
             is_active=bool(contest_row["is_active"]),
             tournament_teams=tournament_teams,
@@ -1204,6 +1257,7 @@ def create_match(
     starts_at_utc: str,
     idempotency_key: str,
     audit_actor: AuditActor,
+    best_of: int | None = None,
 ) -> MatchCreationResult:
     normalized_home_team_id = _normalize_team_id(
         home_team_id,
@@ -1221,11 +1275,21 @@ def create_match(
 
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
-        _get_active_contest_row(
+        contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
         )
+        if contest_row["template_key"] == "the_international_2026":
+            if isinstance(best_of, bool) or best_of not in (3, 5):
+                raise ValueError("Для серии The International выберите Bo3 или Bo5.")
+            normalized_best_of = best_of
+        else:
+            if best_of is not None:
+                raise ValueError(
+                    "Формат Bo3/Bo5 доступен только для The International."
+                )
+            normalized_best_of = None
         actor_user_id = _upsert_user(
             connection,
             telegram_user_id=telegram_user_id,
@@ -1256,6 +1320,7 @@ def create_match(
             home_team_id=resolved_home_team_id,
             away_team_id=resolved_away_team_id,
             starts_at_utc=normalized_starts_at_utc,
+            best_of=normalized_best_of,
         )
         existing_request = connection.execute(
             """
@@ -1347,9 +1412,10 @@ def create_match(
                     scoring_rule_set_id,
                     home_team_id,
                     away_team_id,
-                    starts_at_utc
+                    starts_at_utc,
+                    best_of
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stage_id,
@@ -1358,6 +1424,7 @@ def create_match(
                     resolved_home_team_id,
                     resolved_away_team_id,
                     normalized_starts_at_utc,
+                    normalized_best_of,
                 ),
             ).lastrowid
         )
@@ -1384,6 +1451,11 @@ def create_match(
                     "position": tie_position,
                 },
                 "starts_at_utc": normalized_starts_at_utc,
+                **(
+                    {"best_of": normalized_best_of}
+                    if normalized_best_of is not None
+                    else {}
+                ),
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -1735,7 +1807,7 @@ def save_match_prediction(
     username: str | None,
     predicted_home_score: int,
     predicted_away_score: int,
-    predicted_advancing_team_id: int,
+    predicted_advancing_team_id: int | None,
     now_utc: datetime | None = None,
 ) -> MatchPredictionSaveResult:
     normalized_home_score = _normalize_prediction_score(
@@ -1774,7 +1846,7 @@ def save_match_prediction(
         if match_row["tie_id"] is None:
             raise RuntimeError("У матча не определено противостояние.")
 
-        _validate_advancing_team_for_match(
+        normalized_advancing_team_id = _resolve_advancing_team_for_score(
             match_row,
             advancing_team_id=normalized_advancing_team_id,
             home_score=normalized_home_score,
@@ -1874,7 +1946,7 @@ def save_match_result(
     username: str | None,
     home_score: int,
     away_score: int,
-    advancing_team_id: int,
+    advancing_team_id: int | None,
     audit_actor: AuditActor,
     now_utc: datetime | None = None,
 ) -> MatchResultSaveResult:
@@ -1924,7 +1996,7 @@ def save_match_result(
         if match_row["tie_id"] is None:
             raise RuntimeError("У матча не определено противостояние.")
 
-        _validate_advancing_team_for_match(
+        normalized_advancing_team_id = _resolve_advancing_team_for_score(
             match_row,
             advancing_team_id=normalized_advancing_team_id,
             home_score=normalized_home_score,
@@ -2928,9 +3000,69 @@ def create_world_cup_2026_contest(
     idempotency_key: str,
     audit_actor: AuditActor,
 ) -> ContestCreationResult:
+    return _create_contest_from_template(
+        template=WORLD_CUP_2026_TEMPLATE,
+        database_path=database_path,
+        telegram_chat_id=telegram_chat_id,
+        chat_title=chat_title,
+        telegram_user_id=telegram_user_id,
+        first_name=first_name,
+        last_name=last_name,
+        username=username,
+        contest_name=contest_name,
+        idempotency_key=idempotency_key,
+        audit_actor=audit_actor,
+    )
+
+
+def create_the_international_2026_contest(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    chat_title: str | None,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    contest_name: str,
+    idempotency_key: str,
+    audit_actor: AuditActor,
+) -> ContestCreationResult:
+    return _create_contest_from_template(
+        template=THE_INTERNATIONAL_2026_TEMPLATE,
+        database_path=database_path,
+        telegram_chat_id=telegram_chat_id,
+        chat_title=chat_title,
+        telegram_user_id=telegram_user_id,
+        first_name=first_name,
+        last_name=last_name,
+        username=username,
+        contest_name=contest_name,
+        idempotency_key=idempotency_key,
+        audit_actor=audit_actor,
+    )
+
+
+def _create_contest_from_template(
+    *,
+    template: _ContestTemplate,
+    database_path: Path,
+    telegram_chat_id: int,
+    chat_title: str | None,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    contest_name: str,
+    idempotency_key: str,
+    audit_actor: AuditActor,
+) -> ContestCreationResult:
     normalized_contest_name = _normalize_contest_name(contest_name)
     normalized_idempotency_key = _normalize_idempotency_key(idempotency_key)
-    request_fingerprint = _build_request_fingerprint(normalized_contest_name)
+    request_fingerprint = _build_request_fingerprint(
+        normalized_contest_name,
+        template=template,
+    )
 
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -2966,7 +3098,7 @@ def create_world_cup_2026_contest(
 
             contest_row = connection.execute(
                 """
-                SELECT id, name, slug, created_at
+                SELECT id, name, slug, template_key, created_at
                 FROM contests
                 WHERE id = ?
                 """,
@@ -2983,15 +3115,27 @@ def create_world_cup_2026_contest(
                 was_created=False,
             )
 
-        slug = _build_contest_slug()
+        slug = _build_contest_slug(template.slug_prefix)
 
         contest_id = int(
             connection.execute(
                 """
-                INSERT INTO contests (chat_id, name, slug)
-                VALUES (?, ?, ?)
+                INSERT INTO contests (
+                    chat_id,
+                    name,
+                    slug,
+                    template_key,
+                    champion_prediction_points
+                )
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (chat_id, normalized_contest_name, slug),
+                (
+                    chat_id,
+                    normalized_contest_name,
+                    slug,
+                    template.key,
+                    template.champion_prediction_points,
+                ),
             ).lastrowid
         )
 
@@ -3008,9 +3152,9 @@ def create_world_cup_2026_contest(
                 """,
                 (
                     contest_id,
-                    WORLD_CUP_2026_COMPETITION_NAME,
-                    WORLD_CUP_2026_SEASON,
-                    WORLD_CUP_2026_COMPETITION_TYPE,
+                    template.competition_name,
+                    template.competition_season,
+                    template.competition_type,
                 ),
             ).lastrowid
         )
@@ -3030,10 +3174,10 @@ def create_world_cup_2026_contest(
                 """,
                 (
                     competition_id,
-                    DEFAULT_EXACT_SCORE_POINTS,
-                    DEFAULT_GOAL_DIFFERENCE_POINTS,
-                    DEFAULT_OUTCOME_POINTS,
-                    DEFAULT_ADVANCING_TEAM_POINTS,
+                    template.exact_score_points,
+                    template.goal_difference_points,
+                    template.outcome_points,
+                    template.advancing_team_points,
                 ),
             ).lastrowid
         )
@@ -3042,17 +3186,17 @@ def create_world_cup_2026_contest(
             {
                 "competition": {
                     "id": competition_id,
-                    "name": WORLD_CUP_2026_COMPETITION_NAME,
-                    "season": WORLD_CUP_2026_SEASON,
-                    "type": WORLD_CUP_2026_COMPETITION_TYPE,
+                    "name": template.competition_name,
+                    "season": template.competition_season,
+                    "type": template.competition_type,
                 },
                 "contest_name": normalized_contest_name,
                 "scoring_rule_set": {
-                    "advancing_team_points": DEFAULT_ADVANCING_TEAM_POINTS,
-                    "exact_score_points": DEFAULT_EXACT_SCORE_POINTS,
-                    "goal_difference_points": DEFAULT_GOAL_DIFFERENCE_POINTS,
+                    "advancing_team_points": template.advancing_team_points,
+                    "exact_score_points": template.exact_score_points,
+                    "goal_difference_points": template.goal_difference_points,
                     "id": scoring_rule_set_id,
-                    "outcome_points": DEFAULT_OUTCOME_POINTS,
+                    "outcome_points": template.outcome_points,
                     "version": 1,
                 },
             },
@@ -3105,7 +3249,7 @@ def create_world_cup_2026_contest(
 
         contest_row = connection.execute(
             """
-            SELECT id, name, slug, created_at
+            SELECT id, name, slug, template_key, created_at
             FROM contests
             WHERE id = ?
             """,
@@ -3227,6 +3371,7 @@ def _get_contest_row(
             contests.id,
             contests.name,
             contests.slug,
+            contests.template_key,
             contests.created_at,
             contests.is_active,
             contests.champion_prediction_enabled,
@@ -3298,6 +3443,7 @@ def _contest_snapshot(row) -> dict[str, object]:
         ],
         "name": str(row["name"]),
         "slug": str(row["slug"]),
+        "template_key": str(row["template_key"]),
     }
 
 
@@ -3328,6 +3474,11 @@ def _match_snapshot(row) -> dict[str, object]:
             "name": str(row["home_team_name"]),
         },
         "id": int(row["id"]),
+        **(
+            {"best_of": int(row["best_of"])}
+            if "best_of" in keys and row["best_of"] is not None
+            else {}
+        ),
         "starts_at_utc": str(row["starts_at_utc"]),
         "status": str(row["status"]),
         "tie_id": int(row["tie_id"]) if row["tie_id"] is not None else None,
@@ -3375,6 +3526,8 @@ def _get_match_row(
         SELECT
             matches.id,
             matches.tie_id,
+            matches.best_of,
+            contests.template_key,
             home_team.id AS home_team_id,
             home_team.name AS home_team_name,
             away_team.id AS away_team_id,
@@ -3391,6 +3544,8 @@ def _get_match_row(
             ON stages.id = matches.stage_id
         JOIN competitions
             ON competitions.id = stages.competition_id
+        JOIN contests
+            ON contests.id = competitions.contest_id
         JOIN teams AS home_team
             ON home_team.id = matches.home_team_id
         JOIN teams AS away_team
@@ -4547,10 +4702,12 @@ def _build_match_request_fingerprint(
     home_team_id: int,
     away_team_id: int,
     starts_at_utc: str,
+    best_of: int | None,
 ) -> str:
     payload = json.dumps(
         {
             "away_team_id": away_team_id,
+            "best_of": best_of,
             "home_team_id": home_team_id,
             "starts_at_utc": starts_at_utc,
         },
@@ -4606,6 +4763,11 @@ def _match_summary_from_row(row) -> MatchSummary:
     return MatchSummary(
         id=int(row["id"]),
         tie_id=int(row["tie_id"]),
+        best_of=(
+            int(row["best_of"])
+            if "best_of" in row.keys() and row["best_of"] is not None
+            else None
+        ),
         home_team_id=int(row["home_team_id"]),
         home_team_name=str(row["home_team_name"]),
         away_team_id=int(row["away_team_id"]),
@@ -4929,10 +5091,13 @@ def _normalize_match_result_score(
 
 
 def _normalize_advancing_team_id(
-    value: int,
+    value: int | None,
     *,
     field_name: str,
 ) -> int:
+    if value is None:
+        return 0
+
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{field_name} должен быть идентификатором команды.")
 
@@ -4942,22 +5107,41 @@ def _normalize_advancing_team_id(
     return value
 
 
-def _validate_advancing_team_for_match(
+def _resolve_advancing_team_for_score(
     match_row,
     *,
     advancing_team_id: int,
     home_score: int,
     away_score: int,
     field_name: str,
-) -> None:
+) -> int:
     home_team_id = int(match_row["home_team_id"])
     away_team_id = int(match_row["away_team_id"])
+
+    if match_row["template_key"] == "the_international_2026":
+        best_of = int(match_row["best_of"])
+        wins_required = best_of // 2 + 1
+        is_valid_home_win = (
+            home_score == wins_required and 0 <= away_score < wins_required
+        )
+        is_valid_away_win = (
+            away_score == wins_required and 0 <= home_score < wins_required
+        )
+        if not (is_valid_home_win or is_valid_away_win):
+            raise ValueError(
+                f"Для Bo{best_of} укажите завершённый счёт серии: "
+                f"победитель должен выиграть {wins_required} карты."
+            )
+        expected_advancing_team_id = home_team_id if is_valid_home_win else away_team_id
+        if advancing_team_id not in (0, expected_advancing_team_id):
+            raise ValueError(f"{field_name} должен совпадать с победителем по счёту.")
+        return expected_advancing_team_id
 
     if advancing_team_id not in {home_team_id, away_team_id}:
         raise ValueError(f"{field_name} должен быть одной из команд матча.")
 
     if home_score == away_score:
-        return
+        return advancing_team_id
 
     expected_advancing_team_id = (
         home_team_id if home_score > away_score else away_team_id
@@ -4965,6 +5149,8 @@ def _validate_advancing_team_for_match(
 
     if advancing_team_id != expected_advancing_team_id:
         raise ValueError(f"{field_name} должен совпадать с победителем по счёту.")
+
+    return advancing_team_id
 
 
 def _resolve_now_utc(now_utc: datetime | None) -> datetime:
@@ -5052,13 +5238,18 @@ def _normalize_idempotency_key(value: str) -> str:
     return normalized_value
 
 
-def _build_request_fingerprint(contest_name: str) -> str:
+def _build_request_fingerprint(
+    contest_name: str,
+    *,
+    template: _ContestTemplate,
+) -> str:
     payload = json.dumps(
         {
-            "competition_name": WORLD_CUP_2026_COMPETITION_NAME,
-            "competition_season": WORLD_CUP_2026_SEASON,
-            "competition_type": WORLD_CUP_2026_COMPETITION_TYPE,
+            "competition_name": template.competition_name,
+            "competition_season": template.competition_season,
+            "competition_type": template.competition_type,
             "contest_name": contest_name,
+            "template_key": template.key,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -5067,8 +5258,8 @@ def _build_request_fingerprint(contest_name: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _build_contest_slug() -> str:
-    return f"world-cup-2026-{secrets.token_hex(8)}"
+def _build_contest_slug(prefix: str) -> str:
+    return f"{prefix}-{secrets.token_hex(8)}"
 
 
 def _active_contest_summary_from_row(row) -> ActiveContestSummary:
@@ -5076,5 +5267,6 @@ def _active_contest_summary_from_row(row) -> ActiveContestSummary:
         id=int(row["id"]),
         name=str(row["name"]),
         slug=str(row["slug"]),
+        template_key=str(row["template_key"]),
         created_at=str(row["created_at"]),
     )

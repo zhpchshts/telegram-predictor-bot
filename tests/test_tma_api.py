@@ -221,11 +221,12 @@ def create_tma_contest(
     *,
     idempotency_key: str = "create-contest-1",
     name: str = "ЧМ-2026: прогнозы",
+    template_key: str = "world_cup_2026",
 ) -> dict[str, object]:
     response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(idempotency_key=idempotency_key),
-        json={"name": name},
+        json={"name": name, "template_key": template_key},
     )
 
     assert response.status_code == 201
@@ -2059,6 +2060,7 @@ def test_create_contest_creates_world_cup_2026_contest(
 
     assert response_data["was_created"] is True
     assert response_data["contest"]["id"] == 1
+    assert response_data["contest"]["template_key"] == "world_cup_2026"
     assert response_data["contest"]["name"] == "ЧМ-2026: прогнозы"
     assert response_data["contest"]["slug"].startswith("world-cup-2026-")
     assert response_data["contest"]["created_at"]
@@ -2093,6 +2095,45 @@ def test_create_contest_creates_world_cup_2026_contest(
     assert events_count == 1
     assert requests_count == 1
     assert audit_actor_role == "telegram_admin"
+
+
+def test_create_contest_creates_the_international_2026_contest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="create-ti-contest-1"),
+        json={
+            "name": "The International 2026",
+            "template_key": "the_international_2026",
+        },
+    )
+
+    assert response.status_code == 201
+    contest_data = response.json()["contest"]
+    assert contest_data["template_key"] == "the_international_2026"
+
+    with create_connection(database_path) as connection:
+        contest = connection.execute(
+            """
+            SELECT template_key
+            FROM contests
+            WHERE id = ?
+            """,
+            (contest_data["id"],),
+        ).fetchone()
+
+    assert contest["template_key"] == "the_international_2026"
 
 
 def test_create_contest_reuses_result_for_same_idempotency_key(
@@ -2300,6 +2341,7 @@ def test_get_contest_returns_details_with_empty_matches(
             "id": contest["id"],
             "name": "ЧМ-2026: прогнозы",
             "slug": contest["slug"],
+            "template_key": "world_cup_2026",
             "created_at": contest["created_at"],
             "is_active": True,
             "tournament_teams": {
@@ -2487,6 +2529,52 @@ def test_get_contest_returns_not_found_for_contest_from_other_chat(
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Конкурс не найден."}
+
+
+def test_ti_series_api_accepts_best_of_and_derives_prediction_winner(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(create_app())
+    contest = create_tma_contest(
+        client,
+        name="The International 2026",
+        template_key="the_international_2026",
+    )
+    payload = build_tma_match_payload(
+        client,
+        contest_id=int(contest["id"]),
+        home_team_name="Team Spirit",
+        away_team_name="Team Liquid",
+        starts_at_utc="2030-08-01T12:00:00Z",
+    )
+    payload["best_of"] = 3
+
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="create-ti-series"),
+        json=payload,
+    )
+
+    assert match_response.status_code == 201
+    match = match_response.json()["match"]
+    assert match["best_of"] == 3
+
+    prediction_response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match['id']}/prediction",
+        headers=build_tma_headers(),
+        json={"predicted_home_score": 2, "predicted_away_score": 1},
+    )
+
+    assert prediction_response.status_code == 201
+    assert prediction_response.json()["prediction"] == {
+        "home_score": 2,
+        "away_score": 1,
+        "advancing_team_id": match["home_team_id"],
+    }
 
 
 def test_create_match_creates_match_and_returns_contest_details(

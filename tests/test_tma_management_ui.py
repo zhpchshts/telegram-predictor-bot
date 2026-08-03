@@ -129,6 +129,41 @@ def test_contest_creation_has_its_own_screen_and_back_navigation() -> None:
     assert "createContestConfirmationCard" not in hub_source
 
 
+def test_ti_creation_and_series_controls_are_present() -> None:
+    contest_form_source = _function_source("createContestFormCard")
+    confirmation_source = _function_source("createContestConfirmationCard")
+    match_form_source = _function_source("createMatchFormCard")
+    prediction_source = _function_source("createMatchPredictionSection")
+    result_source = _function_source("createMatchResultSection")
+    score_options_source = _function_source("getSeriesScoreOptions")
+
+    assert 'templateInput.id = "contest-template-key"' in contest_form_source
+    assert '"the_international_2026", "The International 2026"' in contest_form_source
+    assert "draftTemplateKey: templateInput.value" in contest_form_source
+    assert "template_key: state.draftTemplateKey" in confirmation_source
+
+    assert 'bestOfInput.id = "match-best-of"' in match_form_source
+    assert "const value of [3, 5]" in match_form_source
+    assert "{ best_of: bestOf }" in match_form_source
+
+    assert "winsRequired" in score_options_source
+    assert "losingScore < winsRequired" in score_options_source
+    assert "getSeriesScoreOptions(match.best_of)" in prediction_source
+    assert (
+        "predicted_advancing_team_id"
+        not in prediction_source[
+            prediction_source.index("if (isSeries)") : prediction_source.index(
+                "const homeScore = getNonNegativeIntegerInputValue"
+            )
+        ]
+    )
+
+    assert "getSeriesScoreOptions(match.best_of)" in result_source
+    assert 'text: isSeries ? "Результат серии" : "Результат матча"' in result_source
+    assert "{ advancing_team_id: advancingTeamId }" in result_source
+    assert "if (isSeries)" in result_source
+
+
 def test_successful_management_creation_opens_the_created_contest() -> None:
     confirmation_source = _function_source("createContestConfirmationCard")
     management_start = confirmation_source.index("if (state.managementMode === true)")

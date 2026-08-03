@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
@@ -45,6 +45,7 @@ from app.contest_service import (
     TournamentTeamsLockedError,
     complete_contest,
     create_match,
+    create_the_international_2026_contest,
     create_world_cup_2026_contest,
     delete_contest,
     delete_match,
@@ -131,7 +132,13 @@ router = APIRouter(
 
 
 class CreateContestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
+    template_key: Literal[
+        "world_cup_2026",
+        "the_international_2026",
+    ] = "world_cup_2026"
 
 
 class CreateMatchRequest(BaseModel):
@@ -140,6 +147,7 @@ class CreateMatchRequest(BaseModel):
     home_team_id: SqliteInteger
     away_team_id: SqliteInteger
     starts_at_utc: str
+    best_of: Literal[3, 5] | None = None
 
 
 class SaveTournamentTeamsRequest(BaseModel):
@@ -155,13 +163,13 @@ class UpdateMatchStartRequest(BaseModel):
 class SaveMatchPredictionRequest(BaseModel):
     predicted_home_score: SqliteInteger
     predicted_away_score: SqliteInteger
-    predicted_advancing_team_id: SqliteInteger
+    predicted_advancing_team_id: SqliteInteger | None = None
 
 
 class SaveMatchResultRequest(BaseModel):
     home_score: SqliteInteger
     away_score: SqliteInteger
-    advancing_team_id: SqliteInteger
+    advancing_team_id: SqliteInteger | None = None
 
 
 class SaveChampionPredictionSettingsRequest(BaseModel):
@@ -737,7 +745,12 @@ async def create_tma_contest(
 
     settings = load_settings()
     try:
-        result = create_world_cup_2026_contest(
+        create_contest = (
+            create_the_international_2026_contest
+            if payload.template_key == "the_international_2026"
+            else create_world_cup_2026_contest
+        )
+        result = create_contest(
             database_path=settings.database_path,
             telegram_chat_id=context.chat.telegram_chat_id,
             chat_title=context.chat.title,
@@ -1041,6 +1054,7 @@ async def create_tma_match(
             home_team_id=payload.home_team_id,
             away_team_id=payload.away_team_id,
             starts_at_utc=payload.starts_at_utc,
+            best_of=payload.best_of,
             idempotency_key=idempotency_key,
             audit_actor=_audit_actor(context.context, context.access),
         )
@@ -1706,6 +1720,7 @@ def _serialize_active_contest(contest) -> dict[str, object]:
         "id": contest.id,
         "name": contest.name,
         "slug": contest.slug,
+        "template_key": contest.template_key,
         "created_at": contest.created_at,
     }
 
@@ -1729,6 +1744,7 @@ def _serialize_contest_details(contest) -> dict[str, object]:
         "id": contest.id,
         "name": contest.name,
         "slug": contest.slug,
+        "template_key": contest.template_key,
         "created_at": contest.created_at,
         "is_active": contest.is_active,
         "tournament_teams": _serialize_tournament_teams(contest.tournament_teams),
@@ -1920,6 +1936,7 @@ def _serialize_match(match) -> dict[str, object]:
     return {
         "id": match.id,
         "tie_id": match.tie_id,
+        **({"best_of": match.best_of} if match.best_of is not None else {}),
         "home_team_id": match.home_team_id,
         "home_team_name": match.home_team_name,
         "away_team_id": match.away_team_id,

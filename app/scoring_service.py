@@ -56,6 +56,31 @@ def calculate_match_score_award(
     return None
 
 
+def calculate_series_score_award(
+    *,
+    predicted_home_score: int,
+    predicted_away_score: int,
+    actual_home_score: int,
+    actual_away_score: int,
+) -> MatchScoreAward | None:
+    if (
+        predicted_home_score == actual_home_score
+        and predicted_away_score == actual_away_score
+    ):
+        return MatchScoreAward(score_type="exact_score", points=2)
+
+    if _match_outcome(
+        home_score=predicted_home_score,
+        away_score=predicted_away_score,
+    ) == _match_outcome(
+        home_score=actual_home_score,
+        away_score=actual_away_score,
+    ):
+        return MatchScoreAward(score_type="outcome", points=1)
+
+    return None
+
+
 def recalculate_match_prediction_scores(
     connection: sqlite3.Connection,
     *,
@@ -67,12 +92,17 @@ def recalculate_match_prediction_scores(
             matches.home_score_final,
             matches.away_score_final,
             matches.scoring_rule_set_id,
+            contests.template_key,
             scoring_rule_sets.exact_score_points,
             scoring_rule_sets.goal_difference_points,
             scoring_rule_sets.outcome_points
         FROM matches
         JOIN scoring_rule_sets
             ON scoring_rule_sets.id = matches.scoring_rule_set_id
+        JOIN competitions
+            ON competitions.id = scoring_rule_sets.competition_id
+        JOIN contests
+            ON contests.id = competitions.contest_id
         WHERE matches.id = ?
         """,
         (match_id,),
@@ -112,15 +142,23 @@ def recalculate_match_prediction_scores(
     score_rows: list[tuple[int, int, MatchScoreType, int]] = []
 
     for prediction_row in prediction_rows:
-        award = calculate_match_score_award(
-            predicted_home_score=int(prediction_row["predicted_home_score"]),
-            predicted_away_score=int(prediction_row["predicted_away_score"]),
-            actual_home_score=int(match_row["home_score_final"]),
-            actual_away_score=int(match_row["away_score_final"]),
-            exact_score_points=int(match_row["exact_score_points"]),
-            goal_difference_points=int(match_row["goal_difference_points"]),
-            outcome_points=int(match_row["outcome_points"]),
-        )
+        if match_row["template_key"] == "the_international_2026":
+            award = calculate_series_score_award(
+                predicted_home_score=int(prediction_row["predicted_home_score"]),
+                predicted_away_score=int(prediction_row["predicted_away_score"]),
+                actual_home_score=int(match_row["home_score_final"]),
+                actual_away_score=int(match_row["away_score_final"]),
+            )
+        else:
+            award = calculate_match_score_award(
+                predicted_home_score=int(prediction_row["predicted_home_score"]),
+                predicted_away_score=int(prediction_row["predicted_away_score"]),
+                actual_home_score=int(match_row["home_score_final"]),
+                actual_away_score=int(match_row["away_score_final"]),
+                exact_score_points=int(match_row["exact_score_points"]),
+                goal_difference_points=int(match_row["goal_difference_points"]),
+                outcome_points=int(match_row["outcome_points"]),
+            )
 
         if award is None or award.points == 0:
             continue
