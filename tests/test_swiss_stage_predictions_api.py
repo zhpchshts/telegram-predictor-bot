@@ -140,6 +140,7 @@ def test_swiss_stage_api_configures_predicts_and_records_result(
     leaderboard = contest_response.json()["contest"]["leaderboard"]
     assert leaderboard[0]["total_points"] == 2
     assert leaderboard[0]["swiss_stage_prediction_count"] == 1
+    assert leaderboard[0]["calculated_predictions_count"] == 1
     assert leaderboard[0]["swiss_stage_prediction_history"]["awarded_points"] == 2
 
     changed_result_response = client.put(

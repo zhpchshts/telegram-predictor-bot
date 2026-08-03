@@ -60,12 +60,17 @@ def test_tma_uses_separate_swiss_stage_api_routes() -> None:
     assert "Исправить итоги? Рейтинг будет пересчитан сразу." in source
 
 
-def test_tma_completeness_combines_enabled_long_term_predictions() -> None:
-    source = _source()
+def test_tma_prediction_count_separates_calculated_and_pending() -> None:
+    card_source = _function_source("createLeaderboardCard")
+    row_source = _function_source("createLeaderboardRow")
 
-    assert "longTermPredictionSlotsCount" in source
-    assert "entry?.swiss_stage_prediction_count" in source
-    assert "entry?.swiss_stage_prediction_history" in source
+    assert "entry?.calculated_predictions_count" in card_source
+    assert "entry?.match_predictions_count" in card_source
+    assert "entry?.champion_prediction_count" in card_source
+    assert "entry?.swiss_stage_prediction_count" in card_source
+    assert "savedPredictionsCount - calculatedPredictionsCount" in card_source
+    assert "longTermPredictionSlotsCount" not in card_source
+    assert "`${calculatedPredictionsCount + pendingPredictionsCount}`" in row_source
 
 
 def test_tma_uses_server_awards_in_personal_card_and_leaderboard_history() -> None:

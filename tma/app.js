@@ -1093,13 +1093,8 @@ function createContestDeletionCard(bootstrap, contest, state) {
 
 function createLeaderboardCard(
   leaderboard,
-  championPrediction,
-  swissStagePrediction,
 ) {
   const entries = Array.isArray(leaderboard) ? leaderboard : [];
-  const longTermPredictionSlotsCount =
-    (championPrediction?.is_enabled === true ? 1 : 0) +
-    (swissStagePrediction?.is_enabled === true ? 1 : 0);
 
   if (entries.length === 0) {
     return createInfoCard(
@@ -1147,10 +1142,10 @@ function createLeaderboardCard(
     )
       ? entry.swiss_stage_prediction_count
       : 0;
-    const totalMatchesCount = Number.isSafeInteger(
-      entry?.total_matches_count,
+    const calculatedPredictionsCount = Number.isSafeInteger(
+      entry?.calculated_predictions_count,
     )
-      ? entry.total_matches_count
+      ? entry.calculated_predictions_count
       : 0;
     const predictionHistory = Array.isArray(entry?.prediction_history)
       ? entry.prediction_history
@@ -1169,6 +1164,14 @@ function createLeaderboardCard(
       predictionHistory.length > 0 ||
       championPredictionHistory !== null ||
       swissStagePredictionHistory !== null;
+    const savedPredictionsCount =
+      matchPredictionsCount +
+      championPredictionCount +
+      swissStagePredictionCount;
+    const pendingPredictionsCount = Math.max(
+      savedPredictionsCount - calculatedPredictionsCount,
+      0,
+    );
 
     const item = createElement("li", {
       className: "leaderboard-list-item",
@@ -1176,10 +1179,8 @@ function createLeaderboardCard(
     const row = createLeaderboardRow(
       place,
       participantName,
-      matchPredictionsCount,
-      championPredictionCount + swissStagePredictionCount,
-      totalMatchesCount,
-      longTermPredictionSlotsCount,
+      calculatedPredictionsCount,
+      pendingPredictionsCount,
       totalPoints,
     );
 
@@ -1227,10 +1228,8 @@ function createLeaderboardCard(
 function createLeaderboardRow(
   place,
   participantName,
-  matchPredictionsCount,
-  championPredictionCount,
-  totalMatchesCount,
-  longTermPredictionSlotsCount,
+  calculatedPredictionsCount,
+  pendingPredictionsCount,
   totalPoints,
 ) {
   const row = createElement("div", {
@@ -1250,9 +1249,9 @@ function createLeaderboardRow(
   const predictionsElement = createElement("span", {
     className: "leaderboard-predictions",
     text: (
-      `Прогнозов: ${matchPredictionsCount}+` +
-      `${championPredictionCount} из ` +
-      `${totalMatchesCount + longTermPredictionSlotsCount}`
+      `Прогнозов: ${calculatedPredictionsCount}+` +
+      `${pendingPredictionsCount} из ` +
+      `${calculatedPredictionsCount + pendingPredictionsCount}`
     ),
   });
   const pointsElement = createElement("span", {
@@ -5326,11 +5325,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
 
   if (activeTab === "leaderboard") {
     cards.push(
-      createLeaderboardCard(
-        leaderboard,
-        contest.champion_prediction,
-        contest.swiss_stage_prediction,
-      ),
+      createLeaderboardCard(leaderboard),
     );
   } else if (activeTab === "matches") {
     cards.push(

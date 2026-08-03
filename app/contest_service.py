@@ -305,6 +305,7 @@ class ContestLeaderboardEntry:
     match_predictions_count: int
     champion_prediction_count: int
     swiss_stage_prediction_count: int
+    calculated_predictions_count: int
     total_matches_count: int
     tiebreak_metrics: LeaderboardTiebreakMetrics
     prediction_history: tuple[MatchSummary, ...] = ()
@@ -779,6 +780,46 @@ def get_contest_details(
                 END AS swiss_stage_prediction_count,
                 (
                     SELECT COUNT(*)
+                    FROM match_predictions
+                    JOIN matches
+                        ON matches.id = match_predictions.match_id
+                    JOIN stages
+                        ON stages.id = matches.stage_id
+                    JOIN competitions
+                        ON competitions.id = stages.competition_id
+                    WHERE competitions.contest_id = ?
+                        AND matches.status = 'finished'
+                        AND match_predictions.user_id = users.id
+                ) + CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM champion_predictions
+                        JOIN contests
+                            ON contests.id = champion_predictions.contest_id
+                        WHERE champion_predictions.contest_id = ?
+                            AND champion_predictions.user_id = users.id
+                            AND contests.champion_prediction_enabled = 1
+                            AND contests.champion_team_id IS NOT NULL
+                    ) THEN 1
+                    ELSE 0
+                END + CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM swiss_stage_predictions
+                        JOIN swiss_stage_prediction_settings
+                            ON swiss_stage_prediction_settings.contest_id =
+                            swiss_stage_predictions.contest_id
+                        JOIN swiss_stage_results
+                            ON swiss_stage_results.contest_id =
+                            swiss_stage_predictions.contest_id
+                        WHERE swiss_stage_predictions.contest_id = ?
+                            AND swiss_stage_predictions.user_id = users.id
+                            AND swiss_stage_prediction_settings.enabled = 1
+                    ) THEN 1
+                    ELSE 0
+                END AS calculated_predictions_count,
+                (
+                    SELECT COUNT(*)
                     FROM matches
                     JOIN stages
                         ON stages.id = matches.stage_id
@@ -802,6 +843,9 @@ def get_contest_details(
             ORDER BY users.id ASC
             """,
             (
+                contest_id,
+                contest_id,
+                contest_id,
                 contest_id,
                 contest_id,
                 contest_id,
@@ -4992,6 +5036,11 @@ def _contest_leaderboard_from_rows(
                 swiss_stage_prediction_count=(
                     int(row["swiss_stage_prediction_count"])
                     if "swiss_stage_prediction_count" in row.keys()
+                    else 0
+                ),
+                calculated_predictions_count=(
+                    int(row["calculated_predictions_count"])
+                    if "calculated_predictions_count" in row.keys()
                     else 0
                 ),
                 total_matches_count=int(row["total_matches_count"]),

@@ -294,6 +294,7 @@ def test_champion_prediction_api_configures_selects_and_records_champion(
             "total_points": 7,
             "match_predictions_count": 0,
             "champion_prediction_count": 1,
+            "calculated_predictions_count": 1,
             "total_matches_count": 1,
             "prediction_history": [],
             "champion_prediction_history": {
