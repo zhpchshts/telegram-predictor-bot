@@ -18,7 +18,8 @@ def create_dispatcher(settings: Settings) -> Dispatcher:
     @router.message(CommandStart())
     async def handle_start(message: Message) -> None:
         await message.answer(
-            "Клевер — футбольные конкурсы прогнозов для Telegram-чатов.\n\n"
+            "Клевер — конкурсы прогнозов на спорт и киберспорт "
+            "для Telegram-чатов.\n\n"
             "Добавьте меня в групповой чат и отправьте /app, "
             "чтобы открыть приложение."
         )

@@ -133,6 +133,10 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="Клевер",
+        description=(
+            "Telegram Mini App для конкурсов прогнозов на спортивные "
+            "и киберспортивные турниры в групповых чатах."
+        ),
         version="0.1.0",
         lifespan=lifespan,
     )
