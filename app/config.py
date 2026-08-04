@@ -28,6 +28,8 @@ class Settings:
     telegram_api_id: int | None
     telegram_api_hash: str | None
     telegram_mtproto_session_path: Path
+    healthcheck_chat_id: int | None
+    healthcheck_interval_minutes: int
 
 
 def _parse_boolean_environment(name: str, *, default: bool) -> bool:
@@ -72,6 +74,13 @@ def load_settings() -> Settings:
         if telegram_mtproto_session_path_value
         else DEFAULT_TELEGRAM_MTPROTO_SESSION_PATH
     )
+    healthcheck_chat_id = _parse_optional_nonzero_integer_environment(
+        "HEALTHCHECK_CHAT_ID"
+    )
+    healthcheck_interval_minutes = _parse_positive_integer_environment(
+        "HEALTHCHECK_INTERVAL_MINUTES",
+        default=360,
+    )
 
     return Settings(
         bot_token=bot_token,
@@ -82,6 +91,8 @@ def load_settings() -> Settings:
         telegram_api_id=telegram_api_id,
         telegram_api_hash=telegram_api_hash,
         telegram_mtproto_session_path=telegram_mtproto_session_path,
+        healthcheck_chat_id=healthcheck_chat_id,
+        healthcheck_interval_minutes=healthcheck_interval_minutes,
     )
 
 
@@ -97,4 +108,30 @@ def _parse_optional_positive_integer_environment(name: str) -> int | None:
     if parsed_value <= 0:
         logger.warning("%s is invalid; Telegram MTProto is disabled.", name)
         return None
+    return parsed_value
+
+
+def _parse_optional_nonzero_integer_environment(name: str) -> int | None:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return None
+    try:
+        parsed_value = int(value)
+    except ValueError as error:
+        raise RuntimeError(f"{name} must be a non-zero integer.") from error
+    if parsed_value == 0:
+        raise RuntimeError(f"{name} must be a non-zero integer.")
+    return parsed_value
+
+
+def _parse_positive_integer_environment(name: str, *, default: int) -> int:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed_value = int(value)
+    except ValueError as error:
+        raise RuntimeError(f"{name} must be a positive integer.") from error
+    if parsed_value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer.")
     return parsed_value

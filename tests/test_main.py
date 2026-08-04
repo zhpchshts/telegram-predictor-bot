@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app import main
+from app.database import initialize_database
 from app.main import create_app
 
 
@@ -39,6 +40,55 @@ def test_tma_index_is_available() -> None:
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert "Клевер" in response.text
+
+
+def test_health_checks_database_and_background_tasks(tmp_path: Path) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    app = create_app()
+    app.state.database_path = database_path
+    app.state.background_tasks = {
+        name: SimpleNamespace(done=lambda: False)
+        for name in main.EXPECTED_BACKGROUND_TASK_NAMES
+    }
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "checks": {
+            "database": "ok",
+            "background_tasks": {
+                name: "ok" for name in main.EXPECTED_BACKGROUND_TASK_NAMES
+            },
+        },
+    }
+
+
+def test_health_reports_missing_database_and_stopped_task(tmp_path: Path) -> None:
+    app = create_app()
+    app.state.database_path = tmp_path / "uninitialized.db"
+    app.state.background_tasks = {
+        name: SimpleNamespace(done=lambda name=name: name == "telegram-polling")
+        for name in main.EXPECTED_BACKGROUND_TASK_NAMES
+    }
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unhealthy",
+        "checks": {
+            "database": "unavailable",
+            "background_tasks": {
+                "telegram-polling": "stopped",
+                "match-prediction-publications": "ok",
+                "contest-publications": "ok",
+                "match-lifecycle": "ok",
+            },
+        },
+    }
 
 
 def test_tma_locks_champion_settings_after_actual_champion() -> None:
@@ -201,6 +251,9 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
     async def match_lifecycle_worker(**_kwargs) -> None:
         await background_task("match-lifecycle")
 
+    async def healthcheck_notification_worker(**_kwargs) -> None:
+        await background_task("telegram-healthcheck")
+
     monkeypatch.setattr(
         main,
         "load_settings",
@@ -210,6 +263,8 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
             telegram_api_id=12345,
             telegram_api_hash="secret-hash",
             telegram_mtproto_session_path=Path("unused-session"),
+            healthcheck_chat_id=100,
+            healthcheck_interval_minutes=360,
         ),
     )
     monkeypatch.setattr(
@@ -239,6 +294,11 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         "run_match_lifecycle_worker",
         match_lifecycle_worker,
     )
+    monkeypatch.setattr(
+        main,
+        "run_healthcheck_notification_worker",
+        healthcheck_notification_worker,
+    )
 
     app = create_app()
 
@@ -258,6 +318,7 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         "match-publication",
         "contest-publication",
         "match-lifecycle",
+        "telegram-healthcheck",
     }
     assert set(cancelled) == set(started)
     assert session_closed is True
