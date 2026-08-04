@@ -1510,17 +1510,32 @@ function createContestRulesCard(
   const isChampionPredictionEnabled =
     championPrediction?.is_enabled === true;
   const isSeriesContest = templateKey === "the_international_2026";
+  const isSwissStagePredictionEnabled =
+    swissStagePrediction?.is_enabled === true;
   const championPoints = Number.isSafeInteger(championPrediction?.points)
     ? championPrediction.points
     : (isSeriesContest ? 4 : 5);
-  const baseOverview = isSeriesContest
-    ? "2 — точный счёт серии · 1 — победитель серии"
-    : "3 — счёт · 2 — разница · 1 — исход · +1 — победитель";
+  let overviewText;
+  if (isSeriesContest) {
+    const tiOverviewParts = [];
+    if (isSwissStagePredictionEnabled) {
+      tiOverviewParts.push("Swiss 2/1");
+    }
+    if (isChampionPredictionEnabled) {
+      tiOverviewParts.push(`чемпион +${championPoints}`);
+    }
+    tiOverviewParts.push("Double Elimination 2/1");
+    overviewText = tiOverviewParts.join(" → ");
+  } else {
+    const footballOverview =
+      "3 — счёт · 2 — разница · 1 — исход · +1 — победитель";
+    overviewText = isChampionPredictionEnabled
+      ? `${footballOverview} · +${championPoints} — чемпион`
+      : footballOverview;
+  }
   const overview = createElement("span", {
     className: "contest-rules-overview",
-    text: isChampionPredictionEnabled
-      ? `${baseOverview} · +${championPoints} — чемпион`
-      : baseOverview,
+    text: overviewText,
   });
   const body = createElement("div", {
     className: "contest-rules-body",
@@ -1531,12 +1546,33 @@ function createContestRulesCard(
   summaryContent.append(title, overview);
   summary.append(summaryContent);
   if (isSeriesContest) {
+    if (isSwissStagePredictionEnabled) {
+      body.append(
+        createElement("p", {
+          text: (
+            "Швейцарский этап: 2 балла за команду и точный способ прохода, " +
+            "1 балл — если способ прохода перепутан."
+          ),
+        }),
+      );
+    }
+    if (isChampionPredictionEnabled) {
+      body.append(
+        createElement("p", {
+          text: (
+            "Прогноз на чемпиона открыт до старта Double Elimination. " +
+            `За верно выбранного чемпиона — ещё ${championPoints} ` +
+            `${getPointsLabel(championPoints)}.`
+          ),
+        }),
+      );
+    }
     body.append(
       createElement("p", {
-        text: "Точный счёт серии — 2 балла. Верный победитель серии при другом счёте — 1 балл.",
+        text: "Double Elimination: точный счёт серии — 2 балла. Верный победитель серии при другом счёте — 1 балл.",
       }),
       createElement("p", {
-        text: "Серия играется до двух побед в Bo3 или до трёх побед в Bo5.",
+        text: "Серии Double Elimination играются до двух побед в Bo3 или до трёх побед в Bo5.",
       }),
     );
   } else {
@@ -1548,27 +1584,26 @@ function createContestRulesCard(
         text: "За верно выбранного победителя противостояния — ещё 1 балл.",
       }),
     );
-  }
-
-  if (isChampionPredictionEnabled) {
-    body.append(
-      createElement("p", {
-        text: (
-          `За верно выбранного чемпиона — ещё ${championPoints} ` +
-          `${getPointsLabel(championPoints)}.`
-        ),
-      }),
-    );
-  }
-  if (swissStagePrediction?.is_enabled === true) {
-    body.append(
-      createElement("p", {
-        text: (
-          "Швейцарский этап: 2 балла за команду и точный способ прохода, " +
-          "1 балл — если способ прохода перепутан."
-        ),
-      }),
-    );
+    if (isChampionPredictionEnabled) {
+      body.append(
+        createElement("p", {
+          text: (
+            `За верно выбранного чемпиона — ещё ${championPoints} ` +
+            `${getPointsLabel(championPoints)}.`
+          ),
+        }),
+      );
+    }
+    if (isSwissStagePredictionEnabled) {
+      body.append(
+        createElement("p", {
+          text: (
+            "Швейцарский этап: 2 балла за команду и точный способ прохода, " +
+            "1 балл — если способ прохода перепутан."
+          ),
+        }),
+      );
+    }
   }
 
   if (isSeriesContest) {

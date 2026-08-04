@@ -170,10 +170,21 @@ def test_contest_rules_follow_the_selected_tournament_template() -> None:
 
     assert "templateKey" in rules_source
     assert 'templateKey === "the_international_2026"' in rules_source
-    assert "2 — точный счёт серии · 1 — победитель серии" in rules_source
-    assert "Точный счёт серии — 2 балла" in rules_source
+    assert 'tiOverviewParts.push("Swiss 2/1")' in rules_source
+    assert "tiOverviewParts.push(`чемпион +${championPoints}`)" in rules_source
+    assert 'tiOverviewParts.push("Double Elimination 2/1")' in rules_source
+    assert "Double Elimination: точный счёт серии — 2 балла" in rules_source
     assert "Верный победитель серии при другом счёте — 1 балл" in rules_source
-    assert "Серия играется до двух побед в Bo3 или до трёх побед в Bo5." in rules_source
+    assert "Прогноз на чемпиона открыт до старта Double Elimination." in rules_source
+    assert (
+        "Серии Double Elimination играются до двух побед в Bo3 или до трёх побед в Bo5."
+    ) in rules_source
+    assert rules_source.index("Швейцарский этап:") < rules_source.index(
+        "Прогноз на чемпиона открыт"
+    )
+    assert rules_source.index("Прогноз на чемпиона открыт") < rules_source.index(
+        "Double Elimination: точный счёт серии"
+    )
     assert "contest.template_key" in details_source
 
 
