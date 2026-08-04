@@ -9,11 +9,13 @@ from pathlib import Path
 import uvicorn
 from aiogram import Bot
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.bot import create_dispatcher
 from app.config import load_settings
-from app.database import initialize_database
+from app.database import database_connection, initialize_database
+from app.healthcheck_notifications import run_healthcheck_notification_worker
 from app.match_prediction_publications import (
     run_match_prediction_publication_worker,
 )
@@ -28,6 +30,12 @@ from app.telegram_username_resolver import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TMA_DIRECTORY = PROJECT_ROOT / "tma"
 logger = logging.getLogger(__name__)
+EXPECTED_BACKGROUND_TASK_NAMES = (
+    "telegram-polling",
+    "match-prediction-publications",
+    "contest-publications",
+    "match-lifecycle",
+)
 
 
 async def _cancel_background_tasks(
@@ -47,6 +55,52 @@ async def _cancel_background_tasks(
                 task.get_name(),
                 result,
             )
+
+
+def _database_is_available(database_path: Path | None) -> bool:
+    if database_path is None or not database_path.is_file():
+        return False
+
+    try:
+        with database_connection(database_path) as connection:
+            required_table = connection.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name = 'contests'
+                """
+            ).fetchone()
+            if required_table is None:
+                return False
+            connection.execute("SELECT 1 FROM contests LIMIT 1").fetchone()
+    except Exception as error:
+        logger.warning(
+            "Database health check failed (%s).",
+            type(error).__name__,
+        )
+        return False
+
+    return True
+
+
+def _background_task_statuses(
+    background_tasks: dict[str, asyncio.Task[None]] | None,
+) -> dict[str, str]:
+    if background_tasks is None:
+        return {name: "missing" for name in EXPECTED_BACKGROUND_TASK_NAMES}
+
+    statuses: dict[str, str] = {}
+    task_names = (*EXPECTED_BACKGROUND_TASK_NAMES, *sorted(background_tasks.keys()))
+    for name in dict.fromkeys(task_names):
+        task = background_tasks.get(name)
+        if task is None:
+            statuses[name] = "missing"
+        elif task.done():
+            statuses[name] = "stopped"
+        else:
+            statuses[name] = "ok"
+    return statuses
 
 
 def create_app() -> FastAPI:
@@ -109,18 +163,38 @@ def create_app() -> FastAPI:
             run_match_lifecycle_worker(database_path=settings.database_path),
             name="match-lifecycle",
         )
+        healthcheck_notification_task = (
+            asyncio.create_task(
+                run_healthcheck_notification_worker(
+                    bot=bot,
+                    database_path=settings.database_path,
+                    chat_id=settings.healthcheck_chat_id,
+                    interval_minutes=settings.healthcheck_interval_minutes,
+                ),
+                name="telegram-healthcheck-notifications",
+            )
+            if settings.healthcheck_chat_id is not None
+            else None
+        )
+        started_tasks = (
+            polling_task,
+            publication_task,
+            contest_publication_task,
+            match_lifecycle_task,
+            *(
+                (healthcheck_notification_task,)
+                if healthcheck_notification_task is not None
+                else ()
+            ),
+        )
+        background_tasks = {task.get_name(): task for task in started_tasks}
+        app.state.database_path = settings.database_path
+        app.state.background_tasks = background_tasks
 
         try:
             yield
         finally:
-            await _cancel_background_tasks(
-                (
-                    match_lifecycle_task,
-                    contest_publication_task,
-                    publication_task,
-                    polling_task,
-                )
-            )
+            await _cancel_background_tasks(tuple(background_tasks.values()))
 
             try:
                 await bot.session.close()
@@ -130,6 +204,8 @@ def create_app() -> FastAPI:
                 finally:
                     del app.state.telegram_bot
                     del app.state.telegram_username_resolver
+                    del app.state.background_tasks
+                    del app.state.database_path
 
     app = FastAPI(
         title="Клевер",
@@ -155,8 +231,26 @@ def create_app() -> FastAPI:
         return response
 
     @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health(request: Request) -> JSONResponse:
+        database_ok = _database_is_available(
+            getattr(request.app.state, "database_path", None)
+        )
+        task_statuses = _background_task_statuses(
+            getattr(request.app.state, "background_tasks", None)
+        )
+        healthy = database_ok and all(
+            task_status == "ok" for task_status in task_statuses.values()
+        )
+        return JSONResponse(
+            status_code=200 if healthy else 503,
+            content={
+                "status": "ok" if healthy else "unhealthy",
+                "checks": {
+                    "database": "ok" if database_ok else "unavailable",
+                    "background_tasks": task_statuses,
+                },
+            },
+        )
 
     app.mount(
         "/tma",
