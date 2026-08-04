@@ -1493,7 +1493,11 @@ function getLeaderboardMatchPoints(match) {
   return totalPoints > 0 ? `+${totalPoints}` : "0";
 }
 
-function createContestRulesCard(championPrediction, swissStagePrediction) {
+function createContestRulesCard(
+  templateKey,
+  championPrediction,
+  swissStagePrediction,
+) {
   const card = document.createElement("details");
   const summary = document.createElement("summary");
   const summaryContent = createElement("div", {
@@ -1505,17 +1509,18 @@ function createContestRulesCard(championPrediction, swissStagePrediction) {
   });
   const isChampionPredictionEnabled =
     championPrediction?.is_enabled === true;
+  const isSeriesContest = templateKey === "the_international_2026";
   const championPoints = Number.isSafeInteger(championPrediction?.points)
     ? championPrediction.points
-    : 5;
+    : (isSeriesContest ? 4 : 5);
+  const baseOverview = isSeriesContest
+    ? "2 — точный счёт серии · 1 — победитель серии"
+    : "3 — счёт · 2 — разница · 1 — исход · +1 — победитель";
   const overview = createElement("span", {
     className: "contest-rules-overview",
     text: isChampionPredictionEnabled
-      ? (
-        "3 — счёт · 2 — разница · 1 — исход · +1 — победитель · " +
-        `+${championPoints} — чемпион`
-      )
-      : "3 — счёт · 2 — разница · 1 — исход · +1 — победитель",
+      ? `${baseOverview} · +${championPoints} — чемпион`
+      : baseOverview,
   });
   const body = createElement("div", {
     className: "contest-rules-body",
@@ -1525,14 +1530,25 @@ function createContestRulesCard(championPrediction, swissStagePrediction) {
 
   summaryContent.append(title, overview);
   summary.append(summaryContent);
-  body.append(
-    createElement("p", {
-      text: "Точный счёт — 3 балла; точная разница голов — 2; верный исход — 1.",
-    }),
-    createElement("p", {
-      text: "За верно выбранного победителя противостояния — ещё 1 балл.",
-    }),
-  );
+  if (isSeriesContest) {
+    body.append(
+      createElement("p", {
+        text: "Точный счёт серии — 2 балла. Верный победитель серии при другом счёте — 1 балл.",
+      }),
+      createElement("p", {
+        text: "Серия играется до двух побед в Bo3 или до трёх побед в Bo5.",
+      }),
+    );
+  } else {
+    body.append(
+      createElement("p", {
+        text: "Точный счёт — 3 балла; точная разница голов — 2; верный исход — 1.",
+      }),
+      createElement("p", {
+        text: "За верно выбранного победителя противостояния — ещё 1 балл.",
+      }),
+    );
+  }
 
   if (isChampionPredictionEnabled) {
     body.append(
@@ -1555,14 +1571,22 @@ function createContestRulesCard(championPrediction, swissStagePrediction) {
     );
   }
 
-  body.append(
-    createElement("p", {
-      text: "Счёт учитывается после 90 или 120 минут. Голы серии пенальти в него не входят.",
-    }),
-    createElement("p", {
-      text: "Прогноз на матч можно изменить до начала матча.",
-    }),
-  );
+  if (isSeriesContest) {
+    body.append(
+      createElement("p", {
+        text: "Прогноз на серию можно изменить до её начала.",
+      }),
+    );
+  } else {
+    body.append(
+      createElement("p", {
+        text: "Счёт учитывается после 90 или 120 минут. Голы серии пенальти в него не входят.",
+      }),
+      createElement("p", {
+        text: "Прогноз на матч можно изменить до начала матча.",
+      }),
+    );
+  }
 
   card.append(summary, body);
   return card;
@@ -5350,6 +5374,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
   } else {
     cards.push(
       createContestRulesCard(
+        contest.template_key,
         contest.champion_prediction,
         contest.swiss_stage_prediction,
       ),

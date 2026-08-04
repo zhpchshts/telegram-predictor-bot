@@ -164,6 +164,19 @@ def test_ti_creation_and_series_controls_are_present() -> None:
     assert "if (isSeries)" in result_source
 
 
+def test_contest_rules_follow_the_selected_tournament_template() -> None:
+    rules_source = _function_source("createContestRulesCard")
+    details_source = _function_source("renderContestDetailsScreen")
+
+    assert "templateKey" in rules_source
+    assert 'templateKey === "the_international_2026"' in rules_source
+    assert "2 — точный счёт серии · 1 — победитель серии" in rules_source
+    assert "Точный счёт серии — 2 балла" in rules_source
+    assert "Верный победитель серии при другом счёте — 1 балл" in rules_source
+    assert "Серия играется до двух побед в Bo3 или до трёх побед в Bo5." in rules_source
+    assert "contest.template_key" in details_source
+
+
 def test_successful_management_creation_opens_the_created_contest() -> None:
     confirmation_source = _function_source("createContestConfirmationCard")
     management_start = confirmation_source.index("if (state.managementMode === true)")
