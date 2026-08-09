@@ -8,9 +8,13 @@ const TELEGRAM_INIT_DATA_QUERY_PARAM = "tgWebAppData";
 const IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
 const CONTEST_NAME_MAX_LENGTH = 80;
 const CONTEST_TABS = [
-  { id: "predictions", label: "Прогнозы" },
-  { id: "leaderboard", label: "Рейтинг" },
   { id: "matches", label: "Матчи" },
+  { id: "tournament", label: "Турнир" },
+  { id: "leaderboard", label: "Рейтинг" },
+];
+const CONTEST_MANAGEMENT_TABS = [
+  { id: "matches", label: "Матчи" },
+  { id: "settings", label: "Настройки" },
 ];
 const AUDIT_EVENT_PRESENTATIONS = Object.freeze({
   contest_created: Object.freeze({
@@ -1630,23 +1634,32 @@ function createContestRulesCard(
 function getActiveContestTab(tab) {
   return CONTEST_TABS.some((candidate) => candidate.id === tab)
     ? tab
-    : "predictions";
+    : "matches";
 }
 
-function createContestTabs(activeTab, onSelectTab) {
+function getActiveContestManagementTab(tab) {
+  return CONTEST_MANAGEMENT_TABS.some((candidate) => candidate.id === tab)
+    ? tab
+    : "matches";
+}
+
+function createTabNavigation(tabsConfig, activeTab, onSelectTab, ariaLabel) {
   const tabs = createElement("nav", {
     className: "contest-tabs",
   });
   const track = createElement("div", {
-    className: "contest-tabs-track",
+    className: (
+      `contest-tabs-track contest-tabs-track--${tabsConfig.length}`
+    ),
   });
 
-  tabs.setAttribute("aria-label", "Разделы конкурса");
+  tabs.setAttribute("aria-label", ariaLabel);
 
-  for (const tab of CONTEST_TABS) {
+  for (const tab of tabsConfig) {
     const button = createActionButton(tab.label, "contest-tab");
+    const isActive = tab.id === activeTab;
 
-    if (tab.id === activeTab) {
+    if (isActive) {
       button.classList.add("is-active");
       button.setAttribute("aria-current", "page");
     }
@@ -1660,6 +1673,24 @@ function createContestTabs(activeTab, onSelectTab) {
 
   tabs.append(track);
   return tabs;
+}
+
+function createContestTabs(activeTab, onSelectTab) {
+  return createTabNavigation(
+    CONTEST_TABS,
+    activeTab,
+    onSelectTab,
+    "Разделы конкурса",
+  );
+}
+
+function createContestManagementTabs(activeTab, onSelectTab) {
+  return createTabNavigation(
+    CONTEST_MANAGEMENT_TABS,
+    activeTab,
+    onSelectTab,
+    "Разделы управления конкурсом",
+  );
 }
 
 function isMatchPredictionOpen(match) {
@@ -4431,7 +4462,7 @@ function createChampionAdministrationCard(contest, state, onUpdated) {
         className: "match-prediction-closed",
         text: (
           "Включите прогноз, задайте срок закрытия и количество баллов. " +
-          "Участники будут выбирать чемпиона на вкладке «Прогнозы»."
+          "Участники будут выбирать чемпиона на вкладке «Турнир»."
         ),
       }),
       createChampionPredictionSettingsDisclosure(
@@ -4898,14 +4929,31 @@ function createMatchListItem(
   return item;
 }
 
-function createPredictionListItems(contest, matches, onChampionUpdated) {
-  const items = matches.map((match) => ({
-    kind: "match",
-    match,
-    isOpen: isMatchPredictionOpen(match),
-    sortTime: getPredictionSortTime(match.starts_at_utc),
-    sortKey: `match-${String(match.id).padStart(12, "0")}`,
-  }));
+function createMatchPredictionListItems(contest, matches) {
+  return matches
+    .map((match) => ({
+      kind: "match",
+      match,
+      isOpen: isMatchPredictionOpen(match),
+      sortTime: getPredictionSortTime(match.starts_at_utc),
+      sortKey: `match-${String(match.id).padStart(12, "0")}`,
+    }))
+    .sort(comparePredictionListItems)
+    .map((item) => createMatchListItem(
+      contest,
+      item.match,
+      {},
+      null,
+      null,
+      {
+        showPredictions: true,
+        showResults: false,
+      },
+    ));
+}
+
+function createTournamentPredictionListItems(contest, onUpdated) {
+  const items = [];
   const championPrediction = getChampionPrediction(contest);
   const swissStagePrediction = getSwissStagePrediction(contest);
 
@@ -4928,20 +4976,32 @@ function createPredictionListItems(contest, matches, onChampionUpdated) {
 
   return items
     .sort(comparePredictionListItems)
-    .map((item) => {
-      if (item.kind === "champion") {
-        return createChampionPredictionCard(contest, onChampionUpdated);
-      }
-      if (item.kind === "swiss-stage") {
-        return createSwissStagePredictionCard(contest, onChampionUpdated);
-      }
-
-      return createMatchListItem(contest, item.match, {}, null, null, {
-        showPredictions: true,
-        showResults: false,
-      });
-    })
+    .map((item) => (
+      item.kind === "champion"
+        ? createChampionPredictionCard(contest, onUpdated)
+        : createSwissStagePredictionCard(contest, onUpdated)
+    ))
     .filter(Boolean);
+}
+
+function createContestPredictionSettingsCard(contest, state, onUpdated) {
+  const card = createElement("section", {
+    className: "info-card contest-prediction-settings-card",
+  });
+  const heading = createElement("h2", {
+    text: "Прогнозы и публикации",
+  });
+  const list = createElement("ol", {
+    className: "match-list",
+  });
+
+  list.append(
+    createMatchPredictionPublicationAdministrationCard(contest, onUpdated),
+    createChampionAdministrationCard(contest, state, onUpdated),
+    createSwissStageAdministrationCard(contest, onUpdated),
+  );
+  card.append(heading, list);
+  return card;
 }
 
 function createMatchesCard(
@@ -4956,13 +5016,9 @@ function createMatchesCard(
     showPredictions,
     showResults,
     canManageResults = true,
-    leadingItems = [],
     listItems = null,
   },
 ) {
-  const normalizedLeadingItems = Array.isArray(leadingItems)
-    ? leadingItems.filter(Boolean)
-    : [];
   const normalizedListItems = Array.isArray(listItems)
     ? listItems.filter(Boolean)
     : null;
@@ -4972,7 +5028,7 @@ function createMatchesCard(
     : "";
   const hasListItems = normalizedListItems !== null
     ? normalizedListItems.length > 0
-    : normalizedLeadingItems.length > 0 || matches.length > 0;
+    : matches.length > 0;
 
   if (matches.length === 0 && !hasListItems && !visibleMessage) {
     return createInfoCard(title, emptyMessages, "matches-card");
@@ -4999,8 +5055,6 @@ function createMatchesCard(
     if (normalizedListItems !== null) {
       list.append(...normalizedListItems);
     } else {
-      list.append(...normalizedLeadingItems);
-
       for (const match of matches) {
         list.append(
           createMatchListItem(
@@ -5022,7 +5076,7 @@ function createMatchesCard(
     card.append(list);
   }
 
-  if (matches.length === 0) {
+  if (!hasListItems) {
     for (const emptyMessage of emptyMessages) {
       card.append(
         createElement("p", {
@@ -5386,7 +5440,40 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
     cards.push(
       createLeaderboardCard(leaderboard),
     );
-  } else if (activeTab === "matches") {
+  } else if (activeTab === "tournament") {
+    cards.push(
+      createContestRulesCard(
+        contest.template_key,
+        contest.champion_prediction,
+        contest.swiss_stage_prediction,
+      ),
+      createMatchesCard(
+        contest,
+        [],
+        state,
+        null,
+        null,
+        {
+          title: "Турнир",
+          emptyMessages: [
+            "Дополнительные прогнозы для этого конкурса не настроены.",
+          ],
+          showPredictions: true,
+          showResults: false,
+          canManageResults: false,
+          listItems: createTournamentPredictionListItems(
+            contest,
+            () => {
+              void openContest(bootstrap, contest.id, {
+                ...state,
+                activeTab: "tournament",
+              });
+            },
+          ),
+        },
+      ),
+    );
+  } else {
     cards.push(
       createMatchesCard(
         contest,
@@ -5397,31 +5484,6 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
         {
           title: "Матчи",
           emptyMessages: isActive
-            ? ["Матчей пока нет."]
-            : ["Матчей нет."],
-          showPredictions: false,
-          showResults: true,
-          canManageResults: false,
-          leadingItems: [],
-        },
-      ),
-    );
-  } else {
-    cards.push(
-      createContestRulesCard(
-        contest.template_key,
-        contest.champion_prediction,
-        contest.swiss_stage_prediction,
-      ),
-      createMatchesCard(
-        contest,
-        matches,
-        state,
-        null,
-        null,
-        {
-          title: "Прогнозы",
-          emptyMessages: isActive
             ? [
               "Матчей пока нет.",
               "Когда кто-то добавит матч, здесь можно будет сохранить прогноз.",
@@ -5429,16 +5491,8 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
             : ["Матчей нет."],
           showPredictions: true,
           showResults: false,
-          listItems: createPredictionListItems(
-            contest,
-            matches,
-            () => {
-              void openContest(bootstrap, contest.id, {
-                ...state,
-                activeTab: "predictions",
-              });
-            },
-          ),
+          canManageResults: false,
+          listItems: createMatchPredictionListItems(contest, matches),
         },
       ),
     );
@@ -5489,14 +5543,36 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
   setChatSummary();
   const matches = Array.isArray(contest.matches) ? contest.matches : [];
   const isActive = contest.is_active !== false;
+  const activeTab = getActiveContestManagementTab(state.managementTab);
   const managementState = {
     ...state,
     managementMode: true,
+    managementTab: activeTab,
   };
   const cards = [
     createContestManagementHeader(contest, bootstrap),
-    ...(isActive
-      ? [
+    createContestManagementTabs(activeTab, (nextTab) => {
+      if (nextTab === activeTab) {
+        return;
+      }
+
+      void openContest(bootstrap, contest.id, {
+        ...managementState,
+        managementTab: nextTab,
+      });
+    }),
+  ];
+
+  if (activeTab === "settings") {
+    if (!isActive) {
+      cards.push(
+        createInfoCard(
+          "Настройки",
+          ["Конкурс завершён. Настройки доступны только для просмотра в конкурсе."],
+        ),
+      );
+    } else {
+      cards.push(
         createTournamentTeamsAdministrationCard(
           contest,
           managementState,
@@ -5508,66 +5584,50 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
             });
           },
         ),
-      ]
-      : []),
-    createMatchesCard(
-      contest,
-      matches,
-      managementState,
-      (resultState) => {
-        void openContest(bootstrap, contest.id, {
-          ...managementState,
-          resultMatchId: resultState.matchId,
-          resultMessage: resultState.message,
-          resultMessageType: resultState.type,
-        });
-      },
-      (deletionState) => {
-        void openContest(bootstrap, contest.id, {
-          ...managementState,
-          ...deletionState,
-        });
-      },
-      {
-        title: "Управление матчами",
-        emptyMessages: isActive
-          ? ["Матчей пока нет.", "Добавьте первый матч ниже."]
-          : ["Матчей нет."],
-        showPredictions: false,
-        showResults: true,
-        canManageResults: isActive,
-        leadingItems: isActive
-          ? [
-            createMatchPredictionPublicationAdministrationCard(
-              contest,
-              () => {
-                void openContest(bootstrap, contest.id, managementState);
-              },
-            ),
-            createChampionAdministrationCard(
-              contest,
-              managementState,
-              () => {
-                void openContest(bootstrap, contest.id, managementState);
-              },
-            ),
-            createSwissStageAdministrationCard(
-              contest,
-              () => {
-                void openContest(bootstrap, contest.id, managementState);
-              },
-            ),
-          ]
-          : [],
-      },
-    ),
-  ];
-
-  if (isActive) {
+        createContestPredictionSettingsCard(
+          contest,
+          managementState,
+          () => {
+            void openContest(bootstrap, contest.id, managementState);
+          },
+        ),
+        createContestCompletionCard(bootstrap, contest, managementState),
+        createContestDeletionCard(bootstrap, contest, managementState),
+      );
+    }
+  } else {
+    if (isActive) {
+      cards.push(createMatchFormCard(bootstrap, contest, managementState));
+    }
     cards.push(
-      createMatchFormCard(bootstrap, contest, managementState),
-      createContestCompletionCard(bootstrap, contest, managementState),
-      createContestDeletionCard(bootstrap, contest, managementState),
+      createMatchesCard(
+        contest,
+        matches,
+        managementState,
+        (resultState) => {
+          void openContest(bootstrap, contest.id, {
+            ...managementState,
+            resultMatchId: resultState.matchId,
+            resultMessage: resultState.message,
+            resultMessageType: resultState.type,
+          });
+        },
+        (deletionState) => {
+          void openContest(bootstrap, contest.id, {
+            ...managementState,
+            ...deletionState,
+          });
+        },
+        {
+          title: "Матчи",
+          emptyMessages: isActive
+            ? ["Матчей пока нет.", "Добавьте первый матч выше."]
+            : ["Матчей нет."],
+          showPredictions: false,
+          showResults: true,
+          canManageResults: isActive,
+        },
+      ),
     );
   }
 

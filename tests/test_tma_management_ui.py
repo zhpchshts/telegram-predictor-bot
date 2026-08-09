@@ -221,10 +221,76 @@ def test_role_and_audit_tools_have_separate_screens_with_hub_back_links() -> Non
     assert "createAuditListCard(bootstrap, state)" in audit_screen_source
 
 
+def test_participant_tabs_separate_match_and_tournament_predictions() -> None:
+    source = _source()
+    active_tab_source = _function_source("getActiveContestTab")
+    details_source = _function_source("renderContestDetailsScreen")
+    match_predictions_source = _function_source("createMatchPredictionListItems")
+    matches_card_source = _function_source("createMatchesCard")
+    tournament_predictions_source = _function_source(
+        "createTournamentPredictionListItems"
+    )
+
+    matches_tab = '{ id: "matches", label: "Матчи" }'
+    tournament_tab = '{ id: "tournament", label: "Турнир" }'
+    leaderboard_tab = '{ id: "leaderboard", label: "Рейтинг" }'
+    assert source.index(matches_tab) < source.index(tournament_tab)
+    assert source.index(tournament_tab) < source.index(leaderboard_tab)
+    assert ': "matches"' in active_tab_source
+
+    assert 'activeTab === "tournament"' in details_source
+    assert "createTournamentPredictionListItems(" in details_source
+    assert 'activeTab: "tournament"' in details_source
+    assert "createMatchPredictionListItems(contest, matches)" in details_source
+    assert 'title: "Матчи"' in details_source
+    assert 'title: "Турнир"' in details_source
+
+    assert "createMatchListItem(" in match_predictions_source
+    assert "createChampionPredictionCard(contest, onUpdated)" in (
+        tournament_predictions_source
+    )
+    assert "createSwissStagePredictionCard(contest, onUpdated)" in (
+        tournament_predictions_source
+    )
+    assert "createMatchListItem" not in tournament_predictions_source
+    assert "if (!hasListItems)" in matches_card_source
+
+
+def test_management_tabs_default_to_matches_and_keep_settings_separate() -> None:
+    source = _source()
+    active_tab_source = _function_source("getActiveContestManagementTab")
+    management_source = _function_source("renderContestManagementScreen")
+    settings_source = _function_source("createContestPredictionSettingsCard")
+
+    matches_tab = '{ id: "matches", label: "Матчи" }'
+    settings_tab = '{ id: "settings", label: "Настройки" }'
+    management_tabs_start = source.index("const CONTEST_MANAGEMENT_TABS")
+    assert source.index(matches_tab, management_tabs_start) < source.index(
+        settings_tab,
+        management_tabs_start,
+    )
+    assert ': "matches"' in active_tab_source
+
+    assert "createContestManagementTabs(activeTab" in management_source
+    assert 'activeTab === "settings"' in management_source
+    assert "createTournamentTeamsAdministrationCard(" in management_source
+    assert "createContestPredictionSettingsCard(" in management_source
+    assert "createContestCompletionCard(" in management_source
+    assert "createContestDeletionCard(" in management_source
+    assert management_source.index("createMatchFormCard(") < management_source.index(
+        "createMatchesCard("
+    )
+    assert "Добавьте первый матч выше." in management_source
+
+    assert "createMatchPredictionPublicationAdministrationCard" in settings_source
+    assert "createChampionAdministrationCard" in settings_source
+    assert "createSwissStageAdministrationCard" in settings_source
+
+
 def test_participant_contour_does_not_render_administrative_forms() -> None:
     list_source = _function_source("renderContestScreen")
     details_source = _function_source("renderContestDetailsScreen")
-    predictions_source = _function_source("createPredictionListItems")
+    predictions_source = _function_source("createMatchPredictionListItems")
 
     assert "if (canManageContests(bootstrap))" in list_source
     assert "createManagementNavigationCard(bootstrap)" in list_source
@@ -232,9 +298,10 @@ def test_participant_contour_does_not_render_administrative_forms() -> None:
     assert "createSupermoderatorManagementCard" not in list_source
     assert "createAuditFiltersCard" not in list_source
 
-    assert "createPredictionListItems(" in details_source
+    assert "createMatchPredictionListItems(" in details_source
+    assert "createTournamentPredictionListItems(" in details_source
     assert "createLeaderboardCard" in details_source
-    assert "createMatchListItem(contest, item.match" in predictions_source
+    assert "createMatchListItem(" in predictions_source
     assert "showPredictions: true" in predictions_source
     assert "showResults: false" in predictions_source
     assert "createMatchFormCard" not in details_source

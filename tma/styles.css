@@ -613,6 +613,10 @@ summary:focus-visible {
   background: var(--surface-subtle);
 }
 
+.contest-tabs-track--2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .contest-tab {
   min-width: 0;
   min-height: 38px;
