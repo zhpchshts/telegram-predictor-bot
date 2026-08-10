@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from app.chat_migration_service import is_telegram_chat_migrated
 from app.tma_auth import TelegramInitDataError, validate_telegram_init_data
 from app.tma_launch import TmaLaunchTokenError, validate_tma_launch_token
 
@@ -32,7 +34,12 @@ class TmaContext:
     chat: TmaChatContext
 
 
-def build_tma_context(*, init_data: str, bot_token: str) -> TmaContext:
+def build_tma_context(
+    *,
+    init_data: str,
+    bot_token: str,
+    database_path: Path | None = None,
+) -> TmaContext:
     try:
         telegram_init_data = validate_telegram_init_data(
             init_data,
@@ -53,6 +60,12 @@ def build_tma_context(*, init_data: str, bot_token: str) -> TmaContext:
         )
     except TmaLaunchTokenError as error:
         raise TmaContextError(str(error)) from error
+
+    if database_path is not None and is_telegram_chat_migrated(
+        database_path=database_path,
+        telegram_chat_id=launch_context.chat_id,
+    ):
+        raise TmaContextError("TMA launch link is no longer active.")
 
     return TmaContext(
         user=_parse_user(telegram_init_data.user),

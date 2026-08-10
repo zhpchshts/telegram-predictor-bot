@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-from aiogram import Dispatcher, Router
+from aiogram import Dispatcher, F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from app.chat_migration_service import migrate_telegram_chat
 from app.config import Settings
 from app.tma_launch import create_tma_launch_token
 
@@ -14,6 +15,24 @@ from app.tma_launch import create_tma_launch_token
 def create_dispatcher(settings: Settings) -> Dispatcher:
     dispatcher = Dispatcher()
     router = Router(name="core")
+
+    @router.message(F.migrate_to_chat_id)
+    async def handle_migrate_to_chat(message: Message) -> None:
+        migrate_telegram_chat(
+            database_path=settings.database_path,
+            old_telegram_chat_id=message.chat.id,
+            new_telegram_chat_id=message.migrate_to_chat_id,
+            new_chat_title=message.chat.title,
+        )
+
+    @router.message(F.migrate_from_chat_id)
+    async def handle_migrate_from_chat(message: Message) -> None:
+        migrate_telegram_chat(
+            database_path=settings.database_path,
+            old_telegram_chat_id=message.migrate_from_chat_id,
+            new_telegram_chat_id=message.chat.id,
+            new_chat_title=message.chat.title,
+        )
 
     @router.message(CommandStart())
     async def handle_start(message: Message) -> None:

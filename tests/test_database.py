@@ -41,6 +41,7 @@ def test_initialize_database_creates_current_schema(tmp_path: Path) -> None:
         "swiss_stage_result_selections",
         "swiss_stage_results",
         "teams",
+        "telegram_chat_migrations",
         "tie_prediction_scores",
         "tie_predictions",
         "ties",
@@ -83,7 +84,7 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
             """
         ).fetchone()[0]
 
-    assert tables_count == 31
+    assert tables_count == 32
 
 
 def test_current_schema_supports_only_known_contest_templates(tmp_path: Path) -> None:

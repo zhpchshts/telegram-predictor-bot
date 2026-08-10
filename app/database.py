@@ -16,6 +16,13 @@ CREATE TABLE IF NOT EXISTS chats (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS telegram_chat_migrations (
+    old_telegram_chat_id INTEGER PRIMARY KEY,
+    new_telegram_chat_id INTEGER NOT NULL UNIQUE,
+    migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (old_telegram_chat_id != new_telegram_chat_id)
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     telegram_user_id INTEGER NOT NULL UNIQUE,

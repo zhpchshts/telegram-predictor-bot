@@ -157,6 +157,13 @@ function buildExpiredLaunchTokenMessage() {
   );
 }
 
+function buildInactiveLaunchTokenMessage() {
+  return (
+    "Эта кнопка больше не действует.\n" +
+    "Отправь /app в обновлённом чате и открой Клевер через новую кнопку."
+  );
+}
+
 function createElement(tagName, { className, text } = {}) {
   const element = document.createElement(tagName);
 
@@ -7495,6 +7502,11 @@ function handleError(error) {
 
   if (message === "TMA launch token is expired.") {
     renderError(buildExpiredLaunchTokenMessage());
+    return;
+  }
+
+  if (message === "TMA launch link is no longer active.") {
+    renderError(buildInactiveLaunchTokenMessage());
     return;
   }
 

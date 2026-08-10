@@ -1600,6 +1600,7 @@ def _get_verified_tma_context(
         return build_tma_context(
             init_data=x_telegram_init_data,
             bot_token=settings.bot_token,
+            database_path=settings.database_path,
         )
     except TmaContextError as error:
         raise HTTPException(
