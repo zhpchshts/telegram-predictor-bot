@@ -772,6 +772,141 @@ def test_match_result_publication_is_sent_and_corrected(tmp_path: Path) -> None:
     assert "В следующий раунд проходит Франция" in str(bot.edited[-1]["text"])
 
 
+def test_more_than_ten_match_results_use_anonymous_statistics(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, match = _create_contest_and_match(database_path)
+    for number in range(1, 12):
+        save_match_prediction(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            match_id=match.id,
+            telegram_user_id=USER_ID + number,
+            first_name=f"Секретный участник {number}",
+            last_name=None,
+            username=f"secret-{number}",
+            predicted_home_score=2 if number <= 7 else 1,
+            predicted_away_score=1 if number <= 7 else 2,
+            predicted_advancing_team_id=(
+                match.home_team_id if number <= 7 else match.away_team_id
+            ),
+            now_utc=_datetime(10),
+        )
+    _enable_publications(database_path, contest_id=contest_id)
+    _save_result(database_path, contest_id=contest_id, match=match)
+    claim = claim_next_publication(database_path=database_path, now_utc=_datetime(12))
+    assert claim is not None and claim.publication_type == "match_result"
+
+    text = "".join(
+        render_publication_messages(
+            database_path=database_path,
+            publication=claim,
+        )
+    )
+
+    assert "Прогнозов: 11" in text
+    assert "Победителя угадали: 7 (64%)" in text
+    assert "Точный счёт угадали: 7 (64%)" in text
+    assert "Большинство угадало победителя." in text
+    assert "Точных прогнозов оказалось много." in text
+    assert "Секретный участник" not in text
+    assert "<table" not in text
+
+
+def test_more_than_ten_champion_predictions_and_result_use_statistics(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, match = _create_contest_and_match(database_path)
+    _enable_publications(database_path, contest_id=contest_id)
+    save_champion_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        enabled=True,
+        deadline_at="2026-06-11T11:00:00Z",
+        points=5,
+        now_utc=_datetime(9),
+        audit_actor=AUDIT_ACTOR,
+    )
+    for number in range(1, 12):
+        save_champion_prediction(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=USER_ID + number,
+            first_name=f"Секретный участник {number}",
+            last_name=None,
+            username=f"champion-secret-{number}",
+            predicted_team_id=(
+                match.home_team_id if number <= 7 else match.away_team_id
+            ),
+            now_utc=_datetime(10),
+        )
+
+    predictions_publication = ClaimedPublication(
+        id=1,
+        contest_id=contest_id,
+        publication_type="champion_predictions",
+        entity_id=contest_id,
+        desired_revision=1,
+        desired_action="publish",
+        claim_token="test",
+    )
+    predictions_text = "".join(
+        render_publication_messages(
+            database_path=database_path,
+            publication=predictions_publication,
+            now_utc=_datetime(12),
+        )
+    )
+    assert "Прогнозов: 11" in predictions_text
+    assert "Франция — 7 (64%)" in predictions_text
+    assert "Франция — доминирующий фаворит прогнозов." in predictions_text
+    assert "Секретный участник" not in predictions_text
+
+    _save_result(database_path, contest_id=contest_id, match=match)
+    save_contest_champion(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name="Иванова",
+        username="anna",
+        champion_team_id=match.home_team_id,
+        now_utc=_datetime(12),
+        audit_actor=AUDIT_ACTOR,
+    )
+    result_publication = ClaimedPublication(
+        id=2,
+        contest_id=contest_id,
+        publication_type="champion_result",
+        entity_id=contest_id,
+        desired_revision=1,
+        desired_action="publish",
+        claim_token="test",
+    )
+    result_text = "".join(
+        render_publication_messages(
+            database_path=database_path,
+            publication=result_publication,
+            now_utc=_datetime(12),
+        )
+    )
+    assert "Прогнозов: 11" in result_text
+    assert "Чемпиона выбрали: 7 (64%)" in result_text
+    assert "Фаворит прогнозов оправдал ожидания." in result_text
+    assert "Секретный участник" not in result_text
+    assert "<table" not in result_text
+
+
 def test_disabled_first_result_is_not_backfilled_by_correction(
     tmp_path: Path,
 ) -> None:

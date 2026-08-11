@@ -10,6 +10,10 @@ from typing import Protocol
 from aiogram.types import InputRichMessage
 
 from app.database import database_connection
+from app.publication_message_matrix import (
+    prediction_display_mode,
+    series_start_insight,
+)
 from app.rich_publications import (
     RICH_MESSAGE_MAX_LENGTH,
     RICH_MESSAGE_MAX_TABLE_ROWS,
@@ -293,6 +297,15 @@ def _build_messages(
             )
         return (message,)
 
+    if prediction_display_mode(len(predictions)) == "statistics":
+        return _build_statistics_messages(
+            first_header=first_header,
+            continuation_header=continuation_header,
+            publication=publication,
+            predictions=predictions,
+            max_message_length=max_message_length,
+        )
+
     prediction_rows = tuple(
         _format_prediction_row(prediction) for prediction in predictions
     )
@@ -308,6 +321,98 @@ def _build_messages(
         max_message_length=max_message_length,
         max_table_rows=max_table_rows,
     )
+
+
+def _build_statistics_messages(
+    *,
+    first_header: str,
+    continuation_header: str,
+    publication: PendingMatchPredictionPublication,
+    predictions,
+    max_message_length: int,
+) -> tuple[str, ...]:
+    total = len(predictions)
+    winner_counts: dict[str, int] = {}
+    score_counts: dict[str, int] = {}
+    for prediction in predictions:
+        home_score = int(prediction["predicted_home_score"])
+        away_score = int(prediction["predicted_away_score"])
+        score = f"{home_score}:{away_score}"
+        score_counts[score] = score_counts.get(score, 0) + 1
+
+        advancing_team_name = prediction["advancing_team_name"]
+        if advancing_team_name is not None:
+            winner = str(advancing_team_name)
+        elif home_score > away_score:
+            winner = publication.home_team_name
+        elif away_score > home_score:
+            winner = publication.away_team_name
+        else:
+            winner = "Ничья"
+        winner_counts[winner] = winner_counts.get(winner, 0) + 1
+
+    sorted_winners = sorted(
+        winner_counts.items(),
+        key=lambda item: (-item[1], item[0].casefold()),
+    )
+    favorite_name, favorite_count = sorted_winners[0]
+    lines = [
+        f"<b>Прогнозов: {total}</b>",
+        escape_rich_text(series_start_insight(favorite_name, favorite_count, total)),
+        "<b>Вера в победу</b>",
+        *(
+            f"{escape_rich_text(team_name)} — {count} ({_format_percent(count, total)})"
+            for team_name, count in sorted_winners
+        ),
+        "<b>Прогнозы счёта</b>",
+        *(
+            f"{score} — {count} ({_format_percent(count, total)})"
+            for score, count in sorted(
+                score_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        ),
+    ]
+    return _split_statistic_messages(
+        first_header=first_header,
+        continuation_header=continuation_header,
+        lines=tuple(lines),
+        max_message_length=max_message_length,
+    )
+
+
+def _split_statistic_messages(
+    *,
+    first_header: str,
+    continuation_header: str,
+    lines: tuple[str, ...],
+    max_message_length: int,
+) -> tuple[str, ...]:
+    messages: list[str] = []
+    current_lines: list[str] = []
+    for line in lines:
+        header = first_header if not messages else continuation_header
+        candidate = f"{header}<p>{'<br>'.join((*current_lines, line))}</p>"
+        if len(candidate) <= max_message_length:
+            current_lines.append(line)
+            continue
+        if not current_lines:
+            raise ValueError("A statistics line does not fit in one message.")
+        messages.append(f"{header}<p>{'<br>'.join(current_lines)}</p>")
+        current_lines = [line]
+        continuation = f"{continuation_header}<p>{line}</p>"
+        if len(continuation) > max_message_length:
+            raise ValueError("A statistics line does not fit in one message.")
+
+    if current_lines:
+        header = first_header if not messages else continuation_header
+        messages.append(f"{header}<p>{'<br>'.join(current_lines)}</p>")
+    return tuple(messages)
+
+
+def _format_percent(count: int, total: int) -> str:
+    rounded = (count * 200 + total) // (2 * total)
+    return f"{rounded}%"
 
 
 def _format_prediction_row(prediction) -> str:

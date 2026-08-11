@@ -14,6 +14,8 @@ PublicationType = Literal[
     "match_result",
     "champion_predictions",
     "champion_result",
+    "swiss_predictions",
+    "swiss_result",
     "contest_completed",
 ]
 PublicationAction = Literal["publish", "withdraw"]
@@ -323,6 +325,116 @@ def create_or_revise_champion_predictions_publication(
     )
 
 
+def create_or_revise_swiss_predictions_publication(
+    connection: sqlite3.Connection,
+    *,
+    contest_id: int,
+    event_id: int,
+    now_utc: datetime | None = None,
+) -> None:
+    now = resolve_service_time(now_utc)
+    desired_action, reconcile_at = _swiss_predictions_desired_state(
+        connection,
+        contest_id=contest_id,
+        now_utc=now,
+    )
+    existing = connection.execute(
+        """
+        SELECT desired_action
+        FROM contest_publications
+        WHERE contest_id = ?
+          AND publication_type = 'swiss_predictions'
+          AND entity_id = ?
+        """,
+        (contest_id, contest_id),
+    ).fetchone()
+    if existing is None:
+        if desired_action == "withdraw" and reconcile_at is None:
+            return
+        create_publication_if_enabled(
+            connection,
+            contest_id=contest_id,
+            publication_type="swiss_predictions",
+            entity_id=contest_id,
+            event_id=event_id,
+            desired_action=desired_action,
+            reconcile_at=reconcile_at,
+            now_utc=now,
+        )
+        return
+
+    needs_revision = (
+        str(existing["desired_action"]) != desired_action or desired_action == "publish"
+    )
+    if needs_revision:
+        revise_existing_publication(
+            connection,
+            contest_id=contest_id,
+            publication_type="swiss_predictions",
+            entity_id=contest_id,
+            event_id=event_id,
+            desired_action=desired_action,
+            reconcile_at=reconcile_at,
+            now_utc=now,
+        )
+        return
+
+    connection.execute(
+        """
+        UPDATE contest_publications
+        SET
+            latest_event_id = ?,
+            reconcile_at = ?,
+            updated_at = ?
+        WHERE contest_id = ?
+          AND publication_type = 'swiss_predictions'
+          AND entity_id = ?
+          AND EXISTS (
+              SELECT 1 FROM contests
+              WHERE id = ?
+                AND match_prediction_publication_enabled = 1
+          )
+        """,
+        (
+            event_id,
+            reconcile_at,
+            serialize_service_time(now),
+            contest_id,
+            contest_id,
+            contest_id,
+        ),
+    )
+
+
+def create_or_revise_swiss_result_publication(
+    connection: sqlite3.Connection,
+    *,
+    contest_id: int,
+    event_id: int,
+    was_created: bool,
+    now_utc: datetime | None = None,
+) -> None:
+    if was_created:
+        create_publication_if_enabled(
+            connection,
+            contest_id=contest_id,
+            publication_type="swiss_result",
+            entity_id=contest_id,
+            event_id=event_id,
+            now_utc=now_utc,
+        )
+        return
+    revise_existing_publication(
+        connection,
+        contest_id=contest_id,
+        publication_type="swiss_result",
+        entity_id=contest_id,
+        event_id=event_id,
+        desired_action="publish",
+        now_utc=now_utc,
+    )
+
+
 def revise_champion_publication_for_related_change(
     connection: sqlite3.Connection,
     *,
@@ -357,18 +469,29 @@ def transition_contest_publications_for_master_switch(
     now_utc: datetime | None = None,
 ) -> None:
     if enabled:
-        desired_action, reconcile_at = _champion_predictions_desired_state(
-            connection,
-            contest_id=contest_id,
-            now_utc=resolve_service_time(now_utc),
-        )
-        if desired_action == "withdraw" and reconcile_at is not None:
-            create_or_revise_champion_predictions_publication(
+        now = resolve_service_time(now_utc)
+        for desired_state, create_scheduled in (
+            (
+                _champion_predictions_desired_state,
+                create_or_revise_champion_predictions_publication,
+            ),
+            (
+                _swiss_predictions_desired_state,
+                create_or_revise_swiss_predictions_publication,
+            ),
+        ):
+            desired_action, reconcile_at = desired_state(
                 connection,
                 contest_id=contest_id,
-                event_id=event_id,
-                now_utc=now_utc,
+                now_utc=now,
             )
+            if desired_action == "withdraw" and reconcile_at is not None:
+                create_scheduled(
+                    connection,
+                    contest_id=contest_id,
+                    event_id=event_id,
+                    now_utc=now,
+                )
         return
     now_value = serialize_service_time(resolve_service_time(now_utc))
     connection.execute(
@@ -716,6 +839,7 @@ def prepare_scheduled_reconciliation(
         if publication.publication_type not in (
             "champion_predictions",
             "champion_result",
+            "swiss_predictions",
         ):
             cleared = connection.execute(
                 """
@@ -751,6 +875,12 @@ def prepare_scheduled_reconciliation(
 
         if publication.publication_type == "champion_predictions":
             desired_action, next_reconcile_at = _champion_predictions_desired_state(
+                connection,
+                contest_id=publication.contest_id,
+                now_utc=now,
+            )
+        elif publication.publication_type == "swiss_predictions":
+            desired_action, next_reconcile_at = _swiss_predictions_desired_state(
                 connection,
                 contest_id=publication.contest_id,
                 now_utc=now,
@@ -1189,6 +1319,31 @@ def _champion_predictions_desired_state(
     deadline = datetime.fromisoformat(str(deadline_value).replace("Z", "+00:00"))
     if deadline.tzinfo is None or deadline.utcoffset() is None:
         raise RuntimeError("Champion prediction deadline does not include a timezone.")
+    deadline = deadline.astimezone(timezone.utc)
+    if deadline > now_utc:
+        return "withdraw", serialize_service_time(deadline)
+    return "publish", None
+
+
+def _swiss_predictions_desired_state(
+    connection: sqlite3.Connection,
+    *,
+    contest_id: int,
+    now_utc: datetime,
+) -> tuple[PublicationAction, str | None]:
+    row = connection.execute(
+        """
+        SELECT enabled, deadline_at
+        FROM swiss_stage_prediction_settings
+        WHERE contest_id = ?
+        """,
+        (contest_id,),
+    ).fetchone()
+    if row is None or not bool(row["enabled"]) or row["deadline_at"] is None:
+        return "withdraw", None
+    deadline = datetime.fromisoformat(str(row["deadline_at"]).replace("Z", "+00:00"))
+    if deadline.tzinfo is None or deadline.utcoffset() is None:
+        raise RuntimeError("Swiss prediction deadline does not include a timezone.")
     deadline = deadline.astimezone(timezone.utc)
     if deadline > now_utc:
         return "withdraw", serialize_service_time(deadline)

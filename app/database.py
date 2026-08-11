@@ -400,6 +400,8 @@ CREATE TABLE IF NOT EXISTS contest_publications (
             'match_result',
             'champion_predictions',
             'champion_result',
+            'swiss_predictions',
+            'swiss_result',
             'contest_completed'
         )
     ),

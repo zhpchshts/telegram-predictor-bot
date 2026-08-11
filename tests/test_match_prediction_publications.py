@@ -226,6 +226,48 @@ def test_due_match_without_predictions_uses_rich_empty_state(tmp_path: Path) -> 
     assert "<table" not in rich_message.html
 
 
+def test_more_than_ten_match_predictions_use_anonymous_statistics(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    activation_time = _datetime(12, 0)
+    participants = tuple(
+        (
+            f"Секретный участник {number}",
+            None,
+            2 if number <= 7 else 1,
+            1 if number <= 7 else 2,
+            "Франция" if number <= 7 else "Парагвай",
+        )
+        for number in range(1, 12)
+    )
+    _seed_match(
+        database_path=database_path,
+        starts_at_utc=_datetime(12, 1),
+        publication_enabled_at=activation_time,
+        participants=participants,
+    )
+    bot = RecordingBot()
+
+    asyncio.run(
+        publish_due_match_predictions(
+            bot=bot,
+            database_path=database_path,
+            now_utc=_datetime(12, 2),
+        )
+    )
+
+    assert len(bot.calls) == 1
+    text = str(bot.calls[0]["text"])
+    assert "Прогнозов: 11" in text
+    assert "Франция — 7 (64%)" in text
+    assert "Парагвай — 4 (36%)" in text
+    assert "2:1 — 7 (64%)" in text
+    assert "У Франция небольшой перевес." in text
+    assert "Секретный участник" not in text
+    assert "<table" not in text
+
+
 def test_retry_continues_from_the_first_unsent_message_part(tmp_path: Path) -> None:
     database_path = tmp_path / "predictor.db"
     activation_time = _datetime(12, 0)

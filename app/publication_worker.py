@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import logging
 from pathlib import Path
 import sqlite3
@@ -48,10 +49,14 @@ async def process_due_contest_publications(
     bot: TelegramPublicationClient,
     database_path: Path,
     max_publications: int = 100,
+    now_utc: datetime | None = None,
 ) -> int:
     processed_count = 0
     for _ in range(max_publications):
-        claimed = claim_next_publication(database_path=database_path)
+        claimed = claim_next_publication(
+            database_path=database_path,
+            now_utc=now_utc,
+        )
         if claimed is None:
             break
         publication = claimed
@@ -60,6 +65,7 @@ async def process_due_contest_publications(
             prepared_publication = prepare_scheduled_reconciliation(
                 database_path=database_path,
                 publication=claimed,
+                now_utc=now_utc,
             )
             if prepared_publication is None:
                 continue
@@ -68,6 +74,7 @@ async def process_due_contest_publications(
             desired_messages = render_publication_messages(
                 database_path=database_path,
                 publication=publication,
+                now_utc=now_utc,
             )
             await deliver_publication(
                 bot=bot,
@@ -87,6 +94,7 @@ async def process_due_contest_publications(
                     if publication.desired_action == "withdraw"
                     else "published"
                 ),
+                now_utc=now_utc,
             )
             continue
         except TemporaryDeliveryError as error:
@@ -96,6 +104,7 @@ async def process_due_contest_publications(
                 error=str(error),
                 permanent=False,
                 retry_after_seconds=error.retry_after_seconds,
+                now_utc=now_utc,
             )
             continue
         except PermanentDeliveryError as error:
@@ -104,6 +113,7 @@ async def process_due_contest_publications(
                 publication=publication,
                 error=str(error),
                 permanent=True,
+                now_utc=now_utc,
             )
             continue
         except sqlite3.OperationalError as error:
@@ -112,6 +122,7 @@ async def process_due_contest_publications(
                 publication=publication,
                 error=str(error),
                 permanent=False,
+                now_utc=now_utc,
             )
             continue
         except Exception as error:
@@ -121,6 +132,7 @@ async def process_due_contest_publications(
                 publication=publication,
                 error=str(error),
                 permanent=True,
+                now_utc=now_utc,
             )
             continue
 
@@ -130,6 +142,7 @@ async def process_due_contest_publications(
             status=(
                 "withdrawn" if publication.desired_action == "withdraw" else "published"
             ),
+            now_utc=now_utc,
         )
         processed_count += 1
 

@@ -21,6 +21,8 @@ from app.publication_outbox import (
     create_or_revise_champion_publication,
     create_or_revise_champion_predictions_publication,
     create_or_revise_match_result_publication,
+    create_or_revise_swiss_predictions_publication,
+    create_or_revise_swiss_result_publication,
     handle_match_publication_deletion,
     revise_champion_publication_for_related_change,
     transition_contest_publications_for_master_switch,
@@ -2718,7 +2720,7 @@ def save_swiss_stage_prediction_settings(
 
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
-        _get_active_contest_row(
+        contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
@@ -2775,7 +2777,7 @@ def save_swiss_stage_prediction_settings(
         )
         after_state = _swiss_stage_snapshot(connection, contest_id=contest_id)
         if before_state != after_state:
-            _record_audit(
+            settings_event_id = _record_audit(
                 connection,
                 audit_actor=audit_actor,
                 telegram_chat_id=telegram_chat_id,
@@ -2786,6 +2788,12 @@ def save_swiss_stage_prediction_settings(
                 before_state=before_state,
                 after_state=after_state,
             )
+            if bool(contest_row["match_prediction_publication_enabled"]):
+                create_or_revise_swiss_predictions_publication(
+                    connection,
+                    contest_id=contest_id,
+                    event_id=settings_event_id,
+                )
 
 
 def save_swiss_stage_prediction(
@@ -3009,7 +3017,7 @@ def save_swiss_stage_result(
             elimination_team_ids=normalized_elimination_ids,
         )
         after_state = _swiss_stage_snapshot(connection, contest_id=contest_id)
-        _record_audit(
+        result_event_id = _record_audit(
             connection,
             audit_actor=audit_actor,
             telegram_chat_id=telegram_chat_id,
@@ -3023,6 +3031,13 @@ def save_swiss_stage_result(
             contest_id=contest_id,
             before_state=before_state,
             after_state=after_state,
+        )
+        create_or_revise_swiss_result_publication(
+            connection,
+            contest_id=contest_id,
+            event_id=result_event_id,
+            was_created=existing_result is None,
+            now_utc=resolved_now_utc,
         )
         return _swiss_stage_selection_from_ids(
             connection,
@@ -3450,10 +3465,10 @@ def _record_audit(
     before_state: dict[str, object] | None,
     after_state: dict[str, object] | None,
     metadata: dict[str, object] | None = None,
-) -> None:
+) -> int:
     if audit_actor.telegram_chat_id != telegram_chat_id:
         raise ValueError("Audit actor chat does not match the administrative action.")
-    record_audit_event(
+    return record_audit_event(
         connection,
         actor=audit_actor,
         event_type=event_type,
