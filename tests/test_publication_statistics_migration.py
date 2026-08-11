@@ -32,6 +32,25 @@ def test_migration_preserves_publications_and_expands_allowed_types(
     ).contest.id
     _downgrade_publication_check(database_path)
     with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE contests
+            SET match_prediction_publication_enabled = 1,
+                match_prediction_publication_enabled_at = '2026-01-01T00:00:00Z'
+            WHERE id = ?
+            """,
+            (contest_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO swiss_stage_prediction_settings (
+                contest_id, enabled, deadline_at,
+                direct_qualifier_count, elimination_qualifier_count
+            )
+            VALUES (?, 1, '2099-01-01T00:00:00Z', 3, 5)
+            """,
+            (contest_id,),
+        )
         publication_id = connection.execute(
             """
             INSERT INTO contest_publications (
@@ -69,19 +88,17 @@ def test_migration_preserves_publications_and_expands_allowed_types(
                 ON message.publication_id = publication.id
             """
         ).fetchone()
-        connection.execute(
+        swiss_predictions = connection.execute(
             """
-            INSERT INTO contest_publications (
-                contest_id, publication_type, entity_id,
-                desired_revision, settled_revision, desired_action,
-                delivery_status, first_event_id, latest_event_id,
-                created_at, updated_at
-            )
-            VALUES (?, 'swiss_predictions', ?, 1, 0, 'publish',
-                    'pending', 8, 8, '2026-01-02', '2026-01-02')
+            SELECT publication.desired_action, publication.reconcile_at,
+                   event.event_type
+            FROM contest_publications AS publication
+            JOIN event_log AS event ON event.id = publication.first_event_id
+            WHERE publication.contest_id = ?
+              AND publication.publication_type = 'swiss_predictions'
             """,
-            (contest_id, contest_id),
-        )
+            (contest_id,),
+        ).fetchone()
         connection.execute(
             """
             INSERT INTO contest_publications (
@@ -100,6 +117,11 @@ def test_migration_preserves_publications_and_expands_allowed_types(
     assert dict(preserved) == {
         "publication_type": "contest_completed",
         "telegram_message_id": 123,
+    }
+    assert dict(swiss_predictions) == {
+        "desired_action": "withdraw",
+        "reconcile_at": "2099-01-01T00:00:00.000000Z",
+        "event_type": "swiss.predictions_publication_backfilled",
     }
     assert foreign_key_errors == []
 

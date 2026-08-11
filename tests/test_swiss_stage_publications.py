@@ -89,15 +89,19 @@ def test_swiss_deadline_publication_is_scheduled_and_always_statistical(
     with database_connection(database_path) as connection:
         publication = connection.execute(
             """
-            SELECT id, desired_action, reconcile_at
-            FROM contest_publications
-            WHERE contest_id = ? AND publication_type = 'swiss_predictions'
+            SELECT publication.id, publication.desired_action,
+                   publication.reconcile_at, event.event_type
+            FROM contest_publications AS publication
+            JOIN event_log AS event ON event.id = publication.first_event_id
+            WHERE publication.contest_id = ?
+              AND publication.publication_type = 'swiss_predictions'
             """,
             (contest_id,),
         ).fetchone()
     assert publication is not None
     assert publication["desired_action"] == "withdraw"
     assert publication["reconcile_at"] == "2030-01-01T12:00:00.000000Z"
+    assert publication["event_type"] == "swiss.prediction_settings_updated"
 
     text = "".join(
         render_publication_messages(
@@ -151,14 +155,17 @@ def test_swiss_result_publication_uses_route_scoring_and_is_revised(
     with database_connection(database_path) as connection:
         publication = connection.execute(
             """
-            SELECT id, desired_revision
-            FROM contest_publications
-            WHERE contest_id = ? AND publication_type = 'swiss_result'
+            SELECT publication.id, publication.desired_revision, event.event_type
+            FROM contest_publications AS publication
+            JOIN event_log AS event ON event.id = publication.first_event_id
+            WHERE publication.contest_id = ?
+              AND publication.publication_type = 'swiss_result'
             """,
             (contest_id,),
         ).fetchone()
     assert publication is not None
     assert publication["desired_revision"] == 1
+    assert publication["event_type"] == "swiss.result_recorded"
 
     claim = _publication(
         publication_id=int(publication["id"]),

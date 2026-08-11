@@ -2777,7 +2777,7 @@ def save_swiss_stage_prediction_settings(
         )
         after_state = _swiss_stage_snapshot(connection, contest_id=contest_id)
         if before_state != after_state:
-            settings_event_id = _record_audit(
+            _record_audit(
                 connection,
                 audit_actor=audit_actor,
                 telegram_chat_id=telegram_chat_id,
@@ -2787,6 +2787,11 @@ def save_swiss_stage_prediction_settings(
                 contest_id=contest_id,
                 before_state=before_state,
                 after_state=after_state,
+            )
+            settings_event_id = _write_swiss_publication_event(
+                connection,
+                contest_id=contest_id,
+                event_type="swiss.prediction_settings_updated",
             )
             if bool(contest_row["match_prediction_publication_enabled"]):
                 create_or_revise_swiss_predictions_publication(
@@ -3017,7 +3022,7 @@ def save_swiss_stage_result(
             elimination_team_ids=normalized_elimination_ids,
         )
         after_state = _swiss_stage_snapshot(connection, contest_id=contest_id)
-        result_event_id = _record_audit(
+        _record_audit(
             connection,
             audit_actor=audit_actor,
             telegram_chat_id=telegram_chat_id,
@@ -3031,6 +3036,15 @@ def save_swiss_stage_result(
             contest_id=contest_id,
             before_state=before_state,
             after_state=after_state,
+        )
+        result_event_id = _write_swiss_publication_event(
+            connection,
+            contest_id=contest_id,
+            event_type=(
+                "swiss.result_recorded"
+                if existing_result is None
+                else "swiss.result_corrected"
+            ),
         )
         create_or_revise_swiss_result_publication(
             connection,
@@ -3479,6 +3493,31 @@ def _record_audit(
         after_state=after_state,
         metadata=metadata,
     )
+
+
+def _write_swiss_publication_event(
+    connection,
+    *,
+    contest_id: int,
+    event_type: str,
+) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO event_log (
+            contest_id,
+            actor_user_id,
+            event_type,
+            entity_type,
+            entity_id,
+            payload_json
+        )
+        VALUES (?, NULL, ?, 'contest', ?, '{}')
+        """,
+        (contest_id, event_type, contest_id),
+    )
+    if cursor.lastrowid is None:
+        raise RuntimeError("Не удалось записать событие публикации швейцарского этапа.")
+    return int(cursor.lastrowid)
 
 
 def _contest_snapshot(row) -> dict[str, object]:
