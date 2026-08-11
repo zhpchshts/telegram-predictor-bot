@@ -2870,6 +2870,8 @@ function createSwissStageTeamSelector(
     endpoint,
     onSaved,
     confirmCorrection = false,
+    successMessage = "",
+    savedSubmitLabel = submitLabel,
   },
 ) {
   const form = createElement("form", {
@@ -3020,6 +3022,11 @@ function createSwissStageTeamSelector(
         throw new Error("Сервер вернул некорректный ответ.");
       }
       onSaved(result.swiss_stage_prediction);
+      if (successMessage) {
+        setFormMessage(message, successMessage, "success");
+        submitButton.textContent = savedSubmitLabel;
+        sync();
+      }
     } catch (error) {
       if (handleManagementRequestError(error)) {
         return;
@@ -3140,7 +3147,7 @@ function createSwissStageAwardsBreakdown(awards) {
   return section;
 }
 
-function createSwissStagePredictionCard(contest, onUpdated) {
+function createSwissStagePredictionCard(contest) {
   const prediction = getSwissStagePrediction(contest);
   if (!prediction.is_enabled) {
     return null;
@@ -3211,7 +3218,11 @@ function createSwissStagePredictionCard(contest, onUpdated) {
         endpoint: (
           `/api/tma/contests/${contest.id}/swiss-stage-prediction`
         ),
-        onSaved: () => onUpdated(),
+        onSaved: (savedPrediction) => {
+          prediction.prediction = savedPrediction.prediction;
+        },
+        successMessage: "Прогноз сохранён.",
+        savedSubmitLabel: "Изменить прогноз",
       },
     ),
   );
@@ -3589,7 +3600,6 @@ function createChampionPredictionSettingsDisclosure(
 function createChampionPredictionChoiceSection(
   contest,
   championPrediction,
-  onUpdated,
 ) {
   const section = createElement("div", {
     className: "champion-card-section",
@@ -3702,7 +3712,10 @@ function createChampionPredictionChoiceSection(
         );
       }
 
-      onUpdated();
+      championPrediction.prediction = result.prediction;
+      setFormMessage(message, "Прогноз сохранён.", "success");
+      submitButton.textContent = "Изменить прогноз";
+      submitButton.disabled = false;
     } catch (error) {
       const errorMessage =
         error instanceof Error
@@ -4509,7 +4522,7 @@ function createChampionAdministrationCard(contest, state, onUpdated) {
   return item;
 }
 
-function createChampionPredictionCard(contest, onUpdated) {
+function createChampionPredictionCard(contest) {
   const championPrediction = getChampionPrediction(contest);
 
   if (!championPrediction.is_enabled) {
@@ -4560,7 +4573,6 @@ function createChampionPredictionCard(contest, onUpdated) {
     createChampionPredictionChoiceSection(
       contest,
       championPrediction,
-      onUpdated,
     ),
   );
 
@@ -4963,7 +4975,7 @@ function createMatchPredictionListItems(contest, matches) {
     ));
 }
 
-function createTournamentPredictionListItems(contest, onUpdated) {
+function createTournamentPredictionListItems(contest) {
   const items = [];
   const championPrediction = getChampionPrediction(contest);
   const swissStagePrediction = getSwissStagePrediction(contest);
@@ -4989,8 +5001,8 @@ function createTournamentPredictionListItems(contest, onUpdated) {
     .sort(comparePredictionListItems)
     .map((item) => (
       item.kind === "champion"
-        ? createChampionPredictionCard(contest, onUpdated)
-        : createSwissStagePredictionCard(contest, onUpdated)
+        ? createChampionPredictionCard(contest)
+        : createSwissStagePredictionCard(contest)
     ))
     .filter(Boolean);
 }
@@ -5472,15 +5484,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
           showPredictions: true,
           showResults: false,
           canManageResults: false,
-          listItems: createTournamentPredictionListItems(
-            contest,
-            () => {
-              void openContest(bootstrap, contest.id, {
-                ...state,
-                activeTab: "tournament",
-              });
-            },
-          ),
+          listItems: createTournamentPredictionListItems(contest),
         },
       ),
     );

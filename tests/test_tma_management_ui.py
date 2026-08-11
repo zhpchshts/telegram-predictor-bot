@@ -251,20 +251,29 @@ def test_participant_tabs_separate_match_and_tournament_predictions() -> None:
 
     assert 'activeTab === "tournament"' in details_source
     assert "createTournamentPredictionListItems(" in details_source
-    assert 'activeTab: "tournament"' in details_source
     assert "createMatchPredictionListItems(contest, matches)" in details_source
     assert 'title: "Матчи"' in details_source
     assert 'title: "Турнир"' in details_source
 
     assert "createMatchListItem(" in match_predictions_source
-    assert "createChampionPredictionCard(contest, onUpdated)" in (
-        tournament_predictions_source
-    )
-    assert "createSwissStagePredictionCard(contest, onUpdated)" in (
-        tournament_predictions_source
-    )
+    assert "createChampionPredictionCard(contest)" in (tournament_predictions_source)
+    assert "createSwissStagePredictionCard(contest)" in (tournament_predictions_source)
     assert "createMatchListItem" not in tournament_predictions_source
     assert "if (!hasListItems)" in matches_card_source
+
+
+def test_participant_tournament_predictions_save_without_reloading_contest() -> None:
+    details_source = _function_source("renderContestDetailsScreen")
+    champion_source = _function_source("createChampionPredictionChoiceSection")
+    swiss_source = _function_source("createSwissStagePredictionCard")
+
+    assert "createTournamentPredictionListItems(contest)" in details_source
+    assert "openContest" not in champion_source
+    assert 'setFormMessage(message, "Прогноз сохранён.", "success")' in (
+        champion_source
+    )
+    assert "openContest" not in swiss_source
+    assert 'successMessage: "Прогноз сохранён."' in swiss_source
 
 
 def test_management_tabs_default_to_matches_and_keep_settings_separate() -> None:
