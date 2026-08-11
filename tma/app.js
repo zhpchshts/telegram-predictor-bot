@@ -17,6 +17,10 @@ const CONTEST_MANAGEMENT_TABS = [
   { id: "settings", label: "Настройки" },
 ];
 const AUDIT_EVENT_PRESENTATIONS = Object.freeze({
+  chat_settings_updated: Object.freeze({
+    label: "Изменён текст кнопки",
+    group: "Чат",
+  }),
   contest_created: Object.freeze({
     label: "Создан конкурс",
     group: "Конкурсы",
@@ -5946,6 +5950,10 @@ function buildAuditSummaryLines(event) {
   const after = event.after_state || {};
 
   switch (event.event_type) {
+    case "chat_settings_updated":
+      return [
+        `Текст кнопки: «${before.app_button_text || ""}» → «${after.app_button_text || ""}».`,
+      ];
     case "contest_created":
       return [`Создан конкурс «${entityName}».`];
     case "contest_updated":
@@ -7308,6 +7316,93 @@ function createManagementHeaderCard(bootstrap) {
   });
 }
 
+function createChatSettingsCard(bootstrap, managementData, state = {}) {
+  const settings = managementData.chat_settings || {};
+  const card = createElement("section", {
+    className: "info-card chat-settings-card",
+  });
+  const heading = createElement("h2", { text: "Кнопка открытия Клевера" });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: "Этот текст появится на кнопке в новых сообщениях, отправленных командой /app.",
+  });
+  const form = createElement("form", { className: "form-fields" });
+  const field = createElement("label", { className: "form-field" });
+  const label = createElement("span", {
+    className: "form-field-label",
+    text: "Текст кнопки",
+  });
+  const input = createElement("input", { className: "text-input" });
+  const hint = createElement("p", {
+    className: "form-hint",
+    text: "От 1 до 64 символов. Уже отправленные сообщения не изменятся.",
+  });
+  const message = createElement("p", { className: "form-message" });
+  const submitButton = createActionButton(
+    "Сохранить",
+    "primary-action-button",
+    "submit",
+  );
+
+  input.type = "text";
+  input.name = "app-button-text";
+  input.maxLength = 64;
+  input.required = true;
+  input.autocomplete = "off";
+  input.value = settings.app_button_text || "Открыть Клевер";
+  setFormMessage(
+    message,
+    state.chatSettingsMessage || "",
+    state.chatSettingsMessageType || "",
+  );
+
+  field.append(label, input, hint);
+  form.append(field, submitButton, message);
+  card.append(heading, description, form);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const appButtonText = input.value.trim();
+    if (!appButtonText) {
+      setFormMessage(message, "Введите текст кнопки.", "error");
+      return;
+    }
+    submitButton.disabled = true;
+    input.disabled = true;
+    submitButton.textContent = "Сохраняем…";
+    try {
+      const result = await apiRequest("/api/tma/management/chat-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ app_button_text: appButtonText }),
+      });
+      renderManagementScreen(
+        bootstrap,
+        { ...managementData, chat_settings: result.chat_settings },
+        {
+          ...state,
+          chatSettingsMessage: "Настройка сохранена.",
+          chatSettingsMessageType: "success",
+        },
+      );
+    } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
+      setFormMessage(
+        message,
+        error instanceof Error ? error.message : "Не удалось сохранить настройку.",
+        "error",
+      );
+      submitButton.disabled = false;
+      input.disabled = false;
+      submitButton.textContent = "Сохранить";
+    }
+  });
+
+  return card;
+}
+
 function renderManagementScreen(bootstrap, managementData, state = {}) {
   currentViewMode = "management";
   setChatSummary();
@@ -7319,6 +7414,10 @@ function renderManagementScreen(bootstrap, managementData, state = {}) {
     createManagementHeaderCard(bootstrap),
     createManagementContestListCard(contests, bootstrap, managementData),
   ];
+
+  if (capabilities.can_manage_chat_settings === true) {
+    cards.push(createChatSettingsCard(bootstrap, managementData, state));
+  }
 
   if (state.accessMessage) {
     cards.splice(

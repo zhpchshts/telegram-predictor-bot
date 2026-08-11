@@ -58,6 +58,13 @@ def _create_chat_data(database_path: Path) -> tuple[int, int, int]:
         )
         connection.execute(
             """
+            INSERT INTO chat_settings (chat_id, app_button_text)
+            VALUES (?, ?)
+            """,
+            (chat_id, "Открыть прогнозы"),
+        )
+        connection.execute(
+            """
             INSERT INTO audit_events (
                 created_at,
                 chat_id,
@@ -123,6 +130,9 @@ def test_migrate_telegram_chat_preserves_chat_scoped_data(
             """
         ).fetchone()
         audit_row = connection.execute("SELECT chat_id FROM audit_events").fetchone()
+        settings_row = connection.execute(
+            "SELECT chat_id, app_button_text FROM chat_settings"
+        ).fetchone()
         foreign_key_violations = connection.execute(
             "PRAGMA foreign_key_check"
         ).fetchall()
@@ -135,6 +145,10 @@ def test_migrate_telegram_chat_preserves_chat_scoped_data(
     assert dict(contest_row) == {"chat_id": chat_id}
     assert dict(assignment_row) == {"chat_id": chat_id, "user_id": user_id}
     assert dict(audit_row) == {"chat_id": NEW_TELEGRAM_CHAT_ID}
+    assert dict(settings_row) == {
+        "chat_id": chat_id,
+        "app_button_text": "Открыть прогнозы",
+    }
     assert foreign_key_violations == []
 
 

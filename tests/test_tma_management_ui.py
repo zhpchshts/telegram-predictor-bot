@@ -51,6 +51,7 @@ def test_management_hub_contains_navigation_without_embedded_admin_bodies() -> N
         in hub_source
     )
     assert "createManagementAccessCard(bootstrap, capabilities)" in hub_source
+    assert "createChatSettingsCard(bootstrap, managementData, state)" in hub_source
     assert "createContestFormCard" not in hub_source
     assert "createContestConfirmationCard" not in hub_source
     assert "createSupermoderatorManagementCard" not in hub_source
@@ -76,6 +77,16 @@ def test_management_hub_actions_are_gated_by_server_capabilities() -> None:
     assert "openSupermoderatorManagement(bootstrap)" in access_source
     assert '"Супермодераторы"' in access_source
     assert '"Управление дополнительными правами"' in access_source
+
+
+def test_chat_button_text_can_be_changed_from_management() -> None:
+    source = _function_source("createChatSettingsCard")
+
+    assert '"/api/tma/management/chat-settings"' in source
+    assert 'method: "PUT"' in source
+    assert "app_button_text: appButtonText" in source
+    assert "input.maxLength = 64" in source
+    assert "Уже отправленные сообщения не изменятся." in source
 
 
 def test_management_contests_are_grouped_and_completed_are_collapsed() -> None:

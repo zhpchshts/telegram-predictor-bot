@@ -951,12 +951,14 @@ def test_management_contest_list_is_minimal_and_scoped_to_launch_chat(
 
     assert response.status_code == 200
     response_data = response.json()
-    assert set(response_data) == {"contests", "capabilities"}
+    assert set(response_data) == {"contests", "capabilities", "chat_settings"}
     assert response_data["capabilities"] == {
         "can_create_contests": True,
         "can_manage_roles": True,
         "can_read_audit": True,
+        "can_manage_chat_settings": True,
     }
+    assert response_data["chat_settings"] == {"app_button_text": "Открыть Клевер"}
     contests = response_data["contests"]
     assert contests == [
         {
@@ -976,6 +978,97 @@ def test_management_contest_list_is_minimal_and_scoped_to_launch_chat(
     assert all(
         set(item) == {"id", "name", "status", "effective_role"} for item in contests
     )
+
+
+def test_chat_button_text_can_be_saved_by_chat_administrator(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "chat-settings.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(create_app())
+
+    response = client.put(
+        "/api/tma/management/chat-settings",
+        headers=build_tma_headers(),
+        json={"app_button_text": "  Открыть прогнозы  "},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"chat_settings": {"app_button_text": "Открыть прогнозы"}}
+    management_response = client.get(
+        "/api/tma/management/contests",
+        headers=build_tma_headers(),
+    )
+    assert management_response.json()["chat_settings"] == {
+        "app_button_text": "Открыть прогнозы"
+    }
+    with create_connection(database_path) as connection:
+        event = connection.execute(
+            """
+            SELECT event_type, actor_role, before_state, after_state
+            FROM audit_events
+            WHERE event_type = 'chat_settings_updated'
+            """
+        ).fetchone()
+    assert event is not None
+    assert event["actor_role"] == "telegram_admin"
+    assert event["before_state"] == '{"app_button_text":"Открыть Клевер"}'
+    assert event["after_state"] == '{"app_button_text":"Открыть прогнозы"}'
+
+
+@pytest.mark.parametrize("app_button_text", ["   ", "я" * 65])
+def test_chat_button_text_is_validated(
+    monkeypatch,
+    tmp_path: Path,
+    app_button_text: str,
+) -> None:
+    database_path = tmp_path / "invalid-chat-settings.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(create_app())
+
+    response = client.put(
+        "/api/tma/management/chat-settings",
+        headers=build_tma_headers(),
+        json={"app_button_text": app_button_text},
+    )
+
+    assert response.status_code == 422
+    with create_connection(database_path) as connection:
+        count = connection.execute("SELECT COUNT(*) FROM chat_settings").fetchone()[0]
+    assert count == 0
+
+
+def test_supermoderator_can_save_chat_button_text(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "supermoderator-chat-settings.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    assign_current_user_as_supermoderator(database_path)
+    monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
+    client = TestClient(
+        create_app_with_telegram_client(FakeTelegramAdministratorsClient())
+    )
+
+    response = client.put(
+        "/api/tma/management/chat-settings",
+        headers=build_tma_headers(),
+        json={"app_button_text": "Сделать прогноз"},
+    )
+
+    assert response.status_code == 200
+    with create_connection(database_path) as connection:
+        actor_role = connection.execute(
+            """
+            SELECT actor_role FROM audit_events
+            WHERE event_type = 'chat_settings_updated'
+            """
+        ).fetchone()["actor_role"]
+    assert actor_role == "supermoderator"
 
 
 def test_management_contest_details_reject_other_chat_identifier(
@@ -1612,6 +1705,7 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
     expected_routes = {
         ("GET", "/api/tma/bootstrap"): "read",
         ("GET", "/api/tma/management/contests"): "contest_management",
+        ("PUT", "/api/tma/management/chat-settings"): "contest_management",
         (
             "GET",
             "/api/tma/management/contests/{contest_id}",

@@ -28,6 +28,7 @@ from app.audit_service import (
     AuditEventType,
 )
 from app.config import load_settings
+from app.chat_settings_service import get_chat_settings, save_chat_settings
 from app.contest_service import (
     ChampionPredictionSettingsLockedError,
     ChampionUnavailableError,
@@ -208,6 +209,12 @@ class ResolveRoleTargetRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target: str
+
+
+class SaveChatSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    app_button_text: str
 
 
 class TelegramUserIdInvalidError(ValueError):
@@ -418,6 +425,10 @@ async def get_tma_management_contests(
         if management.access.role is not None
         else AccessRole.PARTICIPANT.value
     )
+    chat_settings = get_chat_settings(
+        database_path=settings.database_path,
+        telegram_chat_id=management.chat.telegram_chat_id,
+    )
     return {
         "contests": [
             _serialize_management_contest(
@@ -439,7 +450,48 @@ async def get_tma_management_contests(
             "can_create_contests": management.access.can_manage_contests,
             "can_manage_roles": management.access.can_manage_roles,
             "can_read_audit": management.access.can_manage_contests,
+            "can_manage_chat_settings": management.access.can_manage_contests,
         },
+        "chat_settings": {
+            "app_button_text": chat_settings.app_button_text,
+        },
+    }
+
+
+@router.put("/management/chat-settings")
+async def update_tma_chat_settings(
+    payload: SaveChatSettingsRequest,
+    management: Annotated[
+        ContestManagementContext,
+        Depends(_authorize_contest_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    upsert_chat_actor(
+        database_path=settings.database_path,
+        telegram_chat_id=management.chat.telegram_chat_id,
+        chat_title=management.chat.title,
+        telegram_user_id=management.user.telegram_user_id,
+        username=management.user.username,
+        first_name=management.user.first_name,
+        last_name=management.user.last_name,
+    )
+    try:
+        chat_settings = save_chat_settings(
+            database_path=settings.database_path,
+            telegram_chat_id=management.chat.telegram_chat_id,
+            app_button_text=payload.app_button_text,
+            actor=_audit_actor(management.context, management.access),
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+    return {
+        "chat_settings": {
+            "app_button_text": chat_settings.app_button_text,
+        }
     }
 
 

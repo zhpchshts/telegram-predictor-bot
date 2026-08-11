@@ -16,6 +16,13 @@ CREATE TABLE IF NOT EXISTS chats (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS chat_settings (
+    chat_id INTEGER PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+    app_button_text TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (length(trim(app_button_text)) BETWEEN 1 AND 64)
+);
+
 CREATE TABLE IF NOT EXISTS telegram_chat_migrations (
     old_telegram_chat_id INTEGER PRIMARY KEY,
     new_telegram_chat_id INTEGER NOT NULL UNIQUE,

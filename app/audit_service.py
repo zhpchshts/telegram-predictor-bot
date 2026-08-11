@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 
 class AuditEventType(StrEnum):
+    CHAT_SETTINGS_UPDATED = "chat_settings_updated"
     CONTEST_CREATED = "contest_created"
     CONTEST_UPDATED = "contest_updated"
     CONTEST_FINISHED = "contest_finished"
@@ -29,6 +30,7 @@ class AuditEventType(StrEnum):
 
 
 class AuditEntityType(StrEnum):
+    CHAT_SETTINGS = "chat_settings"
     CONTEST = "contest"
     MATCH = "match"
     SWISS_STAGE_PREDICTION = "swiss_stage_prediction"

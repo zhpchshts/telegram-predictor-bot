@@ -8,6 +8,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.chat_migration_service import migrate_telegram_chat
+from app.chat_settings_service import get_chat_settings
 from app.config import Settings
 from app.tma_launch import create_tma_launch_token
 
@@ -78,7 +79,10 @@ def create_dispatcher(settings: Settings) -> Dispatcher:
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="Открыть Клевер",
+                        text=get_chat_settings(
+                            database_path=settings.database_path,
+                            telegram_chat_id=message.chat.id,
+                        ).app_button_text,
                         url=launch_url,
                     )
                 ]
