@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import GetChatAdministrators
-from aiogram.types import InputRichMessage
+from aiogram.types import InlineKeyboardMarkup, InputRichMessage
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
@@ -89,8 +89,15 @@ class RecordingPredictionReminderClient:
         chat_id: int,
         *,
         rich_message: InputRichMessage,
+        reply_markup: InlineKeyboardMarkup,
     ) -> SimpleNamespace:
-        self.sent.append({"chat_id": chat_id, "rich_message": rich_message})
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "rich_message": rich_message,
+                "reply_markup": reply_markup,
+            }
+        )
         return SimpleNamespace(message_id=1000 + len(self.sent))
 
 
@@ -2621,6 +2628,12 @@ def test_prediction_reminder_endpoint_publishes_one_rich_message(
     )
     client = TestClient(app)
     contest = create_tma_contest(client)
+    settings_response = client.put(
+        "/api/tma/management/chat-settings",
+        headers=build_tma_headers(),
+        json={"app_button_text": "Сделать прогноз"},
+    )
+    assert settings_response.status_code == 200
     match_response = client.post(
         f"/api/tma/contests/{contest['id']}/matches",
         headers=build_tma_headers(idempotency_key="reminder-match"),
@@ -2651,6 +2664,12 @@ def test_prediction_reminder_endpoint_publishes_one_rich_message(
     assert isinstance(rich_message, InputRichMessage)
     assert "Франция — Испания" in rich_message.html
     assert "Начало: 02.01.2030, 18:00 UTC" in rich_message.html
+    reply_markup = telegram_client.sent[0]["reply_markup"]
+    assert isinstance(reply_markup, InlineKeyboardMarkup)
+    button = reply_markup.inline_keyboard[0][0]
+    assert button.text == "Сделать прогноз"
+    assert button.url is not None
+    assert button.url.startswith("https://t.me/ZhpchshtsPredictorBot?startapp=")
 
 
 def test_get_contest_returns_not_found_for_contest_from_other_chat(

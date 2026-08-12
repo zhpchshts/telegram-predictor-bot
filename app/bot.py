@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-from urllib.parse import quote
-
 from aiogram import Dispatcher, F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import Message
 
 from app.chat_migration_service import migrate_telegram_chat
-from app.chat_settings_service import get_chat_settings
 from app.config import Settings
-from app.tma_launch import create_tma_launch_token
+from app.tma_entrypoint import create_tma_launch_keyboard
 
 
 def create_dispatcher(settings: Settings) -> Dispatcher:
@@ -64,29 +61,13 @@ def create_dispatcher(settings: Settings) -> Dispatcher:
             )
             return
 
-        launch_token = create_tma_launch_token(
-            chat_id=message.chat.id,
+        keyboard = create_tma_launch_keyboard(
+            database_path=settings.database_path,
+            telegram_chat_id=message.chat.id,
             chat_type=message.chat.type,
             chat_title=message.chat.title,
-            secret=settings.bot_token,
-        )
-        launch_url = (
-            f"https://t.me/{settings.bot_username}"
-            f"?startapp={quote(launch_token, safe='')}"
-        )
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=get_chat_settings(
-                            database_path=settings.database_path,
-                            telegram_chat_id=message.chat.id,
-                        ).app_button_text,
-                        url=launch_url,
-                    )
-                ]
-            ]
+            bot_username=settings.bot_username,
+            bot_token=settings.bot_token,
         )
 
         await message.answer(

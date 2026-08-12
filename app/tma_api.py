@@ -68,6 +68,7 @@ from app.contest_service import (
     update_match_start,
 )
 from app.tma_context import TmaContext, TmaContextError, build_tma_context
+from app.tma_entrypoint import create_tma_launch_keyboard
 from app.supermoderator_service import (
     ActiveSupermoderatorAssignment,
     SupermoderatorAssignmentNotFoundError,
@@ -1362,6 +1363,14 @@ async def publish_tma_prediction_reminders(
                 database_path=settings.database_path,
                 telegram_chat_id=context.chat.telegram_chat_id,
                 contest_id=contest_id,
+                reply_markup=create_tma_launch_keyboard(
+                    database_path=settings.database_path,
+                    telegram_chat_id=context.chat.telegram_chat_id,
+                    chat_type=context.chat.chat_type,
+                    chat_title=context.chat.title,
+                    bot_username=settings.bot_username,
+                    bot_token=settings.bot_token,
+                ),
                 now_utc=_utc_now(),
             ),
             timeout=30.0,

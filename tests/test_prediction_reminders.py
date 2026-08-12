@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from aiogram.types import InputRichMessage
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputRichMessage
 import pytest
 
 from app.audit_service import AuditActor, AuditActorRole
@@ -49,8 +49,15 @@ class RecordingBot:
         chat_id: int,
         *,
         rich_message: InputRichMessage,
+        reply_markup: InlineKeyboardMarkup,
     ) -> SentMessage:
-        self.sent.append({"chat_id": chat_id, "rich_message": rich_message})
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "rich_message": rich_message,
+                "reply_markup": reply_markup,
+            }
+        )
         return SentMessage(message_id=1000 + len(self.sent))
 
 
@@ -91,6 +98,16 @@ def test_publish_sends_exactly_one_prebuilt_rich_message(tmp_path: Path) -> None
     database_path = tmp_path / "predictor.db"
     contest_id = _configured_contest(database_path)
     bot = RecordingBot()
+    reply_markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Сделать прогноз",
+                    url="https://t.me/test_bot?startapp=test",
+                )
+            ]
+        ]
+    )
 
     message = asyncio.run(
         publish_prediction_reminders(
@@ -98,6 +115,7 @@ def test_publish_sends_exactly_one_prebuilt_rich_message(tmp_path: Path) -> None
             database_path=database_path,
             telegram_chat_id=CHAT_ID,
             contest_id=contest_id,
+            reply_markup=reply_markup,
             now_utc=NOW,
         )
     )
@@ -108,6 +126,7 @@ def test_publish_sends_exactly_one_prebuilt_rich_message(tmp_path: Path) -> None
     assert isinstance(rich_message, InputRichMessage)
     assert rich_message.html == message.html
     assert rich_message.skip_entity_detection is True
+    assert bot.sent[0]["reply_markup"] is reply_markup
 
 
 def test_closed_predictions_and_started_matches_are_not_published(

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
-from aiogram.types import InputRichMessage
+from aiogram.types import InlineKeyboardMarkup, InputRichMessage
 
 from app.contest_service import ContestCompletedError, ContestNotFoundError
 from app.database import database_connection
@@ -22,6 +22,7 @@ class TelegramPredictionReminderClient(Protocol):
         chat_id: int,
         *,
         rich_message: InputRichMessage,
+        reply_markup: InlineKeyboardMarkup,
     ) -> object: ...
 
 
@@ -47,6 +48,7 @@ async def publish_prediction_reminders(
     database_path: Path,
     telegram_chat_id: int,
     contest_id: int,
+    reply_markup: InlineKeyboardMarkup,
     now_utc: datetime | None = None,
 ) -> PredictionReminderMessage:
     message = build_prediction_reminder_message(
@@ -58,6 +60,7 @@ async def publish_prediction_reminders(
     await bot.send_rich_message(
         chat_id=message.telegram_chat_id,
         rich_message=rich_message(message.html),
+        reply_markup=reply_markup,
     )
     return message
 
