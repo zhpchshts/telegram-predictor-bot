@@ -307,6 +307,20 @@ def test_management_tabs_default_to_matches_and_keep_settings_separate() -> None
     assert "createSwissStageAdministrationCard" in settings_source
 
 
+def test_prediction_reminders_are_published_as_one_manual_message() -> None:
+    reminder_source = _function_source("createPredictionReminderPublicationSection")
+    publication_source = _function_source(
+        "createMatchPredictionPublicationAdministrationCard"
+    )
+
+    assert '"Опубликовать предстоящие матчи"' in reminder_source
+    assert "/prediction-reminders/publish`" in reminder_source
+    assert '{ method: "POST" }' in reminder_source
+    assert "отправит одно сообщение" in reminder_source
+    assert "result?.published !== true" in reminder_source
+    assert "createPredictionReminderPublicationSection(contest)" in (publication_source)
+
+
 def test_participant_contour_does_not_render_administrative_forms() -> None:
     list_source = _function_source("renderContestScreen")
     details_source = _function_source("renderContestDetailsScreen")

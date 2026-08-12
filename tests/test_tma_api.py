@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import GetChatAdministrators
+from aiogram.types import InputRichMessage
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
@@ -45,6 +46,7 @@ from app.tma_api import (
     _audit_actor,
     _parse_telegram_user_id_target,
     get_telegram_administrators_client,
+    get_telegram_prediction_reminder_client,
     get_telegram_username_resolver,
 )
 from app.tma_auth import calculate_init_data_hash
@@ -76,6 +78,20 @@ class AdminTelegramAdministratorsClient:
         assert chat_id == TELEGRAM_CHAT_ID
         self.calls += 1
         return [SimpleNamespace(user=SimpleNamespace(id=123))]
+
+
+class RecordingPredictionReminderClient:
+    def __init__(self) -> None:
+        self.sent: list[dict[str, object]] = []
+
+    async def send_rich_message(
+        self,
+        chat_id: int,
+        *,
+        rich_message: InputRichMessage,
+    ) -> SimpleNamespace:
+        self.sent.append({"chat_id": chat_id, "rich_message": rich_message})
+        return SimpleNamespace(message_id=1000 + len(self.sent))
 
 
 class MutableTelegramAdministratorsClient:
@@ -1757,6 +1773,10 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
             "/api/tma/contests/{contest_id}/match-prediction-publication/settings",
         ): "contest_management",
         (
+            "POST",
+            "/api/tma/contests/{contest_id}/prediction-reminders/publish",
+        ): "contest_management",
+        (
             "PUT",
             "/api/tma/contests/{contest_id}/champion-prediction/settings",
         ): "contest_management",
@@ -2577,6 +2597,60 @@ def test_match_prediction_publication_settings_can_be_enabled(
     assert contest_response.json()["contest"]["match_prediction_publication"] == {
         "is_enabled": True,
     }
+
+
+def test_prediction_reminder_endpoint_publishes_one_rich_message(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    monkeypatch.setattr(
+        tma_api,
+        "_utc_now",
+        lambda: datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    telegram_client = RecordingPredictionReminderClient()
+    app = create_app()
+    app.dependency_overrides[get_telegram_prediction_reminder_client] = lambda: (
+        telegram_client
+    )
+    client = TestClient(app)
+    contest = create_tma_contest(client)
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="reminder-match"),
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Франция",
+            away_team_name="Испания",
+            starts_at_utc="2030-01-02T18:00:00Z",
+        ),
+    )
+    assert match_response.status_code == 201
+
+    response = client.post(
+        f"/api/tma/contests/{contest['id']}/prediction-reminders/publish",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "published": True,
+        "reminder_count": 1,
+        "match_count": 1,
+    }
+    assert len(telegram_client.sent) == 1
+    assert telegram_client.sent[0]["chat_id"] == TELEGRAM_CHAT_ID
+    rich_message = telegram_client.sent[0]["rich_message"]
+    assert isinstance(rich_message, InputRichMessage)
+    assert "Франция — Испания" in rich_message.html
+    assert "Начало: 02.01.2030, 18:00 UTC" in rich_message.html
 
 
 def test_get_contest_returns_not_found_for_contest_from_other_chat(

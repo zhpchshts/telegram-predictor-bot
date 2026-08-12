@@ -4076,6 +4076,66 @@ function createMatchPredictionPublicationSettingsDisclosure(
   return disclosure;
 }
 
+function createPredictionReminderPublicationSection(contest) {
+  const section = createElement("div", {
+    className: "form-fields prediction-reminder-publication-section",
+  });
+  const hint = createElement("p", {
+    className: "form-hint",
+    text: (
+      "Бот соберёт открытые прогнозы на швейцарский этап и чемпиона, "
+      + "а также все ещё не начавшиеся матчи, и отправит одно сообщение."
+    ),
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const publishButton = createActionButton(
+    "Опубликовать предстоящие матчи",
+    "secondary-action-button",
+  );
+
+  publishButton.addEventListener("click", async () => {
+    publishButton.disabled = true;
+    publishButton.textContent = "Собираем напоминания…";
+    setFormMessage(message, "");
+
+    try {
+      const result = await apiRequest(
+        `/api/tma/contests/${contest.id}/prediction-reminders/publish`,
+        { method: "POST" },
+      );
+      if (result?.published !== true) {
+        throw new Error(
+          "Сервер вернул некорректный ответ при публикации напоминаний.",
+        );
+      }
+      setFormMessage(message, "Напоминания опубликованы одним сообщением.", "success");
+    } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
+      setFormMessage(
+        message,
+        error instanceof Error
+          ? error.message
+          : "Не удалось опубликовать напоминания.",
+        "error",
+      );
+    } finally {
+      publishButton.disabled = false;
+      publishButton.textContent = "Опубликовать предстоящие матчи";
+    }
+  });
+
+  actions.append(publishButton);
+  section.append(hint, message, actions);
+  return section;
+}
+
 function createMatchPredictionPublicationAdministrationCard(contest, onUpdated) {
   const publication = getMatchPredictionPublication(contest);
   const item = createElement("li", {
@@ -4101,6 +4161,7 @@ function createMatchPredictionPublicationAdministrationCard(contest, onUpdated) 
         )
         : "Публикация прогнозов при начале матча выключена.",
     }),
+    createPredictionReminderPublicationSection(contest),
     createMatchPredictionPublicationSettingsDisclosure(
       contest,
       publication,

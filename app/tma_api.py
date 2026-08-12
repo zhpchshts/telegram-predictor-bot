@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
+from aiogram.exceptions import TelegramAPIError
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
@@ -82,6 +84,12 @@ from app.telegram_username_resolver import (
     UsernameResolutionNotConfiguredError,
     UsernameResolutionUnavailableError,
     UsernameTargetNotSupportedError,
+)
+from app.prediction_reminders import (
+    NoOpenPredictionRemindersError,
+    PredictionReminderMessageTooLongError,
+    TelegramPredictionReminderClient,
+    publish_prediction_reminders,
 )
 from app.user_service import (
     ChatActor,
@@ -246,6 +254,17 @@ class ContestManagementContext:
 def get_telegram_administrators_client(
     request: Request,
 ) -> TelegramAdministratorsClient:
+    try:
+        return request.app.state.telegram_bot
+    except AttributeError as error:
+        raise RuntimeError(
+            "Telegram bot is unavailable outside application lifespan."
+        ) from error
+
+
+def get_telegram_prediction_reminder_client(
+    request: Request,
+) -> TelegramPredictionReminderClient:
     try:
         return request.app.state.telegram_bot
     except AttributeError as error:
@@ -1320,6 +1339,58 @@ async def save_tma_match_prediction_publication_settings(
                     contest.match_prediction_publication
                 )
             ),
+        },
+    )
+
+
+@router.post("/contests/{contest_id}/prediction-reminders/publish")
+async def publish_tma_prediction_reminders(
+    contest_id: SqliteInteger,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
+    telegram_client: Annotated[
+        TelegramPredictionReminderClient,
+        Depends(get_telegram_prediction_reminder_client),
+    ],
+) -> JSONResponse:
+    settings = load_settings()
+    try:
+        message = await asyncio.wait_for(
+            publish_prediction_reminders(
+                bot=telegram_client,
+                database_path=settings.database_path,
+                telegram_chat_id=context.chat.telegram_chat_id,
+                contest_id=contest_id,
+                now_utc=_utc_now(),
+            ),
+            timeout=30.0,
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (
+        ContestCompletedError,
+        NoOpenPredictionRemindersError,
+        PredictionReminderMessageTooLongError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except (TelegramAPIError, TimeoutError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Не удалось опубликовать напоминания. Попробуйте ещё раз.",
+        ) from error
+
+    return JSONResponse(
+        content={
+            "published": True,
+            "reminder_count": message.reminder_count,
+            "match_count": message.match_count,
         },
     )
 
