@@ -438,7 +438,7 @@ def test_master_switch_disable_and_reenable_restores_future_reconciliation(
     )
 
 
-def test_reopened_champion_predictions_are_withdrawn_and_republished(
+def test_published_champion_predictions_cannot_be_reopened_after_deadline(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "predictor.db"
@@ -506,103 +506,42 @@ def test_reopened_champion_predictions_are_withdrawn_and_republished(
         now_utc=_datetime(12),
     )
 
-    future_deadline = "2099-01-01T00:00:00Z"
-    save_champion_prediction_settings(
-        database_path=database_path,
-        telegram_chat_id=CHAT_ID,
-        contest_id=contest_id,
-        telegram_user_id=USER_ID,
-        first_name="Анна",
-        last_name="Иванова",
-        username="anna",
-        enabled=True,
-        deadline_at=future_deadline,
-        points=5,
-        now_utc=_datetime(12),
-        audit_actor=AUDIT_ACTOR,
-    )
-    withdrawal = claim_next_publication(
-        database_path=database_path, now_utc=_datetime(12)
-    )
-    assert withdrawal is not None and withdrawal.desired_action == "withdraw"
-    asyncio.run(
-        deliver_publication(
-            bot=bot,
+    with pytest.raises(
+        ChampionPredictionSettingsLockedError,
+        match="нельзя изменить после его наступления",
+    ):
+        save_champion_prediction_settings(
             database_path=database_path,
-            publication=withdrawal,
-            desired_messages=(),
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=USER_ID,
+            first_name="Анна",
+            last_name="Иванова",
+            username="anna",
+            enabled=True,
+            deadline_at="2099-01-01T00:00:00Z",
+            points=5,
+            now_utc=_datetime(12),
+            audit_actor=AUDIT_ACTOR,
         )
-    )
-    assert finish_publication_success(
-        database_path=database_path,
-        publication=withdrawal,
-        status="withdrawn",
-        now_utc=_datetime(12),
-    )
-    assert bot.deleted == [{"chat_id": CHAT_ID, "message_id": 1000}]
 
-    save_champion_prediction(
-        database_path=database_path,
-        telegram_chat_id=CHAT_ID,
-        contest_id=contest_id,
-        telegram_user_id=USER_ID,
-        first_name="Анна",
-        last_name="Иванова",
-        username="anna",
-        predicted_team_id=match.away_team_id,
-        now_utc=datetime(2098, 12, 31, 12, tzinfo=timezone.utc),
+    assert (
+        claim_next_publication(
+            database_path=database_path,
+            now_utc=_datetime(12),
+        )
+        is None
     )
-    due = claim_next_publication(
-        database_path=database_path,
-        now_utc=datetime(2099, 1, 1, 1, tzinfo=timezone.utc),
-    )
-    assert due is not None
-    republish = prepare_scheduled_reconciliation(
-        database_path=database_path,
-        publication=due,
-        now_utc=datetime(2099, 1, 1, 1, tzinfo=timezone.utc),
-    )
-    assert republish is not None and republish.desired_action == "publish"
-    republished_messages = render_publication_messages(
-        database_path=database_path,
-        publication=republish,
-        now_utc=datetime(2099, 1, 1, 1, tzinfo=timezone.utc),
-    )
-    with database_connection(database_path) as connection:
-        away_name = connection.execute(
-            "SELECT name FROM teams WHERE id = ?", (match.away_team_id,)
-        ).fetchone()[0]
-    assert str(away_name) in "".join(republished_messages)
-
-    assert finish_publication_success(
-        database_path=database_path,
-        publication=republish,
-        status="published",
-        now_utc=datetime(2099, 1, 1, 1, tzinfo=timezone.utc),
-    )
-    save_champion_prediction_settings(
-        database_path=database_path,
-        telegram_chat_id=CHAT_ID,
-        contest_id=contest_id,
-        telegram_user_id=USER_ID,
-        first_name="Анна",
-        last_name="Иванова",
-        username="anna",
-        enabled=False,
-        deadline_at=None,
-        points=5,
-        now_utc=datetime(2099, 1, 1, 2, tzinfo=timezone.utc),
-        audit_actor=AUDIT_ACTOR,
-    )
+    assert bot.deleted == []
     with database_connection(database_path) as connection:
         row = connection.execute(
             """
-            SELECT desired_action, reconcile_at
+            SELECT desired_action, delivery_status
             FROM contest_publications
             WHERE publication_type = 'champion_predictions'
             """
         ).fetchone()
-    assert tuple(row) == ("withdraw", None)
+    assert tuple(row) == ("publish", "published")
 
 
 def test_recording_actual_champion_does_not_revise_champion_predictions(

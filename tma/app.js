@@ -3458,6 +3458,10 @@ function createChampionPredictionSettingsDisclosure(
   enabledInput.name = `contest-${contest.id}-champion-enabled`;
   enabledInput.type = "checkbox";
   enabledInput.checked = championPrediction.is_enabled;
+  const deadlineLocked = (
+    championPrediction.is_enabled && !championPrediction.is_open
+  );
+  enabledInput.disabled = deadlineLocked;
   enabledField.append(enabledInput, enabledText);
 
   deadlineInput.id = `contest-${contest.id}-champion-deadline`;
@@ -3479,9 +3483,12 @@ function createChampionPredictionSettingsDisclosure(
   function syncEnabledState() {
     const isEnabled = enabledInput.checked;
 
-    deadlineInput.disabled = !isEnabled;
-    deadlineInput.required = isEnabled;
-    deadlineField.classList.toggle("is-disabled", !isEnabled);
+    deadlineInput.disabled = !isEnabled || deadlineLocked;
+    deadlineInput.required = isEnabled && !deadlineLocked;
+    deadlineField.classList.toggle(
+      "is-disabled",
+      !isEnabled || deadlineLocked,
+    );
     hint.hidden = !isEnabled;
     submitButton.textContent = "Сохранить настройки";
     if (isEnabled !== championPrediction.is_enabled) {
@@ -4275,12 +4282,12 @@ function createTournamentTeamsAdministrationCard(contest, state, onUpdated) {
 }
 
 function createSwissStageSettingsForm(contest, prediction, onUpdated) {
-  if (prediction.settings_locked) {
+  if (prediction.settings_locked && !prediction.is_open) {
     return createElement("p", {
       className: "match-prediction-closed",
       text: (
         "Настройки зафиксированы после сохранения первого пользовательского " +
-        "прогноза или фактического результата."
+        "прогноза или фактического результата, а дедлайн уже наступил."
       ),
     });
   }
@@ -4302,10 +4309,12 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   });
   const description = createElement("p", {
     className: "subtitle",
-    text: (
-      "Укажите, до какого времени можно выбрать команды и сколько команд пройдёт " +
-      "напрямую и через стыковой раунд."
-    ),
+    text: prediction.settings_locked
+      ? "До наступления текущего дедлайна его можно изменить. Остальные настройки зафиксированы."
+      : (
+        "Укажите, до какого времени можно выбрать команды и сколько команд пройдёт " +
+        "напрямую и через стыковой раунд."
+      ),
   });
   summaryContent.append(title, overview);
   summary.append(summaryContent);
@@ -4316,6 +4325,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   const enabledInput = document.createElement("input");
   enabledInput.type = "checkbox";
   enabledInput.checked = prediction.is_enabled;
+  enabledInput.disabled = prediction.settings_locked;
   enabledField.append(
     enabledInput,
     createElement("span", { text: "Включить прогноз" }),
@@ -4345,6 +4355,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   directInput.min = "1";
   directInput.step = "1";
   directInput.value = String(prediction.direct_qualifier_count);
+  directInput.disabled = prediction.settings_locked;
   directField.append(
     createElement("span", {
       className: "form-field-label",
@@ -4361,6 +4372,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   eliminationInput.min = "1";
   eliminationInput.step = "1";
   eliminationInput.value = String(prediction.elimination_qualifier_count);
+  eliminationInput.disabled = prediction.settings_locked;
   eliminationField.append(
     createElement("span", {
       className: "form-field-label",
@@ -4382,11 +4394,16 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   );
   function syncEnabledState() {
     const isEnabled = enabledInput.checked;
+    const deadlineEditable = isEnabled && (
+      !prediction.settings_locked || prediction.is_open
+    );
 
-    deadlineInput.disabled = !isEnabled;
-    deadlineInput.required = isEnabled;
-    deadlineField.classList.toggle("is-disabled", !isEnabled);
-    submitButton.textContent = "Сохранить настройки";
+    deadlineInput.disabled = !deadlineEditable;
+    deadlineInput.required = deadlineEditable;
+    deadlineField.classList.toggle("is-disabled", !deadlineEditable);
+    submitButton.textContent = prediction.settings_locked
+      ? "Сохранить дедлайн"
+      : "Сохранить настройки";
     if (isEnabled !== prediction.is_enabled) {
       submitButton.textContent = isEnabled
         ? "Включить прогноз"

@@ -1426,6 +1426,7 @@ async def save_tma_champion_prediction_settings(
             deadline_at=payload.deadline_at,
             points=payload.points,
             audit_actor=_audit_actor(context.context, context.access),
+            now_utc=_utc_now(),
         )
         contest = get_contest_details(
             database_path=settings.database_path,
@@ -1481,6 +1482,7 @@ async def save_tma_swiss_stage_prediction_settings(
             direct_qualifier_count=payload.direct_qualifier_count,
             elimination_qualifier_count=payload.elimination_qualifier_count,
             audit_actor=_audit_actor(context.context, context.access),
+            now_utc=_utc_now(),
         )
         contest = get_contest_details(
             database_path=settings.database_path,

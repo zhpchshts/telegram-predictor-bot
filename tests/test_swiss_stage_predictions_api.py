@@ -83,6 +83,22 @@ def test_swiss_stage_api_configures_predicts_and_records_result(
         prediction_response.json()["swiss_stage_prediction"]["settings_locked"] is True
     )
 
+    deadline_response = client.put(
+        f"/api/tma/contests/{contest_id}/swiss-stage-prediction/settings",
+        headers=build_tma_headers(),
+        json={
+            "enabled": True,
+            "deadline_at": "2030-02-01T12:00:00Z",
+            "direct_qualifier_count": 1,
+            "elimination_qualifier_count": 1,
+        },
+    )
+    assert deadline_response.status_code == 200
+    assert (
+        deadline_response.json()["swiss_stage_prediction"]["deadline_at"]
+        == "2030-02-01T12:00:00Z"
+    )
+
     locked_response = client.put(
         f"/api/tma/contests/{contest_id}/swiss-stage-prediction/settings",
         headers=build_tma_headers(),
@@ -107,7 +123,7 @@ def test_swiss_stage_api_configures_predicts_and_records_result(
 
     monkeypatch.setattr(
         "app.tma_api._utc_now",
-        lambda: datetime(2030, 1, 2, tzinfo=timezone.utc),
+        lambda: datetime(2030, 2, 2, tzinfo=timezone.utc),
     )
     result_response = client.put(
         f"/api/tma/contests/{contest_id}/swiss-stage-result",

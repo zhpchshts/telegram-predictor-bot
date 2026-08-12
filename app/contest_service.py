@@ -2311,10 +2311,9 @@ def save_champion_prediction_settings(
     audit_actor: AuditActor,
     now_utc: datetime | None = None,
 ) -> None:
-    resolved_now_utc = _resolve_now_utc(now_utc)
-
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now_utc = _resolve_now_utc(now_utc)
         contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -2351,6 +2350,23 @@ def save_champion_prediction_settings(
             )
         else:
             normalized_deadline_at = None
+
+        previous_deadline_at = previous_row["champion_prediction_deadline_at"]
+        previous_deadline_at_value = (
+            str(previous_deadline_at) if previous_deadline_at is not None else None
+        )
+        if normalized_deadline_at != previous_deadline_at_value:
+            _validate_existing_deadline_change(
+                previous_deadline_at=previous_deadline_at_value,
+                new_deadline_at=normalized_deadline_at,
+                now_utc=resolved_now_utc,
+                locked_error=ChampionPredictionSettingsLockedError(
+                    "Дедлайн прогноза на чемпиона нельзя изменить после его наступления."
+                ),
+                past_deadline_message=(
+                    "Новый дедлайн прогноза на чемпиона должен быть в будущем."
+                ),
+            )
 
         actor_user_id = _upsert_user(
             connection,
@@ -2697,6 +2713,7 @@ def save_swiss_stage_prediction_settings(
     direct_qualifier_count: int,
     elimination_qualifier_count: int,
     audit_actor: AuditActor,
+    now_utc: datetime | None = None,
 ) -> None:
     normalized_enabled = _normalize_swiss_stage_enabled(enabled)
     normalized_direct_count = _normalize_swiss_stage_limit(
@@ -2720,15 +2737,52 @@ def save_swiss_stage_prediction_settings(
 
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now_utc = _resolve_now_utc(now_utc)
         contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
         )
-        if _are_swiss_stage_settings_locked(connection, contest_id=contest_id):
+        previous_row = _get_swiss_stage_configuration_row(
+            connection,
+            contest_id=contest_id,
+        )
+        settings_locked = _are_swiss_stage_settings_locked(
+            connection,
+            contest_id=contest_id,
+        )
+        previous_deadline_at = (
+            str(previous_row["deadline_at"])
+            if previous_row is not None and previous_row["deadline_at"] is not None
+            else None
+        )
+        deadline_changed = normalized_deadline_at != previous_deadline_at
+        if deadline_changed:
+            _validate_existing_deadline_change(
+                previous_deadline_at=previous_deadline_at,
+                new_deadline_at=normalized_deadline_at,
+                now_utc=resolved_now_utc,
+                locked_error=SwissStagePredictionSettingsLockedError(
+                    "Дедлайн прогноза на швейцарский этап нельзя изменить после его наступления."
+                ),
+                past_deadline_message=(
+                    "Новый дедлайн прогноза на швейцарский этап должен быть в будущем."
+                ),
+            )
+
+        non_deadline_settings_changed = previous_row is None or any(
+            (
+                normalized_enabled != bool(previous_row["enabled"]),
+                normalized_direct_count != int(previous_row["direct_qualifier_count"]),
+                normalized_elimination_count
+                != int(previous_row["elimination_qualifier_count"]),
+            )
+        )
+        if settings_locked and non_deadline_settings_changed:
             raise SwissStagePredictionSettingsLockedError(
                 "Настройки прогноза на швейцарский этап нельзя изменить "
-                "после сохранения первого прогноза или результата."
+                "после сохранения первого прогноза или результата. "
+                "До дедлайна можно изменить только сам дедлайн."
             )
 
         existing_tournament_teams = _get_tournament_team_rows(
@@ -4378,6 +4432,33 @@ def _is_contest_completed(
     return (
         allow_no_matches or total_matches > 0
     ) and total_matches == completed_matches
+
+
+def _validate_existing_deadline_change(
+    *,
+    previous_deadline_at: str | None,
+    new_deadline_at: str | None,
+    now_utc: datetime,
+    locked_error: ValueError,
+    past_deadline_message: str,
+) -> None:
+    if previous_deadline_at is None:
+        return
+
+    previous_deadline_utc = datetime.fromisoformat(
+        previous_deadline_at.replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+    if previous_deadline_utc <= now_utc:
+        raise locked_error
+
+    if new_deadline_at is None:
+        return
+
+    new_deadline_utc = datetime.fromisoformat(
+        new_deadline_at.replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+    if new_deadline_utc <= now_utc:
+        raise ValueError(past_deadline_message)
 
 
 def _is_champion_prediction_open(

@@ -152,11 +152,17 @@ def test_swiss_stage_settings_match_champion_settings_copy_and_state() -> None:
     assert 'text: "Прогноз на чемпиона"' in champion_card_source
     assert 'text: "Прогноз на швейцарскую систему"' in swiss_card_source
     assert 'status.textContent = "Не настроен"' in swiss_status_source
-    assert "deadlineInput.disabled = !isEnabled" in swiss_source
-    assert "deadlineInput.required = isEnabled" in swiss_source
+    assert "deadlineInput.disabled = !deadlineEditable" in swiss_source
+    assert "deadlineInput.required = deadlineEditable" in swiss_source
     assert "isEnabled !== prediction.is_enabled" in swiss_source
-    assert 'deadlineField.classList.toggle("is-disabled", !isEnabled)' in swiss_source
+    assert (
+        'deadlineField.classList.toggle("is-disabled", !deadlineEditable)'
+        in swiss_source
+    )
     assert 'enabledInput.addEventListener("change", syncEnabledState)' in (swiss_source)
+    assert "enabledInput.disabled = prediction.settings_locked" in swiss_source
+    assert "directInput.disabled = prediction.settings_locked" in swiss_source
+    assert "eliminationInput.disabled = prediction.settings_locked" in swiss_source
 
 
 def test_swiss_stage_settings_use_tournament_teams_without_separate_input() -> None:
@@ -175,4 +181,7 @@ def test_tma_locked_settings_text_mentions_prediction_and_result() -> None:
         "Настройки зафиксированы после сохранения первого пользовательского "
         in settings_source
     )
-    assert "прогноза или фактического результата." in settings_source
+    assert "прогноза или фактического результата, а дедлайн уже наступил." in (
+        settings_source
+    )
+    assert "До наступления текущего дедлайна его можно изменить." in settings_source

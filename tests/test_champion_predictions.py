@@ -9,6 +9,7 @@ import pytest
 
 from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
+    ChampionPredictionSettingsLockedError,
     ChampionUnavailableError,
     PredictionUnavailableError,
     complete_contest,
@@ -517,7 +518,7 @@ def test_champion_recalculation_updates_leaderboard_after_correction(
     ] == [("Боб", 5), ("Алиса", 0)]
 
 
-def test_moving_deadline_first_blocks_subsequent_champion(
+def test_champion_deadline_cannot_be_moved_after_it_has_passed(
     database_path: Path,
 ) -> None:
     contest_id = _create_contest(database_path)
@@ -528,6 +529,47 @@ def test_moving_deadline_first_blocks_subsequent_champion(
     _configure_champion_prediction(database_path, contest_id=contest_id)
     _mark_all_matches_finished(database_path, contest_id=contest_id)
 
+    with pytest.raises(
+        ChampionPredictionSettingsLockedError,
+        match="нельзя изменить после его наступления",
+    ):
+        save_champion_prediction_settings(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+            first_name="Администратор",
+            last_name=None,
+            username="admin",
+            enabled=True,
+            deadline_at="2031-01-01T12:00:00Z",
+            points=5,
+            now_utc=CLOSED_PREDICTION_TIME,
+            audit_actor=AUDIT_ACTOR,
+        )
+
+    champion = save_contest_champion(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        champion_team_id=spain_team_id,
+        now_utc=CLOSED_PREDICTION_TIME,
+        audit_actor=AUDIT_ACTOR,
+    )
+    assert champion.id == spain_team_id
+
+
+def test_champion_deadline_can_be_changed_before_it_passes(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    _create_matches(database_path, contest_id=contest_id)
+    _configure_champion_prediction(database_path, contest_id=contest_id)
+
     save_champion_prediction_settings(
         database_path=database_path,
         telegram_chat_id=CHAT_ID,
@@ -537,30 +579,19 @@ def test_moving_deadline_first_blocks_subsequent_champion(
         last_name=None,
         username="admin",
         enabled=True,
-        deadline_at="2031-01-01T12:00:00Z",
+        deadline_at="2030-02-01T12:00:00Z",
         points=5,
-        now_utc=CLOSED_PREDICTION_TIME,
+        now_utc=OPEN_PREDICTION_TIME,
         audit_actor=AUDIT_ACTOR,
     )
 
-    with pytest.raises(
-        ChampionUnavailableError,
-        match=(
-            "Фактического чемпиона можно указать после закрытия прогнозов на чемпиона"
-        ),
-    ):
-        save_contest_champion(
-            database_path=database_path,
-            telegram_chat_id=CHAT_ID,
-            contest_id=contest_id,
-            telegram_user_id=ADMIN_TELEGRAM_USER_ID,
-            first_name="Администратор",
-            last_name=None,
-            username="admin",
-            champion_team_id=spain_team_id,
-            now_utc=CLOSED_PREDICTION_TIME,
-            audit_actor=AUDIT_ACTOR,
-        )
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        now_utc=OPEN_PREDICTION_TIME,
+    )
+    assert details.champion_prediction.deadline_at == "2030-02-01T12:00:00Z"
 
 
 def test_concurrent_champion_and_settings_changes_preserve_invariant(

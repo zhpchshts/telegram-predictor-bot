@@ -237,6 +237,26 @@ def test_swiss_stage_prediction_is_atomic_replace_and_locks_settings(
     assert prediction_count == 1
     assert selection_count == 4
 
+    save_swiss_stage_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        enabled=True,
+        deadline_at="2030-02-01T12:00:00Z",
+        direct_qualifier_count=2,
+        elimination_qualifier_count=2,
+        audit_actor=AUDIT_ACTOR,
+        now_utc=OPEN_TIME,
+    )
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        now_utc=OPEN_TIME,
+    )
+    assert details.swiss_stage_prediction.deadline_at == "2030-02-01T12:00:00Z"
+    assert details.swiss_stage_prediction.settings_locked is True
+
     with pytest.raises(SwissStagePredictionSettingsLockedError):
         save_swiss_stage_prediction_settings(
             database_path=database_path,
@@ -247,6 +267,30 @@ def test_swiss_stage_prediction_is_atomic_replace_and_locks_settings(
             direct_qualifier_count=2,
             elimination_qualifier_count=2,
             audit_actor=AUDIT_ACTOR,
+        )
+
+
+def test_swiss_stage_deadline_cannot_be_changed_after_it_has_passed(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    teams = _configure(database_path, contest_id=contest_id)
+    _save_alice_prediction(database_path, contest_id=contest_id, teams=teams)
+
+    with pytest.raises(
+        SwissStagePredictionSettingsLockedError,
+        match="нельзя изменить после его наступления",
+    ):
+        save_swiss_stage_prediction_settings(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            enabled=True,
+            deadline_at="2031-01-01T12:00:00Z",
+            direct_qualifier_count=2,
+            elimination_qualifier_count=2,
+            audit_actor=AUDIT_ACTOR,
+            now_utc=CLOSED_TIME,
         )
 
 
