@@ -2080,6 +2080,7 @@ def test_participant_can_read_contest_matches_and_leaderboard_with_enforcement(
     assert [item["id"] for item in contest_details["matches"]] == [match["id"]]
     assert len(contest_details["leaderboard"]) == 1
     assert contest_details["leaderboard"][0]["participant_name"] == "Eugene Sabir"
+    assert contest_details["leaderboard"][0]["participant_username"] == "evsab"
     assert participant_telegram_client.calls == 1
 
 
@@ -3342,6 +3343,7 @@ def test_get_contest_returns_prediction_score_after_result(
         {
             "place": 1,
             "participant_name": "Eugene Sabir",
+            "participant_username": "evsab",
             "total_points": 4,
             "match_predictions_count": 1,
             "champion_prediction_count": 0,
@@ -4154,6 +4156,7 @@ def test_get_contest_returns_leaderboard_completeness_with_champion_prediction(
         {
             "place": 1,
             "participant_name": "Eugene Sabir",
+            "participant_username": "evsab",
             "total_points": 0,
             "match_predictions_count": 0,
             "champion_prediction_count": 1,

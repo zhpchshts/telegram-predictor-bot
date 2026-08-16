@@ -1139,6 +1139,11 @@ function createLeaderboardCard(
       entry.participant_name
         ? entry.participant_name
         : "Участник";
+    const participantUsername =
+      typeof entry?.participant_username === "string" &&
+      entry.participant_username
+        ? entry.participant_username
+        : null;
     const totalPoints = Number.isSafeInteger(entry?.total_points)
       ? entry.total_points
       : 0;
@@ -1194,6 +1199,7 @@ function createLeaderboardCard(
     const row = createLeaderboardRow(
       place,
       participantName,
+      participantUsername,
       calculatedPredictionsCount,
       pendingPredictionsCount,
       totalPoints,
@@ -1243,6 +1249,7 @@ function createLeaderboardCard(
 function createLeaderboardRow(
   place,
   participantName,
+  participantUsername,
   calculatedPredictionsCount,
   pendingPredictionsCount,
   totalPoints,
@@ -1257,10 +1264,22 @@ function createLeaderboardRow(
   const participantElement = createElement("div", {
     className: "leaderboard-participant",
   });
+  const identityElement = createElement("span", {
+    className: "leaderboard-participant-identity",
+  });
   const nameElement = createElement("span", {
     className: "leaderboard-participant-name",
     text: participantName,
   });
+  identityElement.append(nameElement);
+  if (participantUsername !== null) {
+    identityElement.append(
+      createElement("span", {
+        className: "leaderboard-participant-username",
+        text: `@${participantUsername}`,
+      }),
+    );
+  }
   const predictionsElement = createElement("span", {
     className: "leaderboard-predictions",
     text: (
@@ -1274,7 +1293,7 @@ function createLeaderboardRow(
     text: `${totalPoints} ${getPointsLabel(totalPoints)}`,
   });
 
-  participantElement.append(nameElement, predictionsElement);
+  participantElement.append(identityElement, predictionsElement);
   row.append(placeElement, participantElement, pointsElement);
   return row;
 }

@@ -276,6 +276,22 @@ def test_participant_tournament_predictions_save_without_reloading_contest() -> 
     assert 'successMessage: "Прогноз сохранён."' in swiss_source
 
 
+def test_leaderboard_keeps_name_and_optional_username_in_one_line() -> None:
+    card_source = _function_source("createLeaderboardCard")
+    row_source = _function_source("createLeaderboardRow")
+    styles = (main.TMA_DIRECTORY / "styles.css").read_text(encoding="utf-8")
+
+    assert "entry?.participant_username" in card_source
+    assert "participantUsername !== null" in row_source
+    assert "text: `@${participantUsername}`" in row_source
+    assert 'className: "leaderboard-participant-identity"' in row_source
+    assert 'className: "leaderboard-participant-username"' in row_source
+    assert ".leaderboard-participant-identity" in styles
+    assert "white-space: nowrap" in styles
+    assert ".leaderboard-participant-username" in styles
+    assert "text-overflow: ellipsis" in styles
+
+
 def test_management_tabs_default_to_matches_and_keep_settings_separate() -> None:
     source = _source()
     active_tab_source = _function_source("getActiveContestManagementTab")
