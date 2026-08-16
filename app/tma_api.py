@@ -2010,6 +2010,7 @@ def _serialize_leaderboard_entry(entry) -> dict[str, object]:
     result = {
         "place": entry.place,
         "participant_name": entry.participant_name,
+        "participant_username": entry.participant_username,
         "total_points": entry.total_points,
         "match_predictions_count": entry.match_predictions_count,
         "champion_prediction_count": entry.champion_prediction_count,

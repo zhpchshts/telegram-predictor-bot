@@ -303,6 +303,7 @@ LEADERBOARD_SPORTING_TIEBREAKS: tuple[tuple[LeaderboardTiebreakReason, str], ...
 class ContestLeaderboardEntry:
     place: int
     participant_name: str
+    participant_username: str | None
     total_points: int
     match_predictions_count: int
     champion_prediction_count: int
@@ -718,6 +719,7 @@ def get_contest_details(
             SELECT
                 users.id AS user_id,
                 users.telegram_user_id,
+                users.username,
                 users.first_name,
                 users.last_name,
                 COALESCE(score_totals.total_points, 0) AS total_points,
@@ -5165,6 +5167,11 @@ def _contest_leaderboard_from_rows(
             ContestLeaderboardEntry(
                 place=place,
                 participant_name=participant_name,
+                participant_username=(
+                    str(row["username"]).strip() or None
+                    if "username" in row.keys() and row["username"] is not None
+                    else None
+                ),
                 total_points=total_points,
                 match_predictions_count=int(row["match_predictions_count"]),
                 champion_prediction_count=int(row["champion_prediction_count"]),
