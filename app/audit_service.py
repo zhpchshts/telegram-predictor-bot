@@ -25,6 +25,9 @@ class AuditEventType(StrEnum):
     SWISS_STAGE_SETTINGS_UPDATED = "swiss_stage_settings_updated"
     SWISS_STAGE_RESULT_SET = "swiss_stage_result_set"
     SWISS_STAGE_RESULT_CHANGED = "swiss_stage_result_changed"
+    INTERMEDIATE_LEADERBOARD_PUBLICATION_REQUESTED = (
+        "intermediate_leaderboard_publication_requested"
+    )
     SUPERMODERATOR_ASSIGNED = "supermoderator_assigned"
     SUPERMODERATOR_REVOKED = "supermoderator_revoked"
 

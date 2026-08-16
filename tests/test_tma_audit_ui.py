@@ -46,6 +46,9 @@ def test_audit_ui_has_central_russian_labels_for_every_event_type() -> None:
         AuditEventType.MATCH_RESULT_CHANGED: "Изменён результат матча",
         AuditEventType.CONTEST_CHAMPION_SET: "Указан чемпион",
         AuditEventType.CONTEST_CHAMPION_CHANGED: "Изменён чемпион",
+        AuditEventType.INTERMEDIATE_LEADERBOARD_PUBLICATION_REQUESTED: (
+            "Запрошена публикация промежуточного рейтинга"
+        ),
         AuditEventType.SUPERMODERATOR_ASSIGNED: "Назначен супермодератор",
         AuditEventType.SUPERMODERATOR_REVOKED: ("Отозвана роль супермодератора"),
     }
@@ -90,6 +93,7 @@ def test_audit_ui_builds_human_readable_change_summaries() -> None:
     assert 'case "match_deleted"' in summary_source
     assert 'case "supermoderator_assigned"' in summary_source
     assert 'case "supermoderator_revoked"' in summary_source
+    assert 'case "intermediate_leaderboard_publication_requested"' in summary_source
     assert "Включена публикация прогнозов" in title_source
     assert "Выключена публикация прогнозов" in title_source
 
