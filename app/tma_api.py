@@ -92,6 +92,10 @@ from app.prediction_reminders import (
     TelegramPredictionReminderClient,
     publish_prediction_reminders,
 )
+from app.leaderboard_publications import (
+    IntermediateLeaderboardUnavailableError,
+    queue_intermediate_leaderboard_publication,
+)
 from app.user_service import (
     ChatActor,
     LocalUser,
@@ -1400,6 +1404,63 @@ async def publish_tma_prediction_reminders(
             "published": True,
             "reminder_count": message.reminder_count,
             "match_count": message.match_count,
+        },
+    )
+
+
+@router.post("/contests/{contest_id}/leaderboard-publications")
+async def publish_tma_intermediate_leaderboard(
+    contest_id: SqliteInteger,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias=IDEMPOTENCY_KEY_HEADER),
+    ] = None,
+) -> JSONResponse:
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Не передан ключ идемпотентности публикации рейтинга.",
+        )
+
+    settings = load_settings()
+    try:
+        result = queue_intermediate_leaderboard_publication(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            idempotency_key=idempotency_key,
+            audit_actor=_audit_actor(context.context, context.access),
+            now_utc=_utc_now(),
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except IntermediateLeaderboardUnavailableError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={
+            "queued": True,
+            "request_id": result.request_id,
+            "was_created": result.was_created,
         },
     )
 

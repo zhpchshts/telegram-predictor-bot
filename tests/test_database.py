@@ -26,6 +26,7 @@ def test_initialize_database_creates_current_schema(tmp_path: Path) -> None:
         "contest_teams",
         "contests",
         "event_log",
+        "leaderboard_publication_snapshots",
         "match_creation_requests",
         "match_prediction_publication_messages",
         "match_prediction_publications",
@@ -85,7 +86,7 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
             """
         ).fetchone()[0]
 
-    assert tables_count == 33
+    assert tables_count == 34
 
 
 def test_current_schema_supports_only_known_contest_templates(tmp_path: Path) -> None:

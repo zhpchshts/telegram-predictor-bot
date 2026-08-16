@@ -297,20 +297,28 @@ def test_management_tabs_default_to_matches_and_keep_settings_separate() -> None
     active_tab_source = _function_source("getActiveContestManagementTab")
     management_source = _function_source("renderContestManagementScreen")
     settings_source = _function_source("createContestPredictionSettingsCard")
+    publications_source = _function_source("createContestPublicationsCard")
 
     matches_tab = '{ id: "matches", label: "Матчи" }'
     settings_tab = '{ id: "settings", label: "Настройки" }'
+    publications_tab = '{ id: "publications", label: "Публикации" }'
     management_tabs_start = source.index("const CONTEST_MANAGEMENT_TABS")
     assert source.index(matches_tab, management_tabs_start) < source.index(
         settings_tab,
+        management_tabs_start,
+    )
+    assert source.index(settings_tab, management_tabs_start) < source.index(
+        publications_tab,
         management_tabs_start,
     )
     assert ': "matches"' in active_tab_source
 
     assert "createContestManagementTabs(activeTab" in management_source
     assert 'activeTab === "settings"' in management_source
+    assert 'activeTab === "publications"' in management_source
     assert "createTournamentTeamsAdministrationCard(" in management_source
     assert "createContestPredictionSettingsCard(" in management_source
+    assert "createContestPublicationsCard(" in management_source
     assert "createContestCompletionCard(" in management_source
     assert "createContestDeletionCard(" in management_source
     assert management_source.index("createMatchFormCard(") < management_source.index(
@@ -318,9 +326,12 @@ def test_management_tabs_default_to_matches_and_keep_settings_separate() -> None
     )
     assert "Добавьте первый матч выше." in management_source
 
-    assert "createMatchPredictionPublicationAdministrationCard" in settings_source
+    assert "createMatchPredictionPublicationAdministrationCard" not in settings_source
     assert "createChampionAdministrationCard" in settings_source
     assert "createSwissStageAdministrationCard" in settings_source
+    assert "createMatchPredictionPublicationAdministrationCard" in publications_source
+    assert "createChampionAdministrationCard" not in publications_source
+    assert "createSwissStageAdministrationCard" not in publications_source
 
 
 def test_prediction_reminders_are_published_as_one_manual_message() -> None:
@@ -335,6 +346,26 @@ def test_prediction_reminders_are_published_as_one_manual_message() -> None:
     assert "отправит одно сообщение" in reminder_source
     assert "result?.published !== true" in reminder_source
     assert "createPredictionReminderPublicationSection(contest)" in (publication_source)
+
+
+def test_intermediate_leaderboard_publication_is_an_idempotent_admin_action() -> None:
+    leaderboard_source = _function_source(
+        "createIntermediateLeaderboardPublicationSection"
+    )
+    publication_source = _function_source(
+        "createMatchPredictionPublicationAdministrationCard"
+    )
+
+    assert '"Опубликовать промежуточный рейтинг"' in leaderboard_source
+    assert "/leaderboard-publications`" in leaderboard_source
+    assert 'method: "POST"' in leaderboard_source
+    assert "[IDEMPOTENCY_KEY_HEADER]: idempotencyKey" in leaderboard_source
+    assert 'createIdempotencyKey("leaderboard-publication")' in leaderboard_source
+    assert "entry?.calculated_predictions_count" in leaderboard_source
+    assert "result?.queued !== true" in leaderboard_source
+    assert "createIntermediateLeaderboardPublicationSection(contest)" in (
+        publication_source
+    )
 
 
 def test_participant_contour_does_not_render_administrative_forms() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 from app.contest_service import (
@@ -83,6 +84,14 @@ def render_publication_messages(
             database_path=database_path,
             contest_id=publication.contest_id,
             max_message_length=max_message_length,
+        )
+    if publication.publication_type == "leaderboard_snapshot":
+        return _render_intermediate_leaderboard(
+            database_path=database_path,
+            snapshot_id=publication.entity_id,
+            contest_id=publication.contest_id,
+            max_message_length=max_message_length,
+            max_table_rows=max_table_rows,
         )
     if publication.publication_type == "contest_completed":
         return _render_contest_completed(
@@ -760,6 +769,67 @@ def _render_contest_completed(
     )
 
 
+def _render_intermediate_leaderboard(
+    *,
+    database_path: Path,
+    snapshot_id: int,
+    contest_id: int,
+    max_message_length: int,
+    max_table_rows: int,
+) -> tuple[str, ...]:
+    with database_connection(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT snapshot_json
+            FROM leaderboard_publication_snapshots
+            WHERE id = ? AND contest_id = ?
+            """,
+            (snapshot_id, contest_id),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Leaderboard publication snapshot was not found.")
+
+    try:
+        snapshot = json.loads(str(row["snapshot_json"]))
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("Leaderboard publication snapshot is invalid.") from error
+    contest_name, captured_at, entries, tiebreak_reason = (
+        _validate_intermediate_leaderboard_snapshot(snapshot)
+    )
+
+    title = "<p><b>🍀 Промежуточный рейтинг</b></p>"
+    context = (
+        f"<p>Конкурс «{escape_rich_text(contest_name)}»</p>"
+        f"<p>По состоянию на {captured_at.strftime('%d.%m.%Y, %H:%M UTC')}</p>"
+    )
+    explanation = ""
+    if tiebreak_reason is not None:
+        explanation = (
+            "<p>"
+            + escape_rich_text(
+                _format_intermediate_tiebreak_explanation(
+                    str(entries[0]["participant_name"]),
+                    tiebreak_reason,
+                )
+            )
+            + "</p>"
+        )
+    table_rows = tuple(_format_intermediate_leaderboard_row(entry) for entry in entries)
+    header = f"{title}{context}"
+    return split_rich_table_messages(
+        first_header=f"{header}{explanation}",
+        continuation_header=header,
+        first_caption="Промежуточный рейтинг",
+        continuation_caption="Промежуточный рейтинг · продолжение",
+        column_names=("Место", "Участник", "Очки"),
+        alignments=("center", "left", "right"),
+        column_spans=LEADERBOARD_COLUMN_SPANS,
+        rows=table_rows,
+        max_message_length=max_message_length,
+        max_table_rows=max_table_rows,
+    )
+
+
 def _format_match_prediction_row(row) -> str:
     home_score = int(row["predicted_home_score"])
     away_score = int(row["predicted_away_score"])
@@ -884,6 +954,127 @@ def _format_leaderboard_row(entry) -> str:
         alignments=("center", "left", "right"),
         column_spans=LEADERBOARD_COLUMN_SPANS,
     )
+
+
+def _format_intermediate_leaderboard_row(entry: dict[str, object]) -> str:
+    place_value = int(entry["place"])
+    place = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place_value, str(place_value))
+    participant = escape_rich_text(str(entry["participant_name"]))
+    points = str(int(entry["total_points"]))
+    if place_value == 1:
+        participant = f"<b>{participant}</b>"
+        points = f"<b>{points}</b>"
+    return table_row(
+        (place, participant, points),
+        alignments=("center", "left", "right"),
+        column_spans=LEADERBOARD_COLUMN_SPANS,
+    )
+
+
+def _validate_intermediate_leaderboard_snapshot(
+    snapshot: object,
+) -> tuple[
+    str,
+    datetime,
+    tuple[dict[str, object], ...],
+    LeaderboardTiebreakReason | None,
+]:
+    if not isinstance(snapshot, dict) or snapshot.get("version") != 1:
+        raise RuntimeError("Leaderboard publication snapshot version is invalid.")
+    contest_name = snapshot.get("contest_name")
+    captured_at_value = snapshot.get("captured_at")
+    entries_value = snapshot.get("entries")
+    reason_value = snapshot.get("top_tiebreak_reason")
+    if not isinstance(contest_name, str) or not contest_name.strip():
+        raise RuntimeError("Leaderboard publication contest name is invalid.")
+    if not isinstance(captured_at_value, str):
+        raise RuntimeError("Leaderboard publication timestamp is invalid.")
+    try:
+        captured_at = datetime.fromisoformat(captured_at_value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RuntimeError("Leaderboard publication timestamp is invalid.") from error
+    if captured_at.tzinfo is None or captured_at.utcoffset() is None:
+        raise RuntimeError("Leaderboard publication timestamp has no timezone.")
+    captured_at = captured_at.astimezone(timezone.utc)
+    if not isinstance(entries_value, list) or not entries_value:
+        raise RuntimeError("Leaderboard publication entries are invalid.")
+
+    entries: list[dict[str, object]] = []
+    for expected_place, entry in enumerate(entries_value, start=1):
+        if not isinstance(entry, dict):
+            raise RuntimeError("Leaderboard publication entry is invalid.")
+        place = entry.get("place")
+        participant_name = entry.get("participant_name")
+        total_points = entry.get("total_points")
+        if (
+            isinstance(place, bool)
+            or not isinstance(place, int)
+            or place != expected_place
+            or not isinstance(participant_name, str)
+            or not participant_name.strip()
+            or isinstance(total_points, bool)
+            or not isinstance(total_points, int)
+        ):
+            raise RuntimeError("Leaderboard publication entry is invalid.")
+        entries.append(
+            {
+                "place": place,
+                "participant_name": participant_name,
+                "total_points": total_points,
+            }
+        )
+
+    valid_reasons = {
+        "exact_score",
+        "goal_difference",
+        "outcome",
+        "drawn_advancing_team",
+        "champion",
+        "draw",
+    }
+    if reason_value is not None and reason_value not in valid_reasons:
+        raise RuntimeError("Leaderboard publication tiebreak reason is invalid.")
+    if reason_value is not None and len(entries) < 2:
+        raise RuntimeError("Leaderboard publication tiebreak has no runner-up.")
+    return (
+        contest_name,
+        captured_at,
+        tuple(entries),
+        reason_value,  # type: ignore[return-value]
+    )
+
+
+def _format_intermediate_tiebreak_explanation(
+    leader_name: str,
+    reason: LeaderboardTiebreakReason,
+) -> str:
+    explanations = {
+        "exact_score": (
+            f"При равенстве очков {leader_name} занимает первое место благодаря "
+            "большему количеству точных счетов."
+        ),
+        "goal_difference": (
+            f"При равенстве очков {leader_name} занимает первое место благодаря "
+            "большему количеству угаданных разниц мячей."
+        ),
+        "outcome": (
+            f"При равенстве очков {leader_name} занимает первое место благодаря "
+            "большему количеству угаданных исходов."
+        ),
+        "drawn_advancing_team": (
+            f"При равенстве очков {leader_name} занимает первое место благодаря "
+            "большему количеству правильных прогнозов прошедшей команды."
+        ),
+        "champion": (
+            f"При равенстве очков {leader_name} занимает первое место благодаря "
+            "правильному прогнозу чемпиона."
+        ),
+        "draw": (
+            "Все дополнительные показатели первого и второго места совпали. "
+            "Первое место определено жребием."
+        ),
+    }
+    return explanations[reason]
 
 
 def _participant_name(row) -> str:

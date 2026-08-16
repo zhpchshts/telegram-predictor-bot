@@ -22,6 +22,7 @@ from app.access_control import (
     TelegramAdministratorsSnapshot,
 )
 from app.audit_service import AuditActor, AuditActorRole
+from app.contest_service import save_match_prediction, save_match_result
 from app.database import create_connection, initialize_database
 from app.main import create_app as create_application
 from app.supermoderator_service import (
@@ -1784,6 +1785,10 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
             "/api/tma/contests/{contest_id}/prediction-reminders/publish",
         ): "contest_management",
         (
+            "POST",
+            "/api/tma/contests/{contest_id}/leaderboard-publications",
+        ): "contest_management",
+        (
             "PUT",
             "/api/tma/contests/{contest_id}/champion-prediction/settings",
         ): "contest_management",
@@ -2671,6 +2676,120 @@ def test_prediction_reminder_endpoint_publishes_one_rich_message(
     assert button.text == "Сделать прогноз"
     assert button.url is not None
     assert button.url.startswith("https://t.me/ZhpchshtsPredictorBot?startapp=")
+
+
+def test_intermediate_leaderboard_endpoint_is_authorized_and_idempotent(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(create_app())
+    contest = create_tma_contest(client, idempotency_key="leaderboard-contest")
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="leaderboard-match"),
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Франция",
+            away_team_name="Испания",
+            starts_at_utc="2030-01-02T18:00:00Z",
+        ),
+    )
+    assert match_response.status_code == 201
+    match = match_response.json()["match"]
+    save_match_prediction(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=int(contest["id"]),
+        match_id=int(match["id"]),
+        telegram_user_id=123,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        predicted_home_score=2,
+        predicted_away_score=1,
+        predicted_advancing_team_id=int(match["home_team_id"]),
+        now_utc=datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    save_match_result(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=int(contest["id"]),
+        match_id=int(match["id"]),
+        telegram_user_id=123,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        home_score=2,
+        away_score=1,
+        advancing_team_id=int(match["home_team_id"]),
+        audit_actor=TEST_AUDIT_ACTOR,
+        now_utc=datetime(2030, 1, 3, 12, 0, tzinfo=timezone.utc),
+    )
+
+    url = f"/api/tma/contests/{contest['id']}/leaderboard-publications"
+    first = client.post(
+        url,
+        headers=build_tma_headers(idempotency_key="leaderboard-request"),
+    )
+    replay = client.post(
+        url,
+        headers=build_tma_headers(idempotency_key="leaderboard-request"),
+    )
+
+    assert first.status_code == 202
+    assert first.json()["queued"] is True
+    assert first.json()["was_created"] is True
+    assert replay.status_code == 202
+    assert replay.json() == {
+        **first.json(),
+        "was_created": False,
+    }
+    with create_connection(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM leaderboard_publication_snapshots"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            connection.execute(
+                """
+            SELECT COUNT(*) FROM contest_publications
+            WHERE publication_type = 'leaderboard_snapshot'
+            """
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_participant_cannot_publish_intermediate_leaderboard(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(
+        create_app_with_telegram_client(FakeTelegramAdministratorsClient())
+    )
+
+    response = client.post(
+        "/api/tma/contests/1/leaderboard-publications",
+        headers=build_tma_headers(idempotency_key="participant-request"),
+    )
+
+    assert response.status_code == 403
+    with create_connection(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM leaderboard_publication_snapshots"
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_get_contest_returns_not_found_for_contest_from_other_chat(

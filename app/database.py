@@ -381,6 +381,17 @@ CREATE TABLE IF NOT EXISTS match_prediction_publication_messages (
     PRIMARY KEY (match_id, part_number)
 );
 
+CREATE TABLE IF NOT EXISTS leaderboard_publication_snapshots (
+    id INTEGER PRIMARY KEY,
+    contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+    actor_user_id INTEGER NOT NULL REFERENCES users(id),
+    idempotency_key TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (contest_id, actor_user_id, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS event_log (
     id INTEGER PRIMARY KEY,
     contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
@@ -402,6 +413,7 @@ CREATE TABLE IF NOT EXISTS contest_publications (
             'champion_result',
             'swiss_predictions',
             'swiss_result',
+            'leaderboard_snapshot',
             'contest_completed'
         )
     ),

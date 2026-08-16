@@ -28,6 +28,10 @@ from app.contest_service import (
     save_match_result,
 )
 from app.database import database_connection, initialize_database
+from app.leaderboard_publications import (
+    IntermediateLeaderboardUnavailableError,
+    queue_intermediate_leaderboard_publication,
+)
 from app.contest_publications import render_publication_messages
 from app.publication_delivery import TemporaryDeliveryError, deliver_publication
 from app.publication_outbox import (
@@ -114,6 +118,138 @@ class FailingBot(RecordingBot):
         if self.send_attempts == self.fail_on_send:
             raise RuntimeError("Telegram is temporarily unavailable.")
         return await super().send_rich_message(chat_id, rich_message=rich_message)
+
+
+def test_manual_intermediate_leaderboard_is_idempotent_and_ignores_master_switch(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, match = _create_contest_and_match(database_path)
+    save_match_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        match_id=match.id,
+        telegram_user_id=USER_ID,
+        first_name="Анна <&>",
+        last_name="Иванова",
+        username="anna",
+        predicted_home_score=2,
+        predicted_away_score=1,
+        predicted_advancing_team_id=match.home_team_id,
+        now_utc=_datetime(10),
+    )
+    _save_result(database_path, contest_id=contest_id, match=match)
+    _enable_publications(database_path, contest_id=contest_id)
+
+    first = queue_intermediate_leaderboard_publication(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна <&>",
+        last_name="Иванова",
+        username="anna",
+        idempotency_key="same-request",
+        audit_actor=AUDIT_ACTOR,
+        now_utc=_datetime(13),
+    )
+    replay = queue_intermediate_leaderboard_publication(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна <&>",
+        last_name="Иванова",
+        username="anna",
+        idempotency_key="same-request",
+        audit_actor=AUDIT_ACTOR,
+        now_utc=_datetime(14),
+    )
+    assert first.was_created is True
+    assert replay == type(replay)(request_id=first.request_id, was_created=False)
+
+    _disable_publications(database_path, contest_id=contest_id)
+    _save_result(
+        database_path,
+        contest_id=contest_id,
+        match=match,
+        home_score=3,
+        away_score=1,
+    )
+    second = queue_intermediate_leaderboard_publication(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=USER_ID,
+        first_name="Анна <&>",
+        last_name="Иванова",
+        username="anna",
+        idempotency_key="second-request",
+        audit_actor=AUDIT_ACTOR,
+        now_utc=_datetime(15),
+    )
+    assert second.was_created is True
+    assert second.request_id != first.request_id
+
+    with database_connection(database_path) as connection:
+        publication = connection.execute(
+            """
+            SELECT desired_revision, settled_revision, delivery_status
+            FROM contest_publications
+            WHERE publication_type = 'leaderboard_snapshot' AND entity_id = ?
+            """,
+            (first.request_id,),
+        ).fetchone()
+        audit_count = connection.execute(
+            """
+            SELECT COUNT(*) FROM audit_events
+            WHERE event_type = 'intermediate_leaderboard_publication_requested'
+            """
+        ).fetchone()[0]
+    assert tuple(publication) == (1, 0, "pending")
+    assert audit_count == 2
+
+    bot = RecordingBot()
+    assert (
+        asyncio.run(
+            process_due_contest_publications(bot=bot, database_path=database_path)
+        )
+        == 2
+    )
+    assert len(bot.sent) == 2
+    first_text = str(bot.sent[0]["text"])
+    second_text = str(bot.sent[1]["text"])
+    assert "Промежуточный рейтинг" in first_text
+    assert "По состоянию на 11.06.2026, 13:00 UTC" in first_text
+    assert "Анна &lt;&amp;&gt; Иванова" in first_text
+    assert "<b>4</b>" in first_text
+    assert "По состоянию на 11.06.2026, 15:00 UTC" in second_text
+    assert "<b>2</b>" in second_text
+
+
+def test_intermediate_leaderboard_requires_a_calculated_prediction(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    contest_id, _match = _create_contest_and_match(database_path)
+
+    with pytest.raises(
+        IntermediateLeaderboardUnavailableError,
+        match="после расчёта первого прогноза",
+    ):
+        queue_intermediate_leaderboard_publication(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=USER_ID,
+            first_name="Анна",
+            last_name="Иванова",
+            username="anna",
+            idempotency_key="before-results",
+            audit_actor=AUDIT_ACTOR,
+            now_utc=_datetime(10),
+        )
 
 
 def test_current_publication_schema_is_idempotent_and_empty(tmp_path: Path) -> None:

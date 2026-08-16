@@ -16,6 +16,7 @@ PublicationType = Literal[
     "champion_result",
     "swiss_predictions",
     "swiss_result",
+    "leaderboard_snapshot",
     "contest_completed",
 ]
 PublicationAction = Literal["publish", "withdraw"]
@@ -122,6 +123,48 @@ def create_publication_if_enabled(
         ),
     )
     return insertion.rowcount == 1
+
+
+def create_manual_leaderboard_publication(
+    connection: sqlite3.Connection,
+    *,
+    contest_id: int,
+    snapshot_id: int,
+    event_id: int,
+    now_utc: datetime | None = None,
+) -> None:
+    now_value = serialize_service_time(resolve_service_time(now_utc))
+    insertion = connection.execute(
+        """
+        INSERT INTO contest_publications (
+            contest_id,
+            publication_type,
+            entity_id,
+            desired_revision,
+            settled_revision,
+            desired_action,
+            delivery_status,
+            first_event_id,
+            latest_event_id,
+            next_attempt_at,
+            created_at,
+            updated_at
+        )
+        VALUES (?, 'leaderboard_snapshot', ?, 1, 0, 'publish', 'pending',
+                ?, ?, ?, ?, ?)
+        """,
+        (
+            contest_id,
+            snapshot_id,
+            event_id,
+            event_id,
+            now_value,
+            now_value,
+            now_value,
+        ),
+    )
+    if insertion.rowcount != 1:
+        raise RuntimeError("Could not queue the leaderboard publication.")
 
 
 def revise_existing_publication(
@@ -516,6 +559,7 @@ def transition_contest_publications_for_master_switch(
             last_error = NULL,
             updated_at = ?
         WHERE contest_id = ?
+          AND publication_type <> 'leaderboard_snapshot'
         """,
         (event_id, now_value, contest_id),
     )
@@ -673,7 +717,10 @@ def claim_next_publication(
                   AND EXISTS (
                       SELECT 1 FROM contests AS enabled_contest
                       WHERE enabled_contest.id = publication.contest_id
-                        AND enabled_contest.match_prediction_publication_enabled = 1
+                        AND (
+                            publication.publication_type = 'leaderboard_snapshot'
+                            OR enabled_contest.match_prediction_publication_enabled = 1
+                        )
                   )
                   AND (
                       publication.claim_token IS NULL
@@ -695,6 +742,15 @@ def claim_next_publication(
                             OR (
                                 earlier.reconcile_at IS NOT NULL
                                 AND earlier.reconcile_at <= ?
+                            )
+                        )
+                        AND (
+                            earlier.publication_type = 'leaderboard_snapshot'
+                            OR EXISTS (
+                                SELECT 1
+                                FROM contests AS earlier_enabled_contest
+                                WHERE earlier_enabled_contest.id = earlier.contest_id
+                                  AND earlier_enabled_contest.match_prediction_publication_enabled = 1
                             )
                         )
                         AND NOT (
@@ -772,7 +828,10 @@ def claim_next_publication(
                   AND EXISTS (
                       SELECT 1 FROM contests
                       WHERE id = contest_publications.contest_id
-                        AND match_prediction_publication_enabled = 1
+                        AND (
+                            contest_publications.publication_type = 'leaderboard_snapshot'
+                            OR match_prediction_publication_enabled = 1
+                        )
                   )
                   AND (
                       claim_token IS NULL
@@ -991,7 +1050,10 @@ def renew_current_claim(
               AND EXISTS (
                   SELECT 1 FROM contests
                   WHERE id = ?
-                    AND match_prediction_publication_enabled = 1
+                    AND (
+                        contest_publications.publication_type = 'leaderboard_snapshot'
+                        OR match_prediction_publication_enabled = 1
+                    )
               )
             """,
             (
@@ -1210,6 +1272,7 @@ def _inspect_claim_state(
             publication.desired_revision,
             publication.desired_action,
             publication.entity_id,
+            publication.publication_type,
             contests.match_prediction_publication_enabled
                 AS publication_enabled
         FROM contest_publications AS publication
@@ -1224,7 +1287,9 @@ def _inspect_claim_state(
     desired_revision = int(row["desired_revision"])
     desired_action = str(row["desired_action"])
     entity_id = int(row["entity_id"])
-    publication_enabled = bool(row["publication_enabled"])
+    publication_enabled = str(
+        row["publication_type"]
+    ) == "leaderboard_snapshot" or bool(row["publication_enabled"])
     status: PublicationClaimStatus = (
         "current"
         if (

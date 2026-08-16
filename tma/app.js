@@ -15,6 +15,7 @@ const CONTEST_TABS = [
 const CONTEST_MANAGEMENT_TABS = [
   { id: "matches", label: "Матчи" },
   { id: "settings", label: "Настройки" },
+  { id: "publications", label: "Публикации" },
 ];
 const AUDIT_EVENT_PRESENTATIONS = Object.freeze({
   chat_settings_updated: Object.freeze({
@@ -80,6 +81,10 @@ const AUDIT_EVENT_PRESENTATIONS = Object.freeze({
   swiss_stage_result_changed: Object.freeze({
     label: "Исправлены итоги швейцарского этапа",
     group: "Швейцарский этап",
+  }),
+  intermediate_leaderboard_publication_requested: Object.freeze({
+    label: "Запрошена публикация промежуточного рейтинга",
+    group: "Конкурсы",
   }),
   supermoderator_assigned: Object.freeze({
     label: "Назначен супермодератор",
@@ -4162,6 +4167,88 @@ function createPredictionReminderPublicationSection(contest) {
   return section;
 }
 
+function createIntermediateLeaderboardPublicationSection(contest) {
+  const section = createElement("div", {
+    className: "form-fields intermediate-leaderboard-publication-section",
+  });
+  const hasCalculatedPredictions = (
+    Array.isArray(contest?.leaderboard)
+    && contest.leaderboard.some(
+      (entry) => Number(entry?.calculated_predictions_count) > 0,
+    )
+  );
+  const hint = createElement("p", {
+    className: "form-hint",
+    text: hasCalculatedPredictions
+      ? (
+        "Бот отправит текущие места и очки участников. "
+        + "Каждая публикация останется отдельным снимком рейтинга."
+      )
+      : "Публикация станет доступна после расчёта первого прогноза.",
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const publishButton = createActionButton(
+    "Опубликовать промежуточный рейтинг",
+    "secondary-action-button",
+  );
+  let idempotencyKey = null;
+
+  publishButton.disabled = !hasCalculatedPredictions;
+  publishButton.addEventListener("click", async () => {
+    idempotencyKey = idempotencyKey
+      || createIdempotencyKey("leaderboard-publication");
+    publishButton.disabled = true;
+    publishButton.textContent = "Ставим в очередь…";
+    setFormMessage(message, "");
+
+    try {
+      const result = await apiRequest(
+        `/api/tma/contests/${contest.id}/leaderboard-publications`,
+        {
+          method: "POST",
+          headers: {
+            [IDEMPOTENCY_KEY_HEADER]: idempotencyKey,
+          },
+        },
+      );
+      if (result?.queued !== true) {
+        throw new Error(
+          "Сервер вернул некорректный ответ при публикации рейтинга.",
+        );
+      }
+      idempotencyKey = null;
+      setFormMessage(
+        message,
+        "Промежуточный рейтинг поставлен в очередь публикации.",
+        "success",
+      );
+    } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
+      setFormMessage(
+        message,
+        error instanceof Error
+          ? error.message
+          : "Не удалось поставить рейтинг в очередь публикации.",
+        "error",
+      );
+    } finally {
+      publishButton.disabled = !hasCalculatedPredictions;
+      publishButton.textContent = "Опубликовать промежуточный рейтинг";
+    }
+  });
+
+  actions.append(publishButton);
+  section.append(hint, message, actions);
+  return section;
+}
+
 function createMatchPredictionPublicationAdministrationCard(contest, onUpdated) {
   const publication = getMatchPredictionPublication(contest);
   const item = createElement("li", {
@@ -4188,6 +4275,7 @@ function createMatchPredictionPublicationAdministrationCard(contest, onUpdated) 
         : "Публикация прогнозов при начале матча выключена.",
     }),
     createPredictionReminderPublicationSection(contest),
+    createIntermediateLeaderboardPublicationSection(contest),
     createMatchPredictionPublicationSettingsDisclosure(
       contest,
       publication,
@@ -5109,7 +5197,30 @@ function createContestPredictionSettingsCard(contest, state, onUpdated) {
     className: "info-card contest-prediction-settings-card",
   });
   const heading = createElement("h2", {
-    text: "Прогнозы и публикации",
+    text: "Прогнозы",
+  });
+  const list = createElement("ol", {
+    className: "match-list",
+  });
+
+  list.append(
+    createChampionAdministrationCard(contest, state, onUpdated),
+    createSwissStageAdministrationCard(contest, onUpdated),
+  );
+  card.append(heading, list);
+  return card;
+}
+
+function createContestPublicationsCard(contest, onUpdated) {
+  const card = createElement("section", {
+    className: "info-card contest-publications-card",
+  });
+  const heading = createElement("h2", {
+    text: "Публикации",
+  });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: "Автоматические и ручные сообщения этого конкурса в Telegram-чате.",
   });
   const list = createElement("ol", {
     className: "match-list",
@@ -5117,10 +5228,8 @@ function createContestPredictionSettingsCard(contest, state, onUpdated) {
 
   list.append(
     createMatchPredictionPublicationAdministrationCard(contest, onUpdated),
-    createChampionAdministrationCard(contest, state, onUpdated),
-    createSwissStageAdministrationCard(contest, onUpdated),
   );
-  card.append(heading, list);
+  card.append(heading, description, list);
   return card;
 }
 
@@ -5707,6 +5816,21 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
         createContestDeletionCard(bootstrap, contest, managementState),
       );
     }
+  } else if (activeTab === "publications") {
+    if (!isActive) {
+      cards.push(
+        createInfoCard(
+          "Публикации",
+          ["Конкурс завершён. Управление публикациями недоступно."],
+        ),
+      );
+    } else {
+      cards.push(
+        createContestPublicationsCard(contest, () => {
+          void openContest(bootstrap, contest.id, managementState);
+        }),
+      );
+    }
   } else {
     if (isActive) {
       cards.push(createMatchFormCard(bootstrap, contest, managementState));
@@ -6103,6 +6227,10 @@ function buildAuditSummaryLines(event) {
       return [
         "Исправлены фактические итоги швейцарского этапа.",
         formatAuditSwissStageResult(after.actual_result, event),
+      ];
+    case "intermediate_leaderboard_publication_requested":
+      return [
+        `Запрошена публикация промежуточного рейтинга конкурса «${entityName}».`,
       ];
     case "supermoderator_assigned":
       return [`Пользователю ${entityName} назначена роль супермодератора.`];
