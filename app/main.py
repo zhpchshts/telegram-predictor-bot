@@ -26,6 +26,7 @@ from app.telegram_username_resolver import (
     TelethonTelegramUsernameResolver,
     UnavailableTelegramUsernameResolver,
 )
+from app.ti2026_schedule_sync import run_ti2026_schedule_sync_worker
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TMA_DIRECTORY = PROJECT_ROOT / "tma"
@@ -35,6 +36,7 @@ EXPECTED_BACKGROUND_TASK_NAMES = (
     "match-prediction-publications",
     "contest-publications",
     "match-lifecycle",
+    "ti2026-schedule-sync",
 )
 
 
@@ -163,6 +165,10 @@ def create_app() -> FastAPI:
             run_match_lifecycle_worker(database_path=settings.database_path),
             name="match-lifecycle",
         )
+        ti2026_schedule_sync_task = asyncio.create_task(
+            run_ti2026_schedule_sync_worker(database_path=settings.database_path),
+            name="ti2026-schedule-sync",
+        )
         healthcheck_notification_task = (
             asyncio.create_task(
                 run_healthcheck_notification_worker(
@@ -181,6 +187,7 @@ def create_app() -> FastAPI:
             publication_task,
             contest_publication_task,
             match_lifecycle_task,
+            ti2026_schedule_sync_task,
             *(
                 (healthcheck_notification_task,)
                 if healthcheck_notification_task is not None

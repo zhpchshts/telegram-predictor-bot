@@ -278,6 +278,20 @@ CREATE TABLE IF NOT EXISTS shared_matches (
 CREATE INDEX IF NOT EXISTS idx_shared_matches_tournament_start
     ON shared_matches(shared_tournament_id, starts_at_utc, id);
 
+CREATE TABLE IF NOT EXISTS shared_match_external_links (
+    shared_match_id INTEGER PRIMARY KEY
+        REFERENCES shared_matches(id) ON DELETE CASCADE,
+    shared_tournament_id INTEGER NOT NULL
+        REFERENCES shared_tournaments(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    external_event_id TEXT NOT NULL,
+    external_match_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (
+        shared_tournament_id, source, external_event_id, external_match_id
+    )
+);
+
 CREATE TABLE IF NOT EXISTS contest_shared_tournaments (
     contest_id INTEGER PRIMARY KEY
         REFERENCES contests(id) ON DELETE CASCADE,

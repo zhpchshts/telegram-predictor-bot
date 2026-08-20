@@ -86,6 +86,7 @@ def test_health_reports_missing_database_and_stopped_task(tmp_path: Path) -> Non
                 "match-prediction-publications": "ok",
                 "contest-publications": "ok",
                 "match-lifecycle": "ok",
+                "ti2026-schedule-sync": "ok",
             },
         },
     }
@@ -251,6 +252,9 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
     async def match_lifecycle_worker(**_kwargs) -> None:
         await background_task("match-lifecycle")
 
+    async def ti2026_schedule_sync_worker(**_kwargs) -> None:
+        await background_task("ti2026-schedule-sync")
+
     async def healthcheck_notification_worker(**_kwargs) -> None:
         await background_task("telegram-healthcheck")
 
@@ -296,6 +300,11 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
     )
     monkeypatch.setattr(
         main,
+        "run_ti2026_schedule_sync_worker",
+        ti2026_schedule_sync_worker,
+    )
+    monkeypatch.setattr(
+        main,
         "run_healthcheck_notification_worker",
         healthcheck_notification_worker,
     )
@@ -318,6 +327,7 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         "match-publication",
         "contest-publication",
         "match-lifecycle",
+        "ti2026-schedule-sync",
         "telegram-healthcheck",
     }
     assert set(cancelled) == set(started)

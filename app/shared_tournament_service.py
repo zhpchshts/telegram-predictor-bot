@@ -394,6 +394,7 @@ def create_shared_match(
     best_of: int | None,
     actor_telegram_user_id: int,
     now_utc: datetime | None = None,
+    allow_duplicate_pair: bool = False,
 ) -> SharedMatch:
     normalized_start = _normalize_datetime(starts_at_utc)
     resolved_now = _resolve_now(now_utc)
@@ -439,7 +440,7 @@ def create_shared_match(
                 home_team_id,
             ),
         ).fetchone()
-        if duplicate is not None:
+        if duplicate is not None and not allow_duplicate_pair:
             raise SharedMatchConflictError(
                 "Матч между этими командами уже существует в общем турнире."
             )
@@ -627,6 +628,7 @@ def save_shared_match_result(
     actor_last_name: str | None,
     actor_username: str | None,
     now_utc: datetime | None = None,
+    trusted_result_source: str | None = None,
 ) -> SharedMatch:
     normalized_home_score = _normalize_score(home_score)
     normalized_away_score = _normalize_score(away_score)
@@ -649,6 +651,7 @@ def save_shared_match_result(
         if (
             str(match_row["status"]) != "finished"
             and _parse_datetime(str(match_row["starts_at_utc"])) > resolved_now
+            and trusted_result_source is None
         ):
             raise SharedMatchResultUnavailableError(
                 "Результат можно внести только после начала матча."
@@ -744,6 +747,11 @@ def save_shared_match_result(
                     json.dumps(
                         {
                             "shared_match_id": shared_match_id,
+                            **(
+                                {"result_source": trusted_result_source}
+                                if trusted_result_source is not None
+                                else {}
+                            ),
                             "result": {
                                 "home_score": normalized_home_score,
                                 "away_score": normalized_away_score,
@@ -784,7 +792,14 @@ def save_shared_match_result(
             ),
             before_state=before_state,
             after_state=_shared_match_snapshot(updated_row),
-            metadata={"linked_contest_count": len(link_rows)},
+            metadata={
+                "linked_contest_count": len(link_rows),
+                **(
+                    {"result_source": trusted_result_source}
+                    if trusted_result_source is not None
+                    else {}
+                ),
+            },
         )
         return _shared_match_from_row(
             _get_shared_match_details_row(
