@@ -24,6 +24,7 @@ def _settings(database_path: Path) -> Settings:
         telegram_mtproto_session_path=database_path.parent / "telegram-mtproto",
         healthcheck_chat_id=None,
         healthcheck_interval_minutes=360,
+        shared_tournament_admin_ids=frozenset(),
     )
 
 

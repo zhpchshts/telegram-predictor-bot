@@ -46,6 +46,7 @@ from app.contest_service import (
     SwissStagePredictionSettingsLockedError,
     SwissStageResultUnavailableError,
     TournamentTeamsLockedError,
+    SharedTournamentManagedError,
     complete_contest,
     create_match,
     create_the_international_2026_contest,
@@ -66,6 +67,29 @@ from app.contest_service import (
     save_swiss_stage_result,
     save_tournament_teams,
     update_match_start,
+)
+from app.shared_tournament_service import (
+    SharedMatchConflictError,
+    SharedMatchNotFoundError,
+    SharedMatchResultUnavailableError,
+    SharedMatchUpdateUnavailableError,
+    SharedTournamentConflictError,
+    SharedTournamentLockedError,
+    SharedTournamentNotFoundError,
+    SharedTournamentResultUnavailableError,
+    SharedTournamentSettingsLockedError,
+    create_shared_match,
+    create_shared_tournament,
+    delete_shared_match,
+    get_shared_tournament_details,
+    list_shared_tournaments,
+    save_shared_match_result,
+    save_shared_champion_result,
+    save_shared_champion_settings,
+    save_shared_swiss_result,
+    save_shared_swiss_settings,
+    save_shared_tournament_teams,
+    update_shared_match_start,
 )
 from app.tma_context import TmaContext, TmaContextError, build_tma_context
 from app.tma_entrypoint import create_tma_launch_keyboard
@@ -153,6 +177,7 @@ class CreateContestRequest(BaseModel):
         "world_cup_2026",
         "the_international_2026",
     ] = "world_cup_2026"
+    shared_tournament_id: SqliteInteger | None = None
 
 
 class CreateMatchRequest(BaseModel):
@@ -230,6 +255,61 @@ class SaveChatSettingsRequest(BaseModel):
     app_button_text: str
 
 
+class CreateSharedTournamentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    template_key: Literal["world_cup_2026", "the_international_2026"]
+
+
+class SaveSharedTournamentTeamsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    team_names: list[str]
+    expected_version: SqliteInteger
+
+
+class SaveSharedChampionSettingsRequest(SaveChampionPredictionSettingsRequest):
+    expected_version: SqliteInteger
+
+
+class SaveSharedChampionResultRequest(SaveContestChampionRequest):
+    expected_version: SqliteInteger
+
+
+class SaveSharedSwissSettingsRequest(SaveSwissStagePredictionSettingsRequest):
+    expected_version: SqliteInteger
+
+
+class SaveSharedSwissResultRequest(SaveSwissStageSelectionRequest):
+    expected_version: SqliteInteger
+
+
+class CreateSharedMatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    home_team_id: SqliteInteger
+    away_team_id: SqliteInteger
+    starts_at_utc: str
+    best_of: Literal[3, 5] | None = None
+
+
+class UpdateSharedMatchStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    starts_at_utc: str
+    expected_version: SqliteInteger
+
+
+class SaveSharedMatchResultRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    home_score: SqliteInteger
+    away_score: SqliteInteger
+    advancing_team_id: SqliteInteger | None = None
+    expected_version: SqliteInteger
+
+
 class TelegramUserIdInvalidError(ValueError):
     pass
 
@@ -254,6 +334,15 @@ class ContestManagementContext:
     @property
     def chat(self):
         return self.context.chat
+
+
+@dataclass(frozen=True, slots=True)
+class SharedTournamentManagementContext:
+    context: TmaContext
+
+    @property
+    def user(self):
+        return self.context.user
 
 
 def get_telegram_administrators_client(
@@ -326,6 +415,25 @@ async def _authorize_contest_management(
             "Управлять конкурсами могут только администраторы чата и супермодераторы."
         ),
     )
+
+
+async def _authorize_shared_tournament_management(
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> SharedTournamentManagementContext:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+    if context.user.telegram_user_id not in settings.shared_tournament_admin_ids:
+        raise _application_http_error(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="shared_tournament_management_forbidden",
+            message="Управление общими турнирами недоступно.",
+        )
+    return SharedTournamentManagementContext(context=context)
 
 
 async def _authorize_role_management(
@@ -419,6 +527,9 @@ async def get_tma_bootstrap(
         "context": _serialize_context(context),
         "access": _serialize_access(access),
         "can_access_management": access.can_manage_contests,
+        "can_manage_shared_tournaments": (
+            context.user.telegram_user_id in settings.shared_tournament_admin_ids
+        ),
         "active_contests": [
             _serialize_active_contest(contest) for contest in active_contests
         ],
@@ -475,7 +586,17 @@ async def get_tma_management_contests(
             "can_manage_roles": management.access.can_manage_roles,
             "can_read_audit": management.access.can_manage_contests,
             "can_manage_chat_settings": management.access.can_manage_contests,
+            "can_manage_shared_tournaments": (
+                management.user.telegram_user_id in settings.shared_tournament_admin_ids
+            ),
         },
+        "shared_tournaments": [
+            _serialize_shared_tournament_summary(tournament)
+            for tournament in list_shared_tournaments(
+                database_path=settings.database_path
+            )
+            if not tournament.is_archived
+        ],
         "chat_settings": {
             "app_button_text": chat_settings.app_button_text,
         },
@@ -837,13 +958,19 @@ async def create_tma_contest(
             contest_name=payload.name,
             idempotency_key=idempotency_key,
             audit_actor=_audit_actor(context.context, context.access),
+            shared_tournament_id=payload.shared_tournament_id,
         )
-    except ContestCreationConflictError as error:
+    except (ContestCreationConflictError, SharedTournamentConflictError) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
         ) from error
-    except ValueError as error:
+    except SharedTournamentNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (ValueError, SharedTournamentLockedError) as error:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(error),
@@ -859,6 +986,409 @@ async def create_tma_contest(
             "was_created": result.was_created,
         },
     )
+
+
+@router.get("/shared-tournaments")
+async def get_tma_shared_tournaments(
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    _ = management
+    settings = load_settings()
+    return {
+        "shared_tournaments": [
+            _serialize_shared_tournament_summary(tournament)
+            for tournament in list_shared_tournaments(
+                database_path=settings.database_path
+            )
+        ]
+    }
+
+
+@router.post("/shared-tournaments", status_code=status.HTTP_201_CREATED)
+async def create_tma_shared_tournament(
+    payload: CreateSharedTournamentRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        details = create_shared_tournament(
+            database_path=settings.database_path,
+            name=payload.name,
+            template_key=payload.template_key,
+            actor_telegram_user_id=management.user.telegram_user_id,
+        )
+    except SharedTournamentConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
+    return {"shared_tournament": _serialize_shared_tournament_details(details)}
+
+
+@router.get("/shared-tournaments/{shared_tournament_id}")
+async def get_tma_shared_tournament(
+    shared_tournament_id: SqliteInteger,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    _ = management
+    settings = load_settings()
+    try:
+        details = get_shared_tournament_details(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+        )
+    except SharedTournamentNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from error
+    return {"shared_tournament": _serialize_shared_tournament_details(details)}
+
+
+@router.put("/shared-tournaments/{shared_tournament_id}/teams")
+async def save_tma_shared_tournament_teams(
+    shared_tournament_id: SqliteInteger,
+    payload: SaveSharedTournamentTeamsRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        details = save_shared_tournament_teams(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            team_names=payload.team_names,
+            expected_version=payload.expected_version,
+            actor_telegram_user_id=management.user.telegram_user_id,
+        )
+    except SharedTournamentNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from error
+    except (SharedTournamentConflictError, SharedTournamentLockedError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
+    return {"shared_tournament": _serialize_shared_tournament_details(details)}
+
+
+@router.put("/shared-tournaments/{shared_tournament_id}/champion-prediction/settings")
+async def save_tma_shared_champion_settings(
+    shared_tournament_id: SqliteInteger,
+    payload: SaveSharedChampionSettingsRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        details = save_shared_champion_settings(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            enabled=payload.enabled,
+            deadline_at=payload.deadline_at,
+            points=payload.points,
+            expected_version=payload.expected_version,
+            actor_telegram_user_id=management.user.telegram_user_id,
+            actor_first_name=management.user.first_name,
+            actor_last_name=management.user.last_name,
+            actor_username=management.user.username,
+        )
+    except SharedTournamentNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (
+        SharedTournamentConflictError,
+        SharedTournamentLockedError,
+        SharedTournamentSettingsLockedError,
+    ) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"shared_tournament": _serialize_shared_tournament_details(details)}
+
+
+@router.put("/shared-tournaments/{shared_tournament_id}/champion")
+async def save_tma_shared_champion_result(
+    shared_tournament_id: SqliteInteger,
+    payload: SaveSharedChampionResultRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        details = save_shared_champion_result(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            champion_team_id=payload.champion_team_id,
+            expected_version=payload.expected_version,
+            actor_telegram_user_id=management.user.telegram_user_id,
+            actor_first_name=management.user.first_name,
+            actor_last_name=management.user.last_name,
+            actor_username=management.user.username,
+        )
+    except SharedTournamentNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (
+        SharedTournamentConflictError,
+        SharedTournamentLockedError,
+        SharedTournamentResultUnavailableError,
+    ) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"shared_tournament": _serialize_shared_tournament_details(details)}
+
+
+@router.put("/shared-tournaments/{shared_tournament_id}/swiss-stage/settings")
+async def save_tma_shared_swiss_settings(
+    shared_tournament_id: SqliteInteger,
+    payload: SaveSharedSwissSettingsRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        details = save_shared_swiss_settings(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            enabled=payload.enabled,
+            deadline_at=payload.deadline_at,
+            direct_qualifier_count=payload.direct_qualifier_count,
+            elimination_qualifier_count=payload.elimination_qualifier_count,
+            expected_version=payload.expected_version,
+            actor_telegram_user_id=management.user.telegram_user_id,
+            actor_first_name=management.user.first_name,
+            actor_last_name=management.user.last_name,
+            actor_username=management.user.username,
+        )
+    except SharedTournamentNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (
+        SharedTournamentConflictError,
+        SharedTournamentLockedError,
+        SharedTournamentSettingsLockedError,
+    ) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"shared_tournament": _serialize_shared_tournament_details(details)}
+
+
+@router.put("/shared-tournaments/{shared_tournament_id}/swiss-stage/result")
+async def save_tma_shared_swiss_result(
+    shared_tournament_id: SqliteInteger,
+    payload: SaveSharedSwissResultRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        details = save_shared_swiss_result(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            direct_team_ids=payload.direct_team_ids,
+            elimination_team_ids=payload.elimination_team_ids,
+            expected_version=payload.expected_version,
+            actor_telegram_user_id=management.user.telegram_user_id,
+            actor_first_name=management.user.first_name,
+            actor_last_name=management.user.last_name,
+            actor_username=management.user.username,
+        )
+    except SharedTournamentNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (
+        SharedTournamentConflictError,
+        SharedTournamentLockedError,
+        SharedTournamentResultUnavailableError,
+    ) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"shared_tournament": _serialize_shared_tournament_details(details)}
+
+
+@router.post(
+    "/shared-tournaments/{shared_tournament_id}/matches",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_tma_shared_match(
+    shared_tournament_id: SqliteInteger,
+    payload: CreateSharedMatchRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        match = create_shared_match(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            home_team_id=payload.home_team_id,
+            away_team_id=payload.away_team_id,
+            starts_at_utc=payload.starts_at_utc,
+            best_of=payload.best_of,
+            actor_telegram_user_id=management.user.telegram_user_id,
+        )
+    except (SharedTournamentNotFoundError, SharedMatchNotFoundError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from error
+    except (SharedTournamentLockedError, SharedMatchConflictError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
+    return {"match": _serialize_shared_match(match)}
+
+
+@router.put("/shared-tournaments/{shared_tournament_id}/matches/{shared_match_id}")
+async def update_tma_shared_match_start(
+    shared_tournament_id: SqliteInteger,
+    shared_match_id: SqliteInteger,
+    payload: UpdateSharedMatchStartRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        match = update_shared_match_start(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            shared_match_id=shared_match_id,
+            starts_at_utc=payload.starts_at_utc,
+            expected_version=payload.expected_version,
+            actor_telegram_user_id=management.user.telegram_user_id,
+        )
+    except (SharedTournamentNotFoundError, SharedMatchNotFoundError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from error
+    except (
+        SharedTournamentLockedError,
+        SharedMatchConflictError,
+        SharedMatchUpdateUnavailableError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
+    return {"match": _serialize_shared_match(match)}
+
+
+@router.put(
+    "/shared-tournaments/{shared_tournament_id}/matches/{shared_match_id}/result"
+)
+async def save_tma_shared_match_result(
+    shared_tournament_id: SqliteInteger,
+    shared_match_id: SqliteInteger,
+    payload: SaveSharedMatchResultRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        match = save_shared_match_result(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            shared_match_id=shared_match_id,
+            home_score=payload.home_score,
+            away_score=payload.away_score,
+            advancing_team_id=payload.advancing_team_id,
+            expected_version=payload.expected_version,
+            actor_telegram_user_id=management.user.telegram_user_id,
+            actor_first_name=management.user.first_name,
+            actor_last_name=management.user.last_name,
+            actor_username=management.user.username,
+        )
+    except (SharedTournamentNotFoundError, SharedMatchNotFoundError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from error
+    except (
+        SharedTournamentLockedError,
+        SharedMatchConflictError,
+        SharedMatchResultUnavailableError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
+    return {"match": _serialize_shared_match(match)}
+
+
+@router.delete("/shared-tournaments/{shared_tournament_id}/matches/{shared_match_id}")
+async def delete_tma_shared_match(
+    shared_tournament_id: SqliteInteger,
+    shared_match_id: SqliteInteger,
+    expected_version: Annotated[int, Query(gt=0, le=SQLITE_SIGNED_64_MAX)],
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        result = delete_shared_match(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            shared_match_id=shared_match_id,
+            expected_version=expected_version,
+            actor_telegram_user_id=management.user.telegram_user_id,
+            actor_first_name=management.user.first_name,
+            actor_last_name=management.user.last_name,
+            actor_username=management.user.username,
+        )
+    except (SharedTournamentNotFoundError, SharedMatchNotFoundError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from error
+    except (SharedTournamentLockedError, SharedMatchConflictError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from error
+    return {
+        "deleted": True,
+        "linked_contest_count": result.linked_contest_count,
+        "deleted_prediction_count": result.deleted_prediction_count,
+    }
 
 
 @router.delete(
@@ -896,7 +1426,7 @@ async def delete_tma_match(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except ContestCompletedError as error:
+    except (ContestCompletedError, SharedTournamentManagedError) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -933,7 +1463,11 @@ async def update_tma_match_start(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except (ContestCompletedError, MatchUpdateUnavailableError) as error:
+    except (
+        ContestCompletedError,
+        MatchUpdateUnavailableError,
+        SharedTournamentManagedError,
+    ) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -1080,7 +1614,11 @@ async def save_tma_tournament_teams(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except (ContestCompletedError, TournamentTeamsLockedError) as error:
+    except (
+        ContestCompletedError,
+        TournamentTeamsLockedError,
+        SharedTournamentManagedError,
+    ) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -1146,7 +1684,11 @@ async def create_tma_match(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except (ContestCompletedError, MatchCreationConflictError) as error:
+    except (
+        ContestCompletedError,
+        MatchCreationConflictError,
+        SharedTournamentManagedError,
+    ) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -1270,7 +1812,11 @@ async def save_tma_match_result(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except (ContestCompletedError, MatchResultUnavailableError) as error:
+    except (
+        ContestCompletedError,
+        MatchResultUnavailableError,
+        SharedTournamentManagedError,
+    ) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -1504,6 +2050,7 @@ async def save_tma_champion_prediction_settings(
     except (
         ChampionPredictionSettingsLockedError,
         ContestCompletedError,
+        SharedTournamentManagedError,
     ) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1560,6 +2107,7 @@ async def save_tma_swiss_stage_prediction_settings(
     except (
         ContestCompletedError,
         SwissStagePredictionSettingsLockedError,
+        SharedTournamentManagedError,
     ) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1672,6 +2220,7 @@ async def save_tma_swiss_stage_result(
     except (
         ContestCompletedError,
         SwissStageResultUnavailableError,
+        SharedTournamentManagedError,
     ) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1764,7 +2313,11 @@ async def save_tma_contest_champion(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except (ChampionUnavailableError, ContestCompletedError) as error:
+    except (
+        ChampionUnavailableError,
+        ContestCompletedError,
+        SharedTournamentManagedError,
+    ) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -1921,6 +2474,79 @@ def _serialize_active_contest(contest) -> dict[str, object]:
     }
 
 
+def _serialize_shared_tournament_summary(tournament) -> dict[str, object]:
+    return {
+        "id": tournament.id,
+        "name": tournament.name,
+        "template_key": tournament.template_key,
+        "is_archived": tournament.is_archived,
+        "version": tournament.version,
+        "linked_contest_count": tournament.linked_contest_count,
+        "match_count": tournament.match_count,
+    }
+
+
+def _serialize_shared_match(match) -> dict[str, object]:
+    return {
+        "id": match.id,
+        "home_team": {"id": match.home_team.id, "name": match.home_team.name},
+        "away_team": {"id": match.away_team.id, "name": match.away_team.name},
+        "starts_at_utc": match.starts_at_utc,
+        "best_of": match.best_of,
+        "status": match.status,
+        "result": (
+            {
+                "home_score": match.home_score,
+                "away_score": match.away_score,
+                "advancing_team_id": match.advancing_team_id,
+            }
+            if match.home_score is not None
+            else None
+        ),
+        "version": match.version,
+        "linked_contest_count": match.linked_contest_count,
+        "prediction_count": match.prediction_count,
+    }
+
+
+def _serialize_shared_tournament_details(details) -> dict[str, object]:
+    return {
+        **_serialize_shared_tournament_summary(details.tournament),
+        "teams": [{"id": team.id, "name": team.name} for team in details.teams],
+        "matches": [_serialize_shared_match(match) for match in details.matches],
+        "champion_prediction": {
+            "is_enabled": details.champion_prediction.is_enabled,
+            "deadline_at": details.champion_prediction.deadline_at,
+            "points": details.champion_prediction.points,
+            "actual_champion": (
+                {
+                    "id": details.champion_prediction.actual_champion.id,
+                    "name": details.champion_prediction.actual_champion.name,
+                }
+                if details.champion_prediction.actual_champion is not None
+                else None
+            ),
+        },
+        "swiss_stage_prediction": {
+            "is_enabled": details.swiss_stage_prediction.is_enabled,
+            "deadline_at": details.swiss_stage_prediction.deadline_at,
+            "direct_qualifier_count": (
+                details.swiss_stage_prediction.direct_qualifier_count
+            ),
+            "elimination_qualifier_count": (
+                details.swiss_stage_prediction.elimination_qualifier_count
+            ),
+            "direct_qualifier_team_ids": list(
+                details.swiss_stage_prediction.direct_qualifier_team_ids
+            ),
+            "elimination_qualifier_team_ids": list(
+                details.swiss_stage_prediction.elimination_qualifier_team_ids
+            ),
+            "settings_locked": details.swiss_stage_prediction.settings_locked,
+        },
+    }
+
+
 def _serialize_management_contest(
     contest,
     *,
@@ -1943,6 +2569,14 @@ def _serialize_contest_details(contest) -> dict[str, object]:
         "template_key": contest.template_key,
         "created_at": contest.created_at,
         "is_active": contest.is_active,
+        "shared_tournament": (
+            {
+                "id": contest.shared_tournament_id,
+                "name": contest.shared_tournament_name,
+            }
+            if contest.shared_tournament_id is not None
+            else None
+        ),
         "tournament_teams": _serialize_tournament_teams(contest.tournament_teams),
         "match_prediction_publication": _serialize_match_prediction_publication(
             contest.match_prediction_publication

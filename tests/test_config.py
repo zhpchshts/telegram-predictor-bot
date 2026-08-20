@@ -95,6 +95,24 @@ def test_healthcheck_notifications_parse_chat_and_interval(monkeypatch) -> None:
     assert settings.healthcheck_interval_minutes == 120
 
 
+def test_shared_tournament_admin_ids_are_optional_and_deduplicated(monkeypatch) -> None:
+    _set_required_environment(monkeypatch)
+    monkeypatch.setenv("SHARED_TOURNAMENT_ADMIN_IDS", "123, 456,123")
+
+    assert load_settings().shared_tournament_admin_ids == frozenset({123, 456})
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "123,,456"])
+def test_shared_tournament_admin_ids_reject_invalid_values(
+    monkeypatch, value: str
+) -> None:
+    _set_required_environment(monkeypatch)
+    monkeypatch.setenv("SHARED_TOURNAMENT_ADMIN_IDS", value)
+
+    with pytest.raises(RuntimeError, match="SHARED_TOURNAMENT_ADMIN_IDS"):
+        load_settings()
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

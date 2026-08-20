@@ -44,6 +44,7 @@ from app.tma_api import (
     TelegramUserIdInvalidError,
     _authorize_contest_management,
     _authorize_role_management,
+    _authorize_shared_tournament_management,
     _audit_actor,
     _parse_telegram_user_id_target,
     get_telegram_administrators_client,
@@ -782,6 +783,7 @@ def test_bootstrap_returns_verified_context_and_empty_active_contests(
             "enforcement_enabled": False,
         },
         "can_access_management": True,
+        "can_manage_shared_tournaments": False,
         "active_contests": [],
         "completed_contests": [],
     }
@@ -975,13 +977,20 @@ def test_management_contest_list_is_minimal_and_scoped_to_launch_chat(
 
     assert response.status_code == 200
     response_data = response.json()
-    assert set(response_data) == {"contests", "capabilities", "chat_settings"}
+    assert set(response_data) == {
+        "contests",
+        "capabilities",
+        "chat_settings",
+        "shared_tournaments",
+    }
     assert response_data["capabilities"] == {
         "can_create_contests": True,
         "can_manage_roles": True,
         "can_read_audit": True,
         "can_manage_chat_settings": True,
+        "can_manage_shared_tournaments": False,
     }
+    assert response_data["shared_tournaments"] == []
     assert response_data["chat_settings"] == {"app_button_text": "Открыть Клевер"}
     contests = response_data["contests"]
     assert contests == [
@@ -1746,6 +1755,48 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
             "/api/tma/access/supermoderators/{telegram_user_id}",
         ): "role_management",
         ("POST", "/api/tma/contests"): "contest_management",
+        ("GET", "/api/tma/shared-tournaments"): "shared_tournament_management",
+        ("POST", "/api/tma/shared-tournaments"): "shared_tournament_management",
+        (
+            "GET",
+            "/api/tma/shared-tournaments/{shared_tournament_id}",
+        ): "shared_tournament_management",
+        (
+            "PUT",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/teams",
+        ): "shared_tournament_management",
+        (
+            "PUT",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/champion-prediction/settings",
+        ): "shared_tournament_management",
+        (
+            "PUT",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/champion",
+        ): "shared_tournament_management",
+        (
+            "PUT",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/swiss-stage/settings",
+        ): "shared_tournament_management",
+        (
+            "PUT",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/swiss-stage/result",
+        ): "shared_tournament_management",
+        (
+            "POST",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/matches",
+        ): "shared_tournament_management",
+        (
+            "PUT",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/matches/{shared_match_id}",
+        ): "shared_tournament_management",
+        (
+            "PUT",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/matches/{shared_match_id}/result",
+        ): "shared_tournament_management",
+        (
+            "DELETE",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/matches/{shared_match_id}",
+        ): "shared_tournament_management",
         (
             "DELETE",
             "/api/tma/contests/{contest_id}/matches/{match_id}",
@@ -1833,6 +1884,138 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
         assert (_authorize_role_management in dependencies) is (
             category == "role_management"
         )
+        assert (_authorize_shared_tournament_management in dependencies) is (
+            category == "shared_tournament_management"
+        )
+
+
+def test_shared_tournament_routes_require_explicit_global_allowlist(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/api/tma/shared-tournaments",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == (
+        "shared_tournament_management_forbidden"
+    )
+
+
+def test_shared_tournament_api_creates_linked_contest_and_blocks_local_edits(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    monkeypatch.setenv("SHARED_TOURNAMENT_ADMIN_IDS", "123")
+    client = TestClient(create_app())
+
+    tournament_response = client.post(
+        "/api/tma/shared-tournaments",
+        headers=build_tma_headers(),
+        json={"name": "Общий ЧМ", "template_key": "world_cup_2026"},
+    )
+    assert tournament_response.status_code == 201
+    tournament = tournament_response.json()["shared_tournament"]
+
+    teams_response = client.put(
+        f"/api/tma/shared-tournaments/{tournament['id']}/teams",
+        headers=build_tma_headers(),
+        json={
+            "team_names": ["Испания", "Франция"],
+            "expected_version": tournament["version"],
+        },
+    )
+    assert teams_response.status_code == 200
+    tournament_after_teams = teams_response.json()["shared_tournament"]
+    teams = tournament_after_teams["teams"]
+
+    champion_settings_response = client.put(
+        f"/api/tma/shared-tournaments/{tournament['id']}/champion-prediction/settings",
+        headers=build_tma_headers(),
+        json={
+            "enabled": True,
+            "deadline_at": "2030-05-01T12:00:00Z",
+            "points": 7,
+            "expected_version": tournament_after_teams["version"],
+        },
+    )
+    assert champion_settings_response.status_code == 200
+    tournament_after_champion = champion_settings_response.json()["shared_tournament"]
+    swiss_settings_response = client.put(
+        f"/api/tma/shared-tournaments/{tournament['id']}/swiss-stage/settings",
+        headers=build_tma_headers(),
+        json={
+            "enabled": True,
+            "deadline_at": "2030-05-01T12:00:00Z",
+            "direct_qualifier_count": 1,
+            "elimination_qualifier_count": 1,
+            "expected_version": tournament_after_champion["version"],
+        },
+    )
+    assert swiss_settings_response.status_code == 200
+
+    match_response = client.post(
+        f"/api/tma/shared-tournaments/{tournament['id']}/matches",
+        headers=build_tma_headers(),
+        json={
+            "home_team_id": teams[0]["id"],
+            "away_team_id": teams[1]["id"],
+            "starts_at_utc": "2030-06-01T12:00:00Z",
+        },
+    )
+    assert match_response.status_code == 201
+
+    contest_response = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="shared-contest"),
+        json={
+            "name": "Прогнозы на общий ЧМ",
+            "template_key": "world_cup_2026",
+            "shared_tournament_id": tournament["id"],
+        },
+    )
+    assert contest_response.status_code == 201
+    contest_id = contest_response.json()["contest"]["id"]
+    details = client.get(
+        f"/api/tma/contests/{contest_id}", headers=build_tma_headers()
+    ).json()["contest"]
+    assert details["shared_tournament"] == {
+        "id": tournament["id"],
+        "name": "Общий ЧМ",
+    }
+    assert len(details["matches"]) == 1
+    assert details["champion_prediction"]["points"] == 7
+    assert details["champion_prediction"]["is_enabled"] is True
+    assert details["swiss_stage_prediction"]["direct_qualifier_count"] == 1
+
+    local_update = client.put(
+        f"/api/tma/contests/{contest_id}/matches/{details['matches'][0]['id']}",
+        headers=build_tma_headers(),
+        json={"starts_at_utc": "2030-06-02T12:00:00Z"},
+    )
+    assert local_update.status_code == 409
+    assert "Общие турниры" in local_update.json()["detail"]
+
+    local_champion_settings = client.put(
+        f"/api/tma/contests/{contest_id}/champion-prediction/settings",
+        headers=build_tma_headers(),
+        json={
+            "enabled": True,
+            "deadline_at": "2030-05-02T12:00:00Z",
+            "points": 5,
+        },
+    )
+    assert local_champion_settings.status_code == 409
 
 
 def test_participant_predictions_remain_available_with_enforcement(
@@ -2471,6 +2654,7 @@ def test_get_contest_returns_details_with_empty_matches(
             "template_key": "world_cup_2026",
             "created_at": contest["created_at"],
             "is_active": True,
+            "shared_tournament": None,
             "tournament_teams": {
                 "teams": [],
                 "is_locked": False,

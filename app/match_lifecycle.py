@@ -48,8 +48,20 @@ def start_due_matches(
             """,
             parameters,
         )
+        shared_update_count = 0
+        if contest_id is None:
+            shared_update = connection.execute(
+                """
+                UPDATE shared_matches
+                SET status = 'started', version = version + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'scheduled' AND starts_at_utc <= ?
+                """,
+                (serialized_now_utc,),
+            )
+            shared_update_count = shared_update.rowcount
 
-    return update.rowcount
+    return update.rowcount + shared_update_count
 
 
 async def run_match_lifecycle_worker(

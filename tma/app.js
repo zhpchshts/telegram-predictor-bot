@@ -510,6 +510,34 @@ function createContestFormCard(bootstrap, state) {
     templateInput.append(option);
   }
   templateInput.value = state.draftTemplateKey || "world_cup_2026";
+  const sharedTournaments = Array.isArray(state.managementData?.shared_tournaments)
+    ? state.managementData.shared_tournaments
+    : [];
+  const sourceField = createElement("label", {
+    className: "form-field",
+  });
+  const sourceLabel = createElement("span", {
+    className: "form-field-label",
+    text: "Расписание",
+  });
+  const sourceInput = document.createElement("select");
+  sourceInput.className = "text-input";
+  sourceInput.id = "contest-shared-tournament";
+  sourceInput.name = "contest-shared-tournament";
+  const independentOption = document.createElement("option");
+  independentOption.value = "";
+  independentOption.textContent = "Независимый конкурс";
+  sourceInput.append(independentOption);
+  for (const tournament of sharedTournaments) {
+    const option = document.createElement("option");
+    option.value = String(tournament.id);
+    option.textContent = `Общий турнир: ${tournament.name}`;
+    option.dataset.templateKey = tournament.template_key;
+    sourceInput.append(option);
+  }
+  sourceInput.value = state.draftSharedTournamentId
+    ? String(state.draftSharedTournamentId)
+    : "";
   const fieldLabel = createElement("span", {
     className: "form-field-label",
     text: "Название конкурса",
@@ -547,15 +575,26 @@ function createContestFormCard(bootstrap, state) {
   input.required = true;
 
   function updateTemplateCopy() {
+    const selectedSource = sourceInput.selectedOptions[0];
+    const sharedTemplateKey = selectedSource?.dataset?.templateKey || "";
+    if (sharedTemplateKey) {
+      templateInput.value = sharedTemplateKey;
+      templateInput.disabled = true;
+    } else {
+      templateInput.disabled = false;
+    }
     const isTi = templateInput.value === "the_international_2026";
-    description.textContent = isTi
-      ? "Конкурс прогнозов на The International 2026."
-      : "Конкурс прогнозов на Чемпионат мира 2026.";
+    description.textContent = sharedTemplateKey
+      ? "Команды, матчи, дедлайны и результаты будут синхронизироваться с общим турниром."
+      : isTi
+        ? "Конкурс прогнозов на The International 2026."
+        : "Конкурс прогнозов на Чемпионат мира 2026.";
     hint.textContent = isTi
       ? "Серии плей-офф: 2 балла за точный счёт, 1 — за правильного победителя."
       : "3 очка за точный счёт, 2 — за разницу голов, 1 — за исход.";
   }
   templateInput.addEventListener("change", updateTemplateCopy);
+  sourceInput.addEventListener("change", updateTemplateCopy);
   updateTemplateCopy();
 
   setFormMessage(
@@ -564,10 +603,11 @@ function createContestFormCard(bootstrap, state) {
     state.formMessageType || "",
   );
 
+  sourceField.append(sourceLabel, sourceInput);
   templateField.append(templateLabel, templateInput);
   field.append(fieldLabel, input);
   actions.append(continueButton);
-  form.append(templateField, field, hint, message, actions);
+  form.append(sourceField, templateField, field, hint, message, actions);
   card.append(heading, description, form);
 
   form.addEventListener("submit", (event) => {
@@ -589,6 +629,9 @@ function createContestFormCard(bootstrap, state) {
       mode: "confirm",
       draftName: contestName,
       draftTemplateKey: templateInput.value,
+      draftSharedTournamentId: sourceInput.value
+        ? Number(sourceInput.value)
+        : null,
       idempotencyKey: createIdempotencyKey(),
     });
   });
@@ -636,6 +679,15 @@ function createContestConfirmationCard(bootstrap, state) {
   details.textContent = state.draftTemplateKey === "the_international_2026"
     ? "Будет создан конкурс The International 2026 с прогнозом Swiss и сериями Bo3/Bo5."
     : "Будет создан конкурс Чемпионата мира 2026 со стандартными футбольными правилами.";
+  if (state.draftSharedTournamentId) {
+    const tournament = state.managementData?.shared_tournaments?.find(
+      (item) => item.id === state.draftSharedTournamentId,
+    );
+    details.textContent = (
+      `Конкурс будет связан с общим турниром «${tournament?.name || "Без названия"}». `
+      + "Расписание и результаты редактируются только в глобальном разделе."
+    );
+  }
   summary.append("Создать конкурс «", summaryName, "»?");
 
   setFormMessage(
@@ -654,6 +706,7 @@ function createContestConfirmationCard(bootstrap, state) {
       mode: "form",
       draftName: state.draftName,
       draftTemplateKey: state.draftTemplateKey,
+      draftSharedTournamentId: state.draftSharedTournamentId,
     });
   });
 
@@ -672,6 +725,7 @@ function createContestConfirmationCard(bootstrap, state) {
         body: JSON.stringify({
           name: state.draftName,
           template_key: state.draftTemplateKey || "world_cup_2026",
+          shared_tournament_id: state.draftSharedTournamentId || null,
         }),
       });
 
@@ -5764,6 +5818,7 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
   setChatSummary();
   const matches = Array.isArray(contest.matches) ? contest.matches : [];
   const isActive = contest.is_active !== false;
+  const isSharedTournament = contest.shared_tournament !== null;
   const activeTab = getActiveContestManagementTab(state.managementTab);
   const managementState = {
     ...state,
@@ -5793,25 +5848,43 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
         ),
       );
     } else {
+      if (isSharedTournament) {
+        cards.push(
+          createInfoCard(
+            "Общий турнир",
+            [
+              `Конкурс связан с турниром «${contest.shared_tournament.name}». `
+                + "Команды, матчи, дедлайны и результаты редактируются только в глобальном разделе.",
+            ],
+          ),
+        );
+      } else {
+        cards.push(
+          createTournamentTeamsAdministrationCard(
+            contest,
+            managementState,
+            () => {
+              void openContest(bootstrap, contest.id, {
+                ...managementState,
+                tournamentTeamsMessage: "Команды турнира сохранены.",
+                tournamentTeamsMessageType: "success",
+              });
+            },
+          ),
+        );
+      }
+      if (!isSharedTournament) {
+        cards.push(
+          createContestPredictionSettingsCard(
+            contest,
+            managementState,
+            () => {
+              void openContest(bootstrap, contest.id, managementState);
+            },
+          ),
+        );
+      }
       cards.push(
-        createTournamentTeamsAdministrationCard(
-          contest,
-          managementState,
-          () => {
-            void openContest(bootstrap, contest.id, {
-              ...managementState,
-              tournamentTeamsMessage: "Команды турнира сохранены.",
-              tournamentTeamsMessageType: "success",
-            });
-          },
-        ),
-        createContestPredictionSettingsCard(
-          contest,
-          managementState,
-          () => {
-            void openContest(bootstrap, contest.id, managementState);
-          },
-        ),
         createContestCompletionCard(bootstrap, contest, managementState),
         createContestDeletionCard(bootstrap, contest, managementState),
       );
@@ -5832,15 +5905,25 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
       );
     }
   } else {
-    if (isActive) {
+    if (isActive && !isSharedTournament) {
       cards.push(createMatchFormCard(bootstrap, contest, managementState));
+    }
+    if (isActive && isSharedTournament) {
+      cards.push(
+        createInfoCard(
+          "Синхронизируемое расписание",
+          [
+            `Матчи и результаты приходят из общего турнира «${contest.shared_tournament.name}».`,
+          ],
+        ),
+      );
     }
     cards.push(
       createMatchesCard(
         contest,
         matches,
         managementState,
-        (resultState) => {
+        isSharedTournament ? null : (resultState) => {
           void openContest(bootstrap, contest.id, {
             ...managementState,
             resultMatchId: resultState.matchId,
@@ -5848,7 +5931,7 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
             resultMessageType: resultState.type,
           });
         },
-        (deletionState) => {
+        isSharedTournament ? null : (deletionState) => {
           void openContest(bootstrap, contest.id, {
             ...managementState,
             ...deletionState,
@@ -5861,7 +5944,7 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
             : ["Матчей нет."],
           showPredictions: false,
           showResults: true,
-          canManageResults: isActive,
+          canManageResults: isActive && !isSharedTournament,
         },
       ),
     );
@@ -7632,6 +7715,791 @@ function createChatSettingsCard(bootstrap, managementData, state = {}) {
   return card;
 }
 
+function createSharedTournamentNavigationCard(bootstrap, managementData) {
+  const tournaments = Array.isArray(managementData.shared_tournaments)
+    ? managementData.shared_tournaments
+    : [];
+  const card = createElement("section", {
+    className: "info-card management-access-card",
+  });
+  const heading = createElement("h2", { text: "Общие турниры" });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: (
+      "Единое расписание и результаты для конкурсов в разных чатах. "
+      + `${tournaments.length} ${getRussianPlural(tournaments.length, "турнир", "турнира", "турниров")}.`
+    ),
+  });
+  const button = createActionButton(
+    "Открыть общие турниры",
+    "secondary-action-button",
+  );
+  button.addEventListener("click", () => {
+    void openSharedTournamentManagement(bootstrap);
+  });
+  card.append(heading, description, button);
+  return card;
+}
+
+function createSharedTournamentListCard(bootstrap, tournaments, state = {}) {
+  const card = createElement("section", {
+    className: "info-card management-contest-list-card",
+  });
+  const heading = createElement("h2", { text: "Общие турниры" });
+  const message = createElement("p", { className: "form-message" });
+  setFormMessage(message, state.message || "", state.messageType || "");
+  card.append(
+    heading,
+    createElement("p", {
+      className: "subtitle",
+      text: "Изменения матчей применяются ко всем связанным конкурсам.",
+    }),
+    message,
+  );
+
+  if (tournaments.length === 0) {
+    card.append(
+      createElement("p", {
+        className: "subtitle",
+        text: "Общих турниров пока нет.",
+      }),
+    );
+    return card;
+  }
+
+  const list = createElement("ul", { className: "management-navigation-list" });
+  for (const tournament of tournaments) {
+    const item = createElement("li", { className: "management-list-item" });
+    const button = createManagementNavigationRow(
+      tournament.name,
+      (
+        `${tournament.match_count} ${getRussianPlural(tournament.match_count, "матч", "матча", "матчей")}, `
+        + `${tournament.linked_contest_count} ${getRussianPlural(tournament.linked_contest_count, "конкурс", "конкурса", "конкурсов")}`
+      ),
+      () => {
+        void openSharedTournament(bootstrap, tournament.id);
+      },
+    );
+    item.append(button);
+    list.append(item);
+  }
+  card.append(list);
+  return card;
+}
+
+function createSharedTournamentCreationCard(bootstrap, state = {}) {
+  const card = createElement("section", {
+    className: "info-card contest-form-card",
+  });
+  const heading = createElement("h2", { text: "Создать общий турнир" });
+  const form = createElement("form", { className: "form-fields" });
+  const nameField = createElement("label", { className: "form-field" });
+  const nameInput = createElement("input", { className: "text-input" });
+  nameInput.type = "text";
+  nameInput.required = true;
+  nameInput.maxLength = CONTEST_NAME_MAX_LENGTH;
+  nameInput.placeholder = "Чемпионат мира 2026";
+  nameField.append(
+    createElement("span", { className: "form-field-label", text: "Название" }),
+    nameInput,
+  );
+  const templateField = createElement("label", { className: "form-field" });
+  const templateInput = document.createElement("select");
+  templateInput.className = "text-input";
+  for (const [value, label] of [
+    ["world_cup_2026", "Чемпионат мира 2026"],
+    ["the_international_2026", "The International 2026"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    templateInput.append(option);
+  }
+  templateField.append(
+    createElement("span", { className: "form-field-label", text: "Шаблон" }),
+    templateInput,
+  );
+  const message = createElement("p", { className: "form-message" });
+  setFormMessage(
+    message,
+    state.creationMessage || "",
+    state.creationMessageType || "",
+  );
+  const submitButton = createActionButton(
+    "Создать турнир",
+    "primary-action-button",
+    "submit",
+  );
+  form.append(nameField, templateField, submitButton, message);
+  card.append(heading, form);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = normalizeContestName(nameInput.value);
+    if (!name) {
+      setFormMessage(message, "Введите название общего турнира.", "error");
+      return;
+    }
+    submitButton.disabled = true;
+    try {
+      const result = await apiRequest("/api/tma/shared-tournaments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, template_key: templateInput.value }),
+      });
+      void openSharedTournament(bootstrap, result.shared_tournament.id);
+    } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
+      setFormMessage(
+        message,
+        error instanceof Error ? error.message : "Не удалось создать турнир.",
+        "error",
+      );
+      submitButton.disabled = false;
+    }
+  });
+  return card;
+}
+
+function renderSharedTournamentManagementScreen(
+  bootstrap,
+  tournaments,
+  state = {},
+) {
+  currentViewMode = "management";
+  setChatSummary();
+  appContentElement.replaceChildren(
+    createAdministrativeHeader(bootstrap, {
+      title: "Общие турниры",
+      backLabel: "← К управлению",
+      onBack: () => {
+        void openManagement(bootstrap);
+      },
+      description: "Глобальный раздел: изменения не ограничены текущим чатом.",
+    }),
+    createSharedTournamentListCard(bootstrap, tournaments, state),
+    createSharedTournamentCreationCard(bootstrap, state),
+  );
+}
+
+async function openSharedTournamentManagement(bootstrap, state = {}) {
+  activeBootstrap = bootstrap;
+  currentViewMode = "management";
+  appContentElement.replaceChildren(
+    createStatusCard("Открываем общие турниры", "Загружаем расписания…"),
+  );
+  try {
+    const result = await apiRequest("/api/tma/shared-tournaments");
+    renderSharedTournamentManagementScreen(
+      bootstrap,
+      Array.isArray(result.shared_tournaments) ? result.shared_tournaments : [],
+      state,
+    );
+  } catch (error) {
+    if (handleManagementRequestError(error)) {
+      return;
+    }
+    renderSharedTournamentManagementScreen(bootstrap, [], {
+      message: error instanceof Error ? error.message : "Не удалось загрузить турниры.",
+      messageType: "error",
+    });
+  }
+}
+
+function createSharedTournamentTeamsCard(bootstrap, tournament, state = {}) {
+  const card = createElement("section", { className: "info-card" });
+  const heading = createElement("h2", { text: "Команды" });
+  const form = createElement("form", { className: "form-fields" });
+  const field = createElement("label", { className: "form-field" });
+  const input = document.createElement("textarea");
+  input.className = "text-input teams-textarea";
+  input.rows = Math.max(4, Math.min(12, tournament.teams.length + 1));
+  input.value = tournament.teams.map((team) => team.name).join("\n");
+  field.append(
+    createElement("span", {
+      className: "form-field-label",
+      text: "По одной команде в строке",
+    }),
+    input,
+  );
+  const message = createElement("p", { className: "form-message" });
+  setFormMessage(message, state.teamsMessage || "", state.teamsMessageType || "");
+  const submitButton = createActionButton(
+    "Сохранить команды",
+    "primary-action-button",
+    "submit",
+  );
+  form.append(field, submitButton, message);
+  card.append(heading, form);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const teamNames = input.value
+      .split("\n")
+      .map(normalizeTeamName)
+      .filter(Boolean);
+    submitButton.disabled = true;
+    try {
+      await apiRequest(`/api/tma/shared-tournaments/${tournament.id}/teams`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          team_names: teamNames,
+          expected_version: tournament.version,
+        }),
+      });
+      void openSharedTournament(bootstrap, tournament.id, {
+        teamsMessage: "Команды сохранены.",
+        teamsMessageType: "success",
+      });
+    } catch (error) {
+      setFormMessage(
+        message,
+        error instanceof Error ? error.message : "Не удалось сохранить команды.",
+        "error",
+      );
+      submitButton.disabled = false;
+    }
+  });
+  return card;
+}
+
+function createSharedChampionCard(bootstrap, tournament) {
+  const card = createElement("section", { className: "info-card" });
+  card.append(createElement("h2", { text: "Прогноз на чемпиона" }));
+  const settings = tournament.champion_prediction || {};
+  const form = createElement("form", { className: "form-fields" });
+  const enabled = createElement("input");
+  enabled.type = "checkbox";
+  enabled.checked = settings.is_enabled === true;
+  const deadline = createElement("input", { className: "text-input" });
+  deadline.type = "datetime-local";
+  deadline.value = settings.deadline_at
+    ? formatDateTimeLocalValue(settings.deadline_at)
+    : "";
+  const points = createElement("input", { className: "text-input" });
+  points.type = "number";
+  points.min = "0";
+  points.value = String(settings.points ?? 5);
+  const message = createElement("p", { className: "form-message" });
+  const saveButton = createActionButton("Сохранить общие настройки", "primary-action-button", "submit");
+  form.append(
+    createLabeledField("Включить прогноз", enabled),
+    createLabeledField("Дедлайн", deadline),
+    createLabeledField("Баллы", points),
+    saveButton,
+    message,
+  );
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    saveButton.disabled = true;
+    try {
+      await apiRequest(
+        `/api/tma/shared-tournaments/${tournament.id}/champion-prediction/settings`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: enabled.checked,
+            deadline_at: enabled.checked && deadline.value
+              ? new Date(deadline.value).toISOString()
+              : null,
+            points: Number(points.value),
+            expected_version: tournament.version,
+          }),
+        },
+      );
+      void openSharedTournament(bootstrap, tournament.id, {
+        message: "Настройки прогноза на чемпиона обновлены во всех чатах.",
+        messageType: "success",
+      });
+    } catch (error) {
+      setFormMessage(message, error instanceof Error ? error.message : "Ошибка.", "error");
+      saveButton.disabled = false;
+    }
+  });
+  card.append(form);
+
+  const deadlinePassed = settings.deadline_at
+    && new Date(settings.deadline_at).getTime() <= Date.now();
+  const matchesFinished = (tournament.matches || []).every(
+    (match) => ["finished", "cancelled"].includes(match.status),
+  );
+  if (settings.is_enabled && deadlinePassed && matchesFinished && tournament.teams.length) {
+    const resultForm = createElement("form", { className: "form-fields" });
+    const champion = document.createElement("select");
+    champion.className = "text-input";
+    for (const team of tournament.teams) {
+      const option = document.createElement("option");
+      option.value = String(team.id);
+      option.textContent = team.name;
+      champion.append(option);
+    }
+    if (settings.actual_champion) {
+      champion.value = String(settings.actual_champion.id);
+    }
+    const resultButton = createActionButton(
+      settings.actual_champion ? "Исправить чемпиона во всех чатах" : "Указать чемпиона во всех чатах",
+      "secondary-action-button",
+      "submit",
+    );
+    resultForm.append(createLabeledField("Фактический чемпион", champion), resultButton);
+    resultForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      resultButton.disabled = true;
+      try {
+        await apiRequest(`/api/tma/shared-tournaments/${tournament.id}/champion`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            champion_team_id: Number(champion.value),
+            expected_version: tournament.version,
+          }),
+        });
+        void openSharedTournament(bootstrap, tournament.id, {
+          message: "Чемпион и рейтинги обновлены во всех чатах.",
+          messageType: "success",
+        });
+      } catch (error) {
+        setFormMessage(message, error instanceof Error ? error.message : "Ошибка.", "error");
+        resultButton.disabled = false;
+      }
+    });
+    card.append(resultForm);
+  }
+  return card;
+}
+
+function createSharedSwissStageCard(bootstrap, tournament) {
+  const card = createElement("section", { className: "info-card" });
+  card.append(createElement("h2", { text: "Швейцарский этап" }));
+  const settings = tournament.swiss_stage_prediction || {};
+  const form = createElement("form", { className: "form-fields" });
+  const enabled = createElement("input");
+  enabled.type = "checkbox";
+  enabled.checked = settings.is_enabled === true;
+  const deadline = createElement("input", { className: "text-input" });
+  deadline.type = "datetime-local";
+  deadline.value = settings.deadline_at
+    ? formatDateTimeLocalValue(settings.deadline_at)
+    : "";
+  const directCount = createElement("input", { className: "text-input" });
+  const eliminationCount = createElement("input", { className: "text-input" });
+  for (const input of [directCount, eliminationCount]) {
+    input.type = "number";
+    input.min = "1";
+  }
+  directCount.value = String(settings.direct_qualifier_count ?? 3);
+  eliminationCount.value = String(settings.elimination_qualifier_count ?? 5);
+  const message = createElement("p", { className: "form-message" });
+  const saveButton = createActionButton("Сохранить общие настройки", "primary-action-button", "submit");
+  form.append(
+    createLabeledField("Включить прогноз", enabled),
+    createLabeledField("Дедлайн", deadline),
+    createLabeledField("Прямые проходы", directCount),
+    createLabeledField("Через стыковой раунд", eliminationCount),
+    saveButton,
+    message,
+  );
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    saveButton.disabled = true;
+    try {
+      await apiRequest(`/api/tma/shared-tournaments/${tournament.id}/swiss-stage/settings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: enabled.checked,
+          deadline_at: enabled.checked && deadline.value
+            ? new Date(deadline.value).toISOString()
+            : null,
+          direct_qualifier_count: Number(directCount.value),
+          elimination_qualifier_count: Number(eliminationCount.value),
+          expected_version: tournament.version,
+        }),
+      });
+      void openSharedTournament(bootstrap, tournament.id, {
+        message: "Настройки швейцарского этапа обновлены во всех чатах.",
+        messageType: "success",
+      });
+    } catch (error) {
+      setFormMessage(message, error instanceof Error ? error.message : "Ошибка.", "error");
+      saveButton.disabled = false;
+    }
+  });
+  card.append(form);
+
+  const deadlinePassed = settings.deadline_at
+    && new Date(settings.deadline_at).getTime() <= Date.now();
+  if (settings.is_enabled && deadlinePassed && tournament.teams.length) {
+    const resultForm = createElement("form", { className: "form-fields" });
+    const direct = document.createElement("select");
+    const elimination = document.createElement("select");
+    for (const select of [direct, elimination]) {
+      select.className = "text-input";
+      select.multiple = true;
+      select.size = Math.min(10, Math.max(4, tournament.teams.length));
+      for (const team of tournament.teams) {
+        const option = document.createElement("option");
+        option.value = String(team.id);
+        option.textContent = team.name;
+        select.append(option);
+      }
+    }
+    const directIds = new Set(settings.direct_qualifier_team_ids || []);
+    const eliminationIds = new Set(settings.elimination_qualifier_team_ids || []);
+    for (const option of direct.options) option.selected = directIds.has(Number(option.value));
+    for (const option of elimination.options) option.selected = eliminationIds.has(Number(option.value));
+    const resultButton = createActionButton("Сохранить итоги во всех чатах", "secondary-action-button", "submit");
+    resultForm.append(
+      createLabeledField("Прошли напрямую", direct),
+      createLabeledField("Прошли через стыковой раунд", elimination),
+      resultButton,
+    );
+    resultForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      resultButton.disabled = true;
+      try {
+        await apiRequest(`/api/tma/shared-tournaments/${tournament.id}/swiss-stage/result`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            direct_team_ids: Array.from(direct.selectedOptions, (option) => Number(option.value)),
+            elimination_team_ids: Array.from(elimination.selectedOptions, (option) => Number(option.value)),
+            expected_version: tournament.version,
+          }),
+        });
+        void openSharedTournament(bootstrap, tournament.id, {
+          message: "Итоги швейцарского этапа и рейтинги обновлены во всех чатах.",
+          messageType: "success",
+        });
+      } catch (error) {
+        setFormMessage(message, error instanceof Error ? error.message : "Ошибка.", "error");
+        resultButton.disabled = false;
+      }
+    });
+    card.append(resultForm);
+  }
+  return card;
+}
+
+function createSharedMatchCreationCard(bootstrap, tournament, state = {}) {
+  const card = createElement("section", { className: "info-card" });
+  const heading = createElement("h2", { text: "Добавить матч" });
+  if (!Array.isArray(tournament.teams) || tournament.teams.length < 2) {
+    card.append(
+      heading,
+      createElement("p", {
+        className: "subtitle",
+        text: "Сначала добавьте минимум две команды.",
+      }),
+    );
+    return card;
+  }
+  const form = createElement("form", { className: "form-fields" });
+  const homeSelect = document.createElement("select");
+  const awaySelect = document.createElement("select");
+  homeSelect.className = "text-input";
+  awaySelect.className = "text-input";
+  for (const team of tournament.teams) {
+    for (const select of [homeSelect, awaySelect]) {
+      const option = document.createElement("option");
+      option.value = String(team.id);
+      option.textContent = team.name;
+      select.append(option);
+    }
+  }
+  awaySelect.selectedIndex = 1;
+  const startInput = createElement("input", { className: "text-input" });
+  startInput.type = "datetime-local";
+  startInput.required = true;
+  const fields = [
+    createLabeledField("Первая команда", homeSelect),
+    createLabeledField("Вторая команда", awaySelect),
+    createLabeledField("Начало и дедлайн", startInput),
+  ];
+  let bestOfSelect = null;
+  if (tournament.template_key === "the_international_2026") {
+    bestOfSelect = document.createElement("select");
+    bestOfSelect.className = "text-input";
+    for (const value of [3, 5]) {
+      const option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = `Bo${value}`;
+      bestOfSelect.append(option);
+    }
+    fields.push(createLabeledField("Формат серии", bestOfSelect));
+  }
+  const message = createElement("p", { className: "form-message" });
+  setFormMessage(message, state.matchMessage || "", state.matchMessageType || "");
+  const submitButton = createActionButton(
+    "Добавить матч",
+    "primary-action-button",
+    "submit",
+  );
+  form.append(...fields, submitButton, message);
+  card.append(heading, form);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const startsAt = new Date(startInput.value);
+    if (Number.isNaN(startsAt.getTime())) {
+      setFormMessage(message, "Укажите дату и время начала.", "error");
+      return;
+    }
+    submitButton.disabled = true;
+    try {
+      await apiRequest(`/api/tma/shared-tournaments/${tournament.id}/matches`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          home_team_id: Number(homeSelect.value),
+          away_team_id: Number(awaySelect.value),
+          starts_at_utc: startsAt.toISOString(),
+          best_of: bestOfSelect ? Number(bestOfSelect.value) : null,
+        }),
+      });
+      void openSharedTournament(bootstrap, tournament.id, {
+        matchMessage: "Матч добавлен во все активные связанные конкурсы.",
+        matchMessageType: "success",
+      });
+    } catch (error) {
+      setFormMessage(
+        message,
+        error instanceof Error ? error.message : "Не удалось добавить матч.",
+        "error",
+      );
+      submitButton.disabled = false;
+    }
+  });
+  return card;
+}
+
+function createLabeledField(labelText, input) {
+  const field = createElement("label", { className: "form-field" });
+  field.append(
+    createElement("span", { className: "form-field-label", text: labelText }),
+    input,
+  );
+  return field;
+}
+
+function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
+  const card = createElement("section", { className: "info-card" });
+  const heading = createElement("h2", {
+    text: `${match.home_team.name} — ${match.away_team.name}`,
+  });
+  const impact = createElement("p", {
+    className: "subtitle",
+    text: (
+      `${formatMatchStartsAt(match.starts_at_utc)} · `
+      + `${match.linked_contest_count} ${getRussianPlural(match.linked_contest_count, "конкурс", "конкурса", "конкурсов")} · `
+      + `${match.prediction_count} ${getRussianPlural(match.prediction_count, "прогноз", "прогноза", "прогнозов")}`
+    ),
+  });
+  const message = createElement("p", { className: "form-message" });
+  card.append(heading, impact, message);
+
+  const deadlinePassed = new Date(match.starts_at_utc).getTime() <= Date.now();
+  if (match.status === "scheduled" && !deadlinePassed) {
+    const timeForm = createElement("form", { className: "form-fields" });
+    const startInput = createElement("input", { className: "text-input" });
+    startInput.type = "datetime-local";
+    startInput.value = formatDateTimeLocalValue(match.starts_at_utc);
+    const saveButton = createActionButton(
+      "Изменить время во всех чатах",
+      "secondary-action-button",
+      "submit",
+    );
+    timeForm.append(createLabeledField("Начало и дедлайн", startInput), saveButton);
+    timeForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const startsAt = new Date(startInput.value);
+      saveButton.disabled = true;
+      try {
+        await apiRequest(
+          `/api/tma/shared-tournaments/${tournament.id}/matches/${match.id}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              starts_at_utc: startsAt.toISOString(),
+              expected_version: match.version,
+            }),
+          },
+        );
+        void openSharedTournament(bootstrap, tournament.id, {
+          message: "Время обновлено во всех связанных конкурсах.",
+          messageType: "success",
+        });
+      } catch (error) {
+        setFormMessage(message, error instanceof Error ? error.message : "Ошибка.", "error");
+        saveButton.disabled = false;
+      }
+    });
+    card.append(timeForm);
+  }
+
+  if (deadlinePassed || match.status === "finished") {
+    const resultForm = createElement("form", { className: "form-fields" });
+    const homeScore = createElement("input", { className: "text-input" });
+    const awayScore = createElement("input", { className: "text-input" });
+    for (const input of [homeScore, awayScore]) {
+      input.type = "number";
+      input.min = "0";
+      input.required = true;
+    }
+    homeScore.value = match.result?.home_score ?? "";
+    awayScore.value = match.result?.away_score ?? "";
+    const advancing = document.createElement("select");
+    advancing.className = "text-input";
+    for (const team of [match.home_team, match.away_team]) {
+      const option = document.createElement("option");
+      option.value = String(team.id);
+      option.textContent = team.name;
+      advancing.append(option);
+    }
+    if (match.result?.advancing_team_id) {
+      advancing.value = String(match.result.advancing_team_id);
+    }
+    const saveResultButton = createActionButton(
+      match.result ? "Исправить результат во всех чатах" : "Внести результат во все чаты",
+      "primary-action-button",
+      "submit",
+    );
+    resultForm.append(
+      createLabeledField(match.home_team.name, homeScore),
+      createLabeledField(match.away_team.name, awayScore),
+      createLabeledField("Прошла дальше", advancing),
+      saveResultButton,
+    );
+    resultForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      saveResultButton.disabled = true;
+      try {
+        await apiRequest(
+          `/api/tma/shared-tournaments/${tournament.id}/matches/${match.id}/result`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              home_score: Number(homeScore.value),
+              away_score: Number(awayScore.value),
+              advancing_team_id: Number(advancing.value),
+              expected_version: match.version,
+            }),
+          },
+        );
+        void openSharedTournament(bootstrap, tournament.id, {
+          message: "Результат и рейтинги обновлены во всех чатах.",
+          messageType: "success",
+        });
+      } catch (error) {
+        setFormMessage(message, error instanceof Error ? error.message : "Ошибка.", "error");
+        saveResultButton.disabled = false;
+      }
+    });
+    card.append(resultForm);
+  }
+
+  const deleteButton = createActionButton(
+    "Удалить матч во всех чатах",
+    "danger-action-button",
+  );
+  deleteButton.addEventListener("click", async () => {
+    const warning = (
+      `Матч используется в ${match.linked_contest_count} `
+      + `${getRussianPlural(match.linked_contest_count, "конкурсе", "конкурсах", "конкурсах")}. `
+      + `Будут удалены ${match.prediction_count} `
+      + `${getRussianPlural(match.prediction_count, "прогноз", "прогноза", "прогнозов")} `
+      + "и начисленные баллы. Продолжить?"
+    );
+    if (!window.confirm(warning)) {
+      return;
+    }
+    deleteButton.disabled = true;
+    try {
+      const result = await apiRequest(
+        `/api/tma/shared-tournaments/${tournament.id}/matches/${match.id}`
+          + `?expected_version=${match.version}`,
+        { method: "DELETE" },
+      );
+      void openSharedTournament(bootstrap, tournament.id, {
+        message: (
+          `Матч удалён из ${result.linked_contest_count} `
+          + `${getRussianPlural(result.linked_contest_count, "конкурса", "конкурсов", "конкурсов")}; `
+          + `удалено прогнозов: ${result.deleted_prediction_count}.`
+        ),
+        messageType: "success",
+      });
+    } catch (error) {
+      setFormMessage(message, error instanceof Error ? error.message : "Ошибка.", "error");
+      deleteButton.disabled = false;
+    }
+  });
+  card.append(deleteButton);
+  return card;
+}
+
+function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
+  currentViewMode = "management";
+  setChatSummary();
+  const cards = [
+    createAdministrativeHeader(bootstrap, {
+      title: tournament.name,
+      backLabel: "← К общим турнирам",
+      onBack: () => {
+        void openSharedTournamentManagement(bootstrap);
+      },
+      description: (
+        `${tournament.linked_contest_count} `
+        + `${getRussianPlural(tournament.linked_contest_count, "связанный конкурс", "связанных конкурса", "связанных конкурсов")}`
+      ),
+    }),
+  ];
+  if (state.message) {
+    cards.push(createInfoCard("Готово", [state.message]));
+  }
+  cards.push(
+    createSharedTournamentTeamsCard(bootstrap, tournament, state),
+    createSharedChampionCard(bootstrap, tournament),
+    createSharedSwissStageCard(bootstrap, tournament),
+    createSharedMatchCreationCard(bootstrap, tournament, state),
+  );
+  for (const match of tournament.matches || []) {
+    cards.push(createSharedMatchAdministrationCard(bootstrap, tournament, match));
+  }
+  appContentElement.replaceChildren(...cards);
+}
+
+async function openSharedTournament(bootstrap, tournamentId, state = {}) {
+  currentViewMode = "management";
+  appContentElement.replaceChildren(
+    createStatusCard("Открываем общий турнир", "Загружаем матчи…"),
+  );
+  try {
+    const result = await apiRequest(`/api/tma/shared-tournaments/${tournamentId}`);
+    renderSharedTournamentScreen(bootstrap, result.shared_tournament, state);
+  } catch (error) {
+    if (handleManagementRequestError(error)) {
+      return;
+    }
+    appContentElement.replaceChildren(
+      createAdministrativeHeader(bootstrap, {
+        title: "Общий турнир",
+        backLabel: "← К общим турнирам",
+        onBack: () => {
+          void openSharedTournamentManagement(bootstrap);
+        },
+      }),
+      createInfoCard(
+        "Не удалось открыть турнир",
+        [error instanceof Error ? error.message : "Неизвестная ошибка."],
+      ),
+    );
+  }
+}
+
 function renderManagementScreen(bootstrap, managementData, state = {}) {
   currentViewMode = "management";
   setChatSummary();
@@ -7643,6 +8511,10 @@ function renderManagementScreen(bootstrap, managementData, state = {}) {
     createManagementHeaderCard(bootstrap),
     createManagementContestListCard(contests, bootstrap, managementData),
   ];
+
+  if (capabilities.can_manage_shared_tournaments === true) {
+    cards.push(createSharedTournamentNavigationCard(bootstrap, managementData));
+  }
 
   if (capabilities.can_manage_chat_settings === true) {
     cards.push(createChatSettingsCard(bootstrap, managementData, state));

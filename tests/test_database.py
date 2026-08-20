@@ -48,6 +48,14 @@ def test_initialize_database_creates_current_schema(tmp_path: Path) -> None:
         "tie_predictions",
         "ties",
         "users",
+        "shared_tournaments",
+        "shared_tournament_settings",
+        "shared_tournament_teams",
+        "shared_swiss_stage_result_selections",
+        "shared_matches",
+        "contest_shared_tournaments",
+        "shared_match_links",
+        "shared_tournament_events",
     }
 
     with create_connection(database_path) as connection:
@@ -86,7 +94,7 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
             """
         ).fetchone()[0]
 
-    assert tables_count == 34
+    assert tables_count == 42
 
 
 def test_current_schema_supports_only_known_contest_templates(tmp_path: Path) -> None:

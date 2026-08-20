@@ -490,3 +490,35 @@ def test_scheduled_match_card_shows_static_time_until_start() -> None:
     assert 'className: "match-meta match-starts-in"' in item_source
     assert "setInterval" not in item_source
     assert "setTimeout" not in item_source
+
+
+def test_shared_tournament_ui_owns_all_common_deadlines_and_results() -> None:
+    screen_source = _function_source("renderSharedTournamentScreen")
+    champion_source = _function_source("createSharedChampionCard")
+    swiss_source = _function_source("createSharedSwissStageCard")
+
+    assert "createSharedTournamentTeamsCard" in screen_source
+    assert "createSharedChampionCard" in screen_source
+    assert "createSharedSwissStageCard" in screen_source
+    assert "createSharedMatchCreationCard" in screen_source
+    assert "/champion-prediction/settings`" in champion_source
+    assert "/champion`" in champion_source
+    assert "во всех чатах" in champion_source
+    assert "/swiss-stage/settings`" in swiss_source
+    assert "/swiss-stage/result`" in swiss_source
+    assert "во всех чатах" in swiss_source
+
+
+def test_linked_contest_hides_local_tournament_admin_forms() -> None:
+    management_source = _function_source("renderContestManagementScreen")
+
+    assert (
+        "const isSharedTournament = contest.shared_tournament !== null"
+        in management_source
+    )
+    assert "if (!isSharedTournament)" in management_source
+    assert (
+        "Команды, матчи, дедлайны и результаты редактируются только"
+        in management_source
+    )
+    assert "isSharedTournament ? null" in management_source

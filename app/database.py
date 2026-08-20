@@ -182,6 +182,145 @@ CREATE TABLE IF NOT EXISTS teams (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS shared_tournaments (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    template_key TEXT NOT NULL CHECK (
+        template_key IN ('world_cup_2026', 'the_international_2026')
+    ),
+    is_archived INTEGER NOT NULL DEFAULT 0 CHECK (is_archived IN (0, 1)),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    created_by_telegram_user_id INTEGER NOT NULL CHECK (
+        created_by_telegram_user_id > 0
+    ),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shared_tournaments_active_name
+    ON shared_tournaments(lower(name))
+    WHERE is_archived = 0;
+
+CREATE TABLE IF NOT EXISTS shared_tournament_settings (
+    shared_tournament_id INTEGER PRIMARY KEY
+        REFERENCES shared_tournaments(id) ON DELETE CASCADE,
+    champion_prediction_enabled INTEGER NOT NULL DEFAULT 0
+        CHECK (champion_prediction_enabled IN (0, 1)),
+    champion_prediction_deadline_at TEXT,
+    champion_prediction_points INTEGER NOT NULL DEFAULT 5
+        CHECK (champion_prediction_points >= 0),
+    champion_team_id INTEGER REFERENCES teams(id),
+    swiss_stage_prediction_enabled INTEGER NOT NULL DEFAULT 0
+        CHECK (swiss_stage_prediction_enabled IN (0, 1)),
+    swiss_stage_prediction_deadline_at TEXT,
+    swiss_direct_qualifier_count INTEGER NOT NULL DEFAULT 3
+        CHECK (swiss_direct_qualifier_count > 0),
+    swiss_elimination_qualifier_count INTEGER NOT NULL DEFAULT 5
+        CHECK (swiss_elimination_qualifier_count > 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS shared_tournament_teams (
+    shared_tournament_id INTEGER NOT NULL
+        REFERENCES shared_tournaments(id) ON DELETE CASCADE,
+    team_id INTEGER NOT NULL REFERENCES teams(id),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    PRIMARY KEY (shared_tournament_id, team_id),
+    UNIQUE (shared_tournament_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS shared_swiss_stage_result_selections (
+    shared_tournament_id INTEGER NOT NULL
+        REFERENCES shared_tournaments(id) ON DELETE CASCADE,
+    team_id INTEGER NOT NULL REFERENCES teams(id),
+    category TEXT NOT NULL CHECK (category IN ('direct', 'elimination')),
+    PRIMARY KEY (shared_tournament_id, team_id),
+    FOREIGN KEY (shared_tournament_id, team_id)
+        REFERENCES shared_tournament_teams(shared_tournament_id, team_id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS shared_matches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shared_tournament_id INTEGER NOT NULL
+        REFERENCES shared_tournaments(id) ON DELETE CASCADE,
+    home_team_id INTEGER NOT NULL REFERENCES teams(id),
+    away_team_id INTEGER NOT NULL REFERENCES teams(id),
+    starts_at_utc TEXT NOT NULL,
+    best_of INTEGER CHECK (best_of IS NULL OR best_of IN (3, 5)),
+    status TEXT NOT NULL DEFAULT 'scheduled' CHECK (
+        status IN ('scheduled', 'started', 'finished', 'cancelled')
+    ),
+    home_score_final INTEGER,
+    away_score_final INTEGER,
+    advancing_team_id INTEGER REFERENCES teams(id),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (home_team_id != away_team_id),
+    CHECK (
+        (home_score_final IS NULL AND away_score_final IS NULL)
+        OR (
+            home_score_final IS NOT NULL
+            AND away_score_final IS NOT NULL
+            AND home_score_final >= 0
+            AND away_score_final >= 0
+        )
+    ),
+    CHECK (
+        advancing_team_id IS NULL
+        OR advancing_team_id = home_team_id
+        OR advancing_team_id = away_team_id
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_matches_tournament_start
+    ON shared_matches(shared_tournament_id, starts_at_utc, id);
+
+CREATE TABLE IF NOT EXISTS contest_shared_tournaments (
+    contest_id INTEGER PRIMARY KEY
+        REFERENCES contests(id) ON DELETE CASCADE,
+    shared_tournament_id INTEGER NOT NULL
+        REFERENCES shared_tournaments(id),
+    linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (shared_tournament_id, contest_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_contest_shared_tournaments_tournament
+    ON contest_shared_tournaments(shared_tournament_id, contest_id);
+
+CREATE TABLE IF NOT EXISTS shared_match_links (
+    shared_match_id INTEGER NOT NULL
+        REFERENCES shared_matches(id) ON DELETE CASCADE,
+    match_id INTEGER NOT NULL
+        REFERENCES matches(id) ON DELETE CASCADE,
+    contest_id INTEGER NOT NULL
+        REFERENCES contests(id) ON DELETE CASCADE,
+    linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (shared_match_id, contest_id),
+    UNIQUE (match_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_match_links_contest
+    ON shared_match_links(contest_id, match_id);
+
+CREATE TABLE IF NOT EXISTS shared_tournament_events (
+    id INTEGER PRIMARY KEY,
+    shared_tournament_id INTEGER NOT NULL
+        REFERENCES shared_tournaments(id) ON DELETE CASCADE,
+    shared_match_id INTEGER REFERENCES shared_matches(id) ON DELETE SET NULL,
+    actor_telegram_user_id INTEGER NOT NULL CHECK (actor_telegram_user_id > 0),
+    event_type TEXT NOT NULL,
+    before_state TEXT,
+    after_state TEXT,
+    metadata TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_tournament_events_tournament
+    ON shared_tournament_events(shared_tournament_id, created_at, id);
+
 CREATE TABLE IF NOT EXISTS contest_teams (
     contest_id INTEGER NOT NULL
         REFERENCES contests(id) ON DELETE CASCADE,

@@ -31,6 +31,7 @@ from app.scoring_service import (
     recalculate_match_prediction_scores,
     recalculate_tie_prediction_scores,
 )
+from app.shared_tournament_service import attach_shared_tournament
 
 
 WORLD_CUP_2026_COMPETITION_NAME = "Чемпионат мира"
@@ -142,6 +143,10 @@ class SwissStageResultUnavailableError(ValueError):
 
 class TournamentTeamsLockedError(ValueError):
     """Raised when tournament teams are locked by dependent contest data."""
+
+
+class SharedTournamentManagedError(ValueError):
+    """Raised when a shared tournament must be edited through its global UI."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +345,8 @@ class ContestDetails:
     template_key: str
     created_at: str
     is_active: bool
+    shared_tournament_id: int | None
+    shared_tournament_name: str | None
     tournament_teams: TournamentTeamsDetails
     match_prediction_publication: MatchPredictionPublicationSettings
     champion_prediction: ChampionPredictionDetails
@@ -953,6 +960,16 @@ def get_contest_details(
                 contest_id=contest_id,
             )
         )
+        shared_tournament_row = connection.execute(
+            """
+            SELECT tournament.id, tournament.name
+            FROM contest_shared_tournaments AS link
+            JOIN shared_tournaments AS tournament
+              ON tournament.id = link.shared_tournament_id
+            WHERE link.contest_id = ?
+            """,
+            (contest_id,),
+        ).fetchone()
 
         return ContestDetails(
             id=int(contest_row["id"]),
@@ -961,6 +978,16 @@ def get_contest_details(
             template_key=str(contest_row["template_key"]),
             created_at=str(contest_row["created_at"]),
             is_active=bool(contest_row["is_active"]),
+            shared_tournament_id=(
+                int(shared_tournament_row["id"])
+                if shared_tournament_row is not None
+                else None
+            ),
+            shared_tournament_name=(
+                str(shared_tournament_row["name"])
+                if shared_tournament_row is not None
+                else None
+            ),
             tournament_teams=tournament_teams,
             match_prediction_publication=match_prediction_publication,
             champion_prediction=champion_prediction,
@@ -1226,6 +1253,7 @@ def save_tournament_teams(
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
         )
+        _ensure_contest_is_independent(connection, contest_id=contest_id)
         before_details = _get_tournament_teams_details(
             connection,
             contest_id=contest_id,
@@ -1328,6 +1356,7 @@ def create_match(
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
         )
+        _ensure_contest_is_independent(connection, contest_id=contest_id)
         if contest_row["template_key"] == "the_international_2026":
             if isinstance(best_of, bool) or best_of not in (3, 5):
                 raise ValueError("Для серии The International выберите Bo3 или Bo5.")
@@ -1596,6 +1625,7 @@ def delete_match(
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
         )
+        _ensure_contest_is_independent(connection, contest_id=contest_id)
 
         match_row = connection.execute(
             """
@@ -1754,6 +1784,7 @@ def update_match_start(
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
         )
+        _ensure_contest_is_independent(connection, contest_id=contest_id)
         match_row = _get_match_row(
             connection,
             contest_id=contest_id,
@@ -2019,6 +2050,7 @@ def save_match_result(
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
         )
+        _ensure_contest_is_independent(connection, contest_id=contest_id)
         match_row = _get_match_row(
             connection,
             contest_id=contest_id,
@@ -2321,6 +2353,7 @@ def save_champion_prediction_settings(
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
         )
+        _ensure_contest_is_independent(connection, contest_id=contest_id)
 
         previous_row = _get_champion_prediction_configuration_row(
             connection,
@@ -2599,6 +2632,7 @@ def save_contest_champion(
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
         )
+        _ensure_contest_is_independent(connection, contest_id=contest_id)
 
         configuration_row = _get_champion_prediction_configuration_row(
             connection,
@@ -2745,6 +2779,7 @@ def save_swiss_stage_prediction_settings(
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
         )
+        _ensure_contest_is_independent(connection, contest_id=contest_id)
         previous_row = _get_swiss_stage_configuration_row(
             connection,
             contest_id=contest_id,
@@ -2985,6 +3020,7 @@ def save_swiss_stage_result(
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
         )
+        _ensure_contest_is_independent(connection, contest_id=contest_id)
         configuration_row = _require_enabled_swiss_stage_configuration(
             connection,
             contest_id=contest_id,
@@ -3128,6 +3164,7 @@ def create_world_cup_2026_contest(
     contest_name: str,
     idempotency_key: str,
     audit_actor: AuditActor,
+    shared_tournament_id: int | None = None,
 ) -> ContestCreationResult:
     return _create_contest_from_template(
         template=WORLD_CUP_2026_TEMPLATE,
@@ -3141,6 +3178,7 @@ def create_world_cup_2026_contest(
         contest_name=contest_name,
         idempotency_key=idempotency_key,
         audit_actor=audit_actor,
+        shared_tournament_id=shared_tournament_id,
     )
 
 
@@ -3156,6 +3194,7 @@ def create_the_international_2026_contest(
     contest_name: str,
     idempotency_key: str,
     audit_actor: AuditActor,
+    shared_tournament_id: int | None = None,
 ) -> ContestCreationResult:
     return _create_contest_from_template(
         template=THE_INTERNATIONAL_2026_TEMPLATE,
@@ -3169,6 +3208,7 @@ def create_the_international_2026_contest(
         contest_name=contest_name,
         idempotency_key=idempotency_key,
         audit_actor=audit_actor,
+        shared_tournament_id=shared_tournament_id,
     )
 
 
@@ -3185,12 +3225,14 @@ def _create_contest_from_template(
     contest_name: str,
     idempotency_key: str,
     audit_actor: AuditActor,
+    shared_tournament_id: int | None = None,
 ) -> ContestCreationResult:
     normalized_contest_name = _normalize_contest_name(contest_name)
     normalized_idempotency_key = _normalize_idempotency_key(idempotency_key)
     request_fingerprint = _build_request_fingerprint(
         normalized_contest_name,
         template=template,
+        shared_tournament_id=shared_tournament_id,
     )
 
     with database_connection(database_path) as connection:
@@ -3310,6 +3352,13 @@ def _create_contest_from_template(
                 ),
             ).lastrowid
         )
+
+        if shared_tournament_id is not None:
+            attach_shared_tournament(
+                connection,
+                contest_id=contest_id,
+                shared_tournament_id=shared_tournament_id,
+            )
 
         event_payload = json.dumps(
             {
@@ -3667,6 +3716,22 @@ def _get_active_contest_row(
         )
 
     return contest_row
+
+
+def _ensure_contest_is_independent(connection, *, contest_id: int) -> None:
+    shared_link = connection.execute(
+        """
+        SELECT 1
+        FROM contest_shared_tournaments
+        WHERE contest_id = ?
+        """,
+        (contest_id,),
+    ).fetchone()
+    if shared_link is not None:
+        raise SharedTournamentManagedError(
+            "Этот конкурс использует общий турнир. Измените команды, дедлайны "
+            "или результаты в разделе «Общие турниры»."
+        )
 
 
 def _get_match_row(
@@ -5433,6 +5498,7 @@ def _build_request_fingerprint(
     contest_name: str,
     *,
     template: _ContestTemplate,
+    shared_tournament_id: int | None = None,
 ) -> str:
     payload = json.dumps(
         {
@@ -5441,6 +5507,7 @@ def _build_request_fingerprint(
             "competition_type": template.competition_type,
             "contest_name": contest_name,
             "template_key": template.key,
+            "shared_tournament_id": shared_tournament_id,
         },
         ensure_ascii=False,
         separators=(",", ":"),

@@ -30,6 +30,7 @@ class Settings:
     telegram_mtproto_session_path: Path
     healthcheck_chat_id: int | None
     healthcheck_interval_minutes: int
+    shared_tournament_admin_ids: frozenset[int]
 
 
 def _parse_boolean_environment(name: str, *, default: bool) -> bool:
@@ -81,6 +82,9 @@ def load_settings() -> Settings:
         "HEALTHCHECK_INTERVAL_MINUTES",
         default=360,
     )
+    shared_tournament_admin_ids = _parse_positive_integer_list_environment(
+        "SHARED_TOURNAMENT_ADMIN_IDS"
+    )
 
     return Settings(
         bot_token=bot_token,
@@ -93,6 +97,7 @@ def load_settings() -> Settings:
         telegram_mtproto_session_path=telegram_mtproto_session_path,
         healthcheck_chat_id=healthcheck_chat_id,
         healthcheck_interval_minutes=healthcheck_interval_minutes,
+        shared_tournament_admin_ids=shared_tournament_admin_ids,
     )
 
 
@@ -135,3 +140,29 @@ def _parse_positive_integer_environment(name: str, *, default: int) -> int:
     if parsed_value <= 0:
         raise RuntimeError(f"{name} must be a positive integer.")
     return parsed_value
+
+
+def _parse_positive_integer_list_environment(name: str) -> frozenset[int]:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return frozenset()
+
+    parsed_values: set[int] = set()
+    for item in value.split(","):
+        normalized_item = item.strip()
+        if not normalized_item:
+            raise RuntimeError(
+                f"{name} must be a comma-separated list of positive integers."
+            )
+        try:
+            parsed_item = int(normalized_item)
+        except ValueError as error:
+            raise RuntimeError(
+                f"{name} must be a comma-separated list of positive integers."
+            ) from error
+        if parsed_item <= 0:
+            raise RuntimeError(
+                f"{name} must be a comma-separated list of positive integers."
+            )
+        parsed_values.add(parsed_item)
+    return frozenset(parsed_values)
