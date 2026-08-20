@@ -156,6 +156,52 @@ def test_migration_preserves_elapsed_local_deadlines_and_uses_latest_shared_time
         } == {"2029-06-01T12:00:00Z", "2029-06-02T12:00:00Z"}
 
 
+def test_migration_does_not_start_future_shared_match_from_one_elapsed_deadline(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    first_contest_id, first_match_id = _create_contest_and_match(
+        database_path,
+        chat_id=-1001,
+        suffix="A",
+        starts_at_utc="2030-06-01T08:00:00Z",
+    )
+    second_contest_id, second_match_id = _create_contest_and_match(
+        database_path,
+        chat_id=-1002,
+        suffix="B",
+        starts_at_utc="2030-06-01T10:00:00Z",
+    )
+
+    migrate_database(
+        database_path,
+        actor_telegram_user_id=123,
+        now_utc=_time("2030-06-01T09:00:00Z"),
+    )
+
+    with create_connection(database_path) as connection:
+        shared = connection.execute(
+            "SELECT starts_at_utc, status FROM shared_matches"
+        ).fetchone()
+        local_rows = {
+            int(row["id"]): (str(row["starts_at_utc"]), str(row["status"]))
+            for row in connection.execute(
+                "SELECT id, starts_at_utc, status FROM matches"
+            )
+        }
+        links = {
+            int(row["contest_id"])
+            for row in connection.execute(
+                "SELECT contest_id FROM contest_shared_tournaments"
+            )
+        }
+    assert tuple(shared) == ("2030-06-01T10:00:00Z", "scheduled")
+    assert local_rows[first_match_id] == ("2030-06-01T08:00:00Z", "started")
+    assert local_rows[second_match_id] == ("2030-06-01T10:00:00Z", "scheduled")
+    assert links == {first_contest_id, second_contest_id}
+
+
 def test_migration_refuses_partially_present_matches(tmp_path: Path) -> None:
     database_path = tmp_path / "predictor.db"
     initialize_database(database_path)

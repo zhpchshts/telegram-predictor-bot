@@ -425,11 +425,11 @@ def migrate_database(
                 match_id = int(row["match_id"])
                 tie_id = int(row["tie_id"])
                 local_time = str(row["starts_at_utc"])
-                migrated_time = (
-                    local_time
-                    if _parse_time(local_time) <= resolved_now
-                    else canonical_time
-                )
+                local_deadline_elapsed = _parse_time(local_time) <= resolved_now
+                migrated_time = local_time if local_deadline_elapsed else canonical_time
+                local_status = status
+                if not result_row and status == "scheduled" and local_deadline_elapsed:
+                    local_status = "started"
                 connection.execute(
                     """
                     INSERT INTO shared_match_links (
@@ -448,7 +448,7 @@ def migrate_database(
                     """,
                     (
                         migrated_time,
-                        status,
+                        local_status,
                         result_row["home_score_final"] if result_row else None,
                         result_row["away_score_final"] if result_row else None,
                         match_id,
@@ -724,8 +724,6 @@ def _canonical_status(
         return "finished"
     if all(str(row["status"]) == "cancelled" for row in rows):
         return "cancelled"
-    if any(str(row["status"]) == "started" for row in rows):
-        return "started"
     return "started" if _parse_time(canonical_time) <= now_utc else "scheduled"
 
 
