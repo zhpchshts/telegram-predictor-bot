@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -178,6 +179,19 @@ class UnavailableTelegramAdministratorsClient:
             method=GetChatAdministrators(chat_id=chat_id),
             message="private network detail",
         )
+
+
+class HangingTelegramAdministratorsClient:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def get_chat_administrators(self, chat_id: int) -> list[object]:
+        assert chat_id == TELEGRAM_CHAT_ID
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
 
 
 def build_signed_init_data(fields: dict[str, str]) -> str:
@@ -1207,6 +1221,54 @@ def test_telegram_failure_keeps_bootstrap_data_and_does_not_enable_enforcement(
     assert [item["slug"] for item in response_data["completed_contests"]] == [
         "completed-contest"
     ]
+
+
+def test_telegram_timeout_does_not_block_participant_bootstrap(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    monkeypatch.setenv("TELEGRAM_ADMIN_CHECK_TIMEOUT_SECONDS", "0.01")
+    telegram_client = HangingTelegramAdministratorsClient()
+    app = create_app_with_telegram_client(telegram_client)
+    client = TestClient(app)
+
+    response = client.get("/api/tma/bootstrap", headers=build_tma_headers())
+
+    assert response.status_code == 200
+    assert response.json()["access"] == {
+        "verification_status": "unavailable",
+        "role": None,
+        "can_manage_contests": False,
+        "can_manage_roles": False,
+        "enforcement_enabled": False,
+    }
+    assert telegram_client.cancelled is True
+
+
+def test_telegram_timeout_keeps_management_fail_closed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    monkeypatch.setenv("TELEGRAM_ADMIN_CHECK_TIMEOUT_SECONDS", "0.01")
+    telegram_client = HangingTelegramAdministratorsClient()
+    client = TestClient(create_app_with_telegram_client(telegram_client))
+
+    response = client.get(
+        "/api/tma/management/contests",
+        headers=build_tma_headers(),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == (
+        "contest_management_verification_unavailable"
+    )
+    assert telegram_client.cancelled is True
 
 
 def test_contest_management_requires_verified_rights_even_without_feature_flag(

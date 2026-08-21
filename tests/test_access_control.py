@@ -56,6 +56,19 @@ class UnavailableTelegramClient(FakeTelegramClient):
         )
 
 
+class HangingTelegramClient:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def get_chat_administrators(self, chat_id: int) -> list[object]:
+        assert chat_id == TELEGRAM_CHAT_ID
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
 def _create_access_records(database_path: Path) -> tuple[int, int, int]:
     initialize_database(database_path)
     with create_connection(database_path) as connection:
@@ -192,7 +205,6 @@ def test_telegram_unavailable_is_distinct_and_preserves_local_role(
     assert unavailable_access.role is None
     assert unavailable_access.can_manage_contests is False
     assert unavailable_access.can_manage_roles is False
-
     with_assignment_path = tmp_path / "with.db"
     chat_id, user_id, actor_id = _create_access_records(with_assignment_path)
     assignment = assign_supermoderator(
@@ -224,6 +236,30 @@ def test_telegram_unavailable_is_distinct_and_preserves_local_role(
             (assignment.id,),
         ).fetchone()
     assert stored_assignment["revoked_at"] is None
+
+
+def test_telegram_timeout_returns_unavailable_and_cancels_request(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "access.db"
+    _create_access_records(database_path)
+    client = HangingTelegramClient()
+
+    access = asyncio.run(
+        determine_access(
+            database_path=database_path,
+            telegram_chat_id=TELEGRAM_CHAT_ID,
+            telegram_user_id=TELEGRAM_USER_ID,
+            telegram_client=client,
+            enforcement_enabled=False,
+            telegram_timeout_seconds=0.01,
+        )
+    )
+
+    assert access.verification_status is AccessVerificationStatus.UNAVAILABLE
+    assert access.role is None
+    assert access.can_manage_contests is False
+    assert client.cancelled is True
 
 
 def test_database_errors_are_not_reported_as_telegram_unavailable(

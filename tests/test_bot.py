@@ -19,6 +19,8 @@ def _settings(database_path: Path) -> Settings:
         database_path=database_path,
         public_base_url=None,
         role_enforcement_enabled=False,
+        telegram_admin_check_timeout_seconds=3.0,
+        telegram_bot_api_fallback_ips=(),
         telegram_api_id=None,
         telegram_api_hash=None,
         telegram_mtproto_session_path=database_path.parent / "telegram-mtproto",

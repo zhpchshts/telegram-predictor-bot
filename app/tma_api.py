@@ -396,6 +396,7 @@ async def _authorize_contest_management(
         telegram_user_id=context.user.telegram_user_id,
         telegram_client=telegram_client,
         enforcement_enabled=settings.role_enforcement_enabled,
+        telegram_timeout_seconds=settings.telegram_admin_check_timeout_seconds,
     )
     if access.can_manage_contests:
         return ContestManagementContext(context=context, access=access)
@@ -456,6 +457,7 @@ async def _authorize_role_management(
         telegram_user_id=context.user.telegram_user_id,
         telegram_client=telegram_client,
         enforcement_enabled=settings.role_enforcement_enabled,
+        telegram_timeout_seconds=settings.telegram_admin_check_timeout_seconds,
     )
     if not access.can_manage_roles:
         if access.verification_status is AccessVerificationStatus.UNAVAILABLE:
@@ -522,6 +524,7 @@ async def get_tma_bootstrap(
         telegram_user_id=context.user.telegram_user_id,
         telegram_client=telegram_client,
         enforcement_enabled=settings.role_enforcement_enabled,
+        telegram_timeout_seconds=settings.telegram_admin_check_timeout_seconds,
     )
     return {
         "context": _serialize_context(context),

@@ -49,6 +49,60 @@ def test_role_enforcement_rejects_unknown_value(monkeypatch) -> None:
         load_settings()
 
 
+def test_telegram_network_settings_default_to_bounded_direct_access(
+    monkeypatch,
+) -> None:
+    _set_required_environment(monkeypatch)
+    monkeypatch.delenv("TELEGRAM_ADMIN_CHECK_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_API_FALLBACK_IPS", raising=False)
+
+    settings = load_settings()
+
+    assert settings.telegram_admin_check_timeout_seconds == 3.0
+    assert settings.telegram_bot_api_fallback_ips == ()
+
+
+def test_telegram_network_settings_accept_fallback_ips(monkeypatch) -> None:
+    _set_required_environment(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_ADMIN_CHECK_TIMEOUT_SECONDS", "1.5")
+    monkeypatch.setenv(
+        "TELEGRAM_BOT_API_FALLBACK_IPS",
+        " 149.154.167.220, 2001:67c:4e8:f004::9,149.154.167.220 ",
+    )
+
+    settings = load_settings()
+
+    assert settings.telegram_admin_check_timeout_seconds == 1.5
+    assert settings.telegram_bot_api_fallback_ips == (
+        "149.154.167.220",
+        "2001:67c:4e8:f004::9",
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("TELEGRAM_ADMIN_CHECK_TIMEOUT_SECONDS", "0"),
+        ("TELEGRAM_ADMIN_CHECK_TIMEOUT_SECONDS", "invalid"),
+        ("TELEGRAM_BOT_API_FALLBACK_IPS", "not-an-ip"),
+        ("TELEGRAM_BOT_API_FALLBACK_IPS", "127.0.0.1"),
+        ("TELEGRAM_BOT_API_FALLBACK_IPS", "149.154.167.220,"),
+    ],
+)
+def test_telegram_network_settings_reject_invalid_values(
+    monkeypatch,
+    name: str,
+    value: str,
+) -> None:
+    _set_required_environment(monkeypatch)
+    monkeypatch.delenv("TELEGRAM_ADMIN_CHECK_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_API_FALLBACK_IPS", raising=False)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(RuntimeError, match=name):
+        load_settings()
+
+
 def test_mtproto_configuration_is_optional(monkeypatch) -> None:
     _set_required_environment(monkeypatch)
     monkeypatch.delenv("TELEGRAM_API_ID", raising=False)

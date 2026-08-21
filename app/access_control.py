@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -57,12 +58,14 @@ async def get_telegram_administrators_snapshot(
     *,
     telegram_chat_id: int,
     telegram_client: TelegramAdministratorsClient,
+    timeout_seconds: float | None = None,
 ) -> TelegramAdministratorsSnapshot:
     try:
-        administrators = await telegram_client.get_chat_administrators(
-            chat_id=telegram_chat_id
+        administrators = await asyncio.wait_for(
+            telegram_client.get_chat_administrators(chat_id=telegram_chat_id),
+            timeout=timeout_seconds,
         )
-    except TelegramAPIError as error:
+    except (TelegramAPIError, TimeoutError) as error:
         raise TelegramAdministratorsUnavailableError(
             "Telegram administrators are unavailable."
         ) from error
@@ -80,6 +83,7 @@ async def determine_access(
     telegram_user_id: int,
     telegram_client: TelegramAdministratorsClient,
     enforcement_enabled: bool,
+    telegram_timeout_seconds: float | None = None,
 ) -> AccessDecision:
     local_assignment = get_active_supermoderator_assignment_by_telegram_ids(
         database_path=database_path,
@@ -91,6 +95,7 @@ async def determine_access(
         administrators = await get_telegram_administrators_snapshot(
             telegram_chat_id=telegram_chat_id,
             telegram_client=telegram_client,
+            timeout_seconds=telegram_timeout_seconds,
         )
     except TelegramAdministratorsUnavailableError:
         role = AccessRole.SUPERMODERATOR if local_assignment is not None else None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import logging
 from dataclasses import dataclass
+from ipaddress import ip_address
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -25,6 +26,8 @@ class Settings:
     database_path: Path
     public_base_url: str | None
     role_enforcement_enabled: bool
+    telegram_admin_check_timeout_seconds: float
+    telegram_bot_api_fallback_ips: tuple[str, ...]
     telegram_api_id: int | None
     telegram_api_hash: str | None
     telegram_mtproto_session_path: Path
@@ -65,6 +68,13 @@ def load_settings() -> Settings:
         "ROLE_ENFORCEMENT_ENABLED",
         default=False,
     )
+    telegram_admin_check_timeout_seconds = _parse_positive_float_environment(
+        "TELEGRAM_ADMIN_CHECK_TIMEOUT_SECONDS",
+        default=3.0,
+    )
+    telegram_bot_api_fallback_ips = _parse_ip_address_list_environment(
+        "TELEGRAM_BOT_API_FALLBACK_IPS"
+    )
     telegram_api_id = _parse_optional_positive_integer_environment("TELEGRAM_API_ID")
     telegram_api_hash = os.getenv("TELEGRAM_API_HASH", "").strip() or None
     telegram_mtproto_session_path_value = os.getenv(
@@ -92,6 +102,8 @@ def load_settings() -> Settings:
         database_path=database_path,
         public_base_url=public_base_url,
         role_enforcement_enabled=role_enforcement_enabled,
+        telegram_admin_check_timeout_seconds=(telegram_admin_check_timeout_seconds),
+        telegram_bot_api_fallback_ips=telegram_bot_api_fallback_ips,
         telegram_api_id=telegram_api_id,
         telegram_api_hash=telegram_api_hash,
         telegram_mtproto_session_path=telegram_mtproto_session_path,
@@ -140,6 +152,45 @@ def _parse_positive_integer_environment(name: str, *, default: int) -> int:
     if parsed_value <= 0:
         raise RuntimeError(f"{name} must be a positive integer.")
     return parsed_value
+
+
+def _parse_positive_float_environment(name: str, *, default: float) -> float:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed_value = float(value)
+    except ValueError as error:
+        raise RuntimeError(f"{name} must be a positive number.") from error
+    if parsed_value <= 0:
+        raise RuntimeError(f"{name} must be a positive number.")
+    return parsed_value
+
+
+def _parse_ip_address_list_environment(name: str) -> tuple[str, ...]:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return ()
+
+    parsed_values: list[str] = []
+    seen_values: set[str] = set()
+    for item in value.split(","):
+        normalized_item = item.strip()
+        try:
+            parsed_item = ip_address(normalized_item)
+        except ValueError as error:
+            raise RuntimeError(
+                f"{name} must be a comma-separated list of public IP addresses."
+            ) from error
+        if not parsed_item.is_global:
+            raise RuntimeError(
+                f"{name} must be a comma-separated list of public IP addresses."
+            )
+        normalized_address = str(parsed_item)
+        if normalized_address not in seen_values:
+            parsed_values.append(normalized_address)
+            seen_values.add(normalized_address)
+    return tuple(parsed_values)
 
 
 def _parse_positive_integer_list_environment(name: str) -> frozenset[int]:

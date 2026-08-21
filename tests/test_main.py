@@ -92,6 +92,31 @@ def test_health_reports_missing_database_and_stopped_task(tmp_path: Path) -> Non
     }
 
 
+def test_create_telegram_bot_uses_configured_fallback_ips(monkeypatch) -> None:
+    recorded: dict[str, object] = {}
+
+    class FakeSession:
+        def __init__(self, *, fallback_ips: tuple[str, ...]) -> None:
+            recorded["fallback_ips"] = fallback_ips
+
+    class FakeBot:
+        def __init__(self, *, token: str, session: object) -> None:
+            recorded["token"] = token
+            recorded["session"] = session
+
+    monkeypatch.setattr(main, "TelegramApiAiohttpSession", FakeSession)
+    monkeypatch.setattr(main, "Bot", FakeBot)
+
+    bot = main._create_telegram_bot(
+        token="123:test",
+        fallback_ips=("149.154.167.220",),
+    )
+
+    assert isinstance(bot, FakeBot)
+    assert recorded["token"] == "123:test"
+    assert recorded["fallback_ips"] == ("149.154.167.220",)
+
+
 def test_tma_locks_champion_settings_after_actual_champion() -> None:
     card_source = _function_source("createChampionAdministrationCard")
 
@@ -263,6 +288,7 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         "load_settings",
         lambda: SimpleNamespace(
             bot_token="dummy",
+            telegram_bot_api_fallback_ips=(),
             database_path=Path("unused.db"),
             telegram_api_id=12345,
             telegram_api_hash="secret-hash",

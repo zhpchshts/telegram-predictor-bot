@@ -26,6 +26,7 @@ from app.telegram_username_resolver import (
     TelethonTelegramUsernameResolver,
     UnavailableTelegramUsernameResolver,
 )
+from app.telegram_api_session import TelegramApiAiohttpSession
 from app.ti2026_schedule_sync import run_ti2026_schedule_sync_worker
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +39,15 @@ EXPECTED_BACKGROUND_TASK_NAMES = (
     "match-lifecycle",
     "ti2026-schedule-sync",
 )
+
+
+def _create_telegram_bot(*, token: str, fallback_ips: tuple[str, ...]) -> Bot:
+    if not fallback_ips:
+        return Bot(token=token)
+    return Bot(
+        token=token,
+        session=TelegramApiAiohttpSession(fallback_ips=fallback_ips),
+    )
 
 
 async def _cancel_background_tasks(
@@ -111,7 +121,10 @@ def create_app() -> FastAPI:
         settings = load_settings()
         initialize_database(settings.database_path)
 
-        bot = Bot(token=settings.bot_token)
+        bot = _create_telegram_bot(
+            token=settings.bot_token,
+            fallback_ips=settings.telegram_bot_api_fallback_ips,
+        )
         app.state.telegram_bot = bot
         username_resolver = UnavailableTelegramUsernameResolver()
         telegram_api_id = settings.telegram_api_id
