@@ -18,10 +18,15 @@ from app.database import create_connection, initialize_database
 from app.shared_tournament_service import (
     SharedMatchConflictError,
     SharedMatchUpdateUnavailableError,
+    SharedTournamentCompletionUnavailableError,
     SharedTournamentConflictError,
+    SharedTournamentLockedError,
+    archive_shared_tournament,
     create_shared_match,
     create_shared_tournament,
     delete_shared_match,
+    get_shared_tournament_details,
+    restore_shared_tournament,
     save_shared_champion_result,
     save_shared_champion_settings,
     save_shared_match_result,
@@ -96,6 +101,236 @@ def _local_match_ids(database_path: Path, shared_match_id: int) -> dict[int, int
                 (shared_match_id,),
             )
         }
+
+
+def test_shared_tournament_archive_requires_results_and_can_be_restored(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    shared = _create_shared_tournament(database_path)
+    match = create_shared_match(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        home_team_id=shared.teams[0].id,
+        away_team_id=shared.teams[1].id,
+        starts_at_utc="2030-06-01T12:00:00Z",
+        best_of=None,
+        actor_telegram_user_id=OWNER_ID,
+        now_utc=_time("2029-01-01T00:00:00Z"),
+    )
+    contest = _create_contest(
+        database_path,
+        shared_tournament_id=shared.tournament.id,
+        chat_id=-1001,
+        suffix="Архив",
+    )
+    current = get_shared_tournament_details(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+    )
+    with pytest.raises(
+        SharedTournamentCompletionUnavailableError,
+        match="финальные результаты всех матчей",
+    ):
+        archive_shared_tournament(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            expected_version=current.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+            now_utc=_time("2030-06-01T13:00:00Z"),
+        )
+
+    saved_match = save_shared_match_result(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        shared_match_id=match.id,
+        home_score=2,
+        away_score=1,
+        advancing_team_id=shared.teams[0].id,
+        expected_version=match.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-06-01T13:00:00Z"),
+    )
+    current = get_shared_tournament_details(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+    )
+    archived = archive_shared_tournament(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        expected_version=current.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        now_utc=_time("2030-06-01T14:00:00Z"),
+    )
+    assert archived.tournament.is_archived is True
+    with pytest.raises(SharedTournamentLockedError, match="архиве"):
+        archive_shared_tournament(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            expected_version=archived.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+            now_utc=_time("2030-06-01T14:00:00Z"),
+        )
+    with create_connection(database_path) as connection:
+        contest_row = connection.execute(
+            "SELECT is_active FROM contests WHERE id = ?", (contest.id,)
+        ).fetchone()
+    assert contest_row is not None
+    assert bool(contest_row["is_active"]) is True
+    with pytest.raises(SharedTournamentLockedError, match="архиве"):
+        save_shared_match_result(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            shared_match_id=match.id,
+            home_score=1,
+            away_score=0,
+            advancing_team_id=shared.teams[0].id,
+            expected_version=saved_match.version,
+            actor_telegram_user_id=OWNER_ID,
+            actor_first_name="Eugene",
+            actor_last_name="Sabir",
+            actor_username="evsab",
+            now_utc=_time("2030-06-01T15:00:00Z"),
+        )
+
+    restored = restore_shared_tournament(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        expected_version=archived.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+    )
+    assert restored.tournament.is_archived is False
+    with pytest.raises(SharedTournamentConflictError, match="уже активен"):
+        restore_shared_tournament(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            expected_version=restored.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+        )
+    corrected = save_shared_match_result(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        shared_match_id=match.id,
+        home_score=1,
+        away_score=0,
+        advancing_team_id=shared.teams[0].id,
+        expected_version=saved_match.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-06-01T15:00:00Z"),
+    )
+    assert corrected.home_score == 1
+    with create_connection(database_path) as connection:
+        assert [
+            str(row["event_type"])
+            for row in connection.execute(
+                """
+                SELECT event_type
+                FROM shared_tournament_events
+                WHERE event_type IN (
+                    'shared_tournament.archived',
+                    'shared_tournament.restored'
+                )
+                ORDER BY id
+                """
+            )
+        ] == ["shared_tournament.archived", "shared_tournament.restored"]
+
+
+def test_shared_tournament_archive_requires_long_term_results(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    shared = _create_shared_tournament(database_path)
+    shared = save_shared_champion_settings(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        enabled=True,
+        deadline_at="2030-05-01T12:00:00Z",
+        points=7,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2029-01-01T00:00:00Z"),
+    )
+    shared = save_shared_swiss_settings(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        enabled=True,
+        deadline_at="2030-05-01T12:00:00Z",
+        direct_qualifier_count=1,
+        elimination_qualifier_count=1,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2029-01-01T00:00:00Z"),
+    )
+    with pytest.raises(
+        SharedTournamentCompletionUnavailableError,
+        match="фактического чемпиона",
+    ):
+        archive_shared_tournament(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            expected_version=shared.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+            now_utc=_time("2030-05-02T00:00:00Z"),
+        )
+
+    shared = save_shared_champion_result(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        champion_team_id=shared.teams[0].id,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-05-02T00:00:00Z"),
+    )
+    with pytest.raises(
+        SharedTournamentCompletionUnavailableError,
+        match="фактические итоги швейцарского этапа",
+    ):
+        archive_shared_tournament(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            expected_version=shared.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+            now_utc=_time("2030-05-02T00:00:00Z"),
+        )
+
+    shared = save_shared_swiss_result(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        direct_team_ids=[shared.teams[0].id],
+        elimination_team_ids=[shared.teams[1].id],
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-05-02T00:00:00Z"),
+    )
+    archived = archive_shared_tournament(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        now_utc=_time("2030-05-02T00:00:00Z"),
+    )
+    assert archived.tournament.is_archived is True
 
 
 def test_shared_match_is_materialized_per_contest_and_predictions_stay_separate(

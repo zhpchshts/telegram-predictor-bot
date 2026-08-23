@@ -73,16 +73,19 @@ from app.shared_tournament_service import (
     SharedMatchNotFoundError,
     SharedMatchResultUnavailableError,
     SharedMatchUpdateUnavailableError,
+    SharedTournamentCompletionUnavailableError,
     SharedTournamentConflictError,
     SharedTournamentLockedError,
     SharedTournamentNotFoundError,
     SharedTournamentResultUnavailableError,
     SharedTournamentSettingsLockedError,
+    archive_shared_tournament,
     create_shared_match,
     create_shared_tournament,
     delete_shared_match,
     get_shared_tournament_details,
     list_shared_tournaments,
+    restore_shared_tournament,
     save_shared_match_result,
     save_shared_champion_result,
     save_shared_champion_settings,
@@ -266,6 +269,12 @@ class SaveSharedTournamentTeamsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     team_names: list[str]
+    expected_version: SqliteInteger
+
+
+class SharedTournamentVersionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     expected_version: SqliteInteger
 
 
@@ -1056,6 +1065,63 @@ async def get_tma_shared_tournament(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
         ) from error
+    return {"shared_tournament": _serialize_shared_tournament_details(details)}
+
+
+@router.post("/shared-tournaments/{shared_tournament_id}/archive")
+async def archive_tma_shared_tournament(
+    shared_tournament_id: SqliteInteger,
+    payload: SharedTournamentVersionRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        details = archive_shared_tournament(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            expected_version=payload.expected_version,
+            actor_telegram_user_id=management.user.telegram_user_id,
+            now_utc=_utc_now(),
+        )
+    except SharedTournamentNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (
+        SharedTournamentCompletionUnavailableError,
+        SharedTournamentConflictError,
+        SharedTournamentLockedError,
+    ) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"shared_tournament": _serialize_shared_tournament_details(details)}
+
+
+@router.post("/shared-tournaments/{shared_tournament_id}/restore")
+async def restore_tma_shared_tournament(
+    shared_tournament_id: SqliteInteger,
+    payload: SharedTournamentVersionRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        details = restore_shared_tournament(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            expected_version=payload.expected_version,
+            actor_telegram_user_id=management.user.telegram_user_id,
+        )
+    except SharedTournamentNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except SharedTournamentConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     return {"shared_tournament": _serialize_shared_tournament_details(details)}
 
 

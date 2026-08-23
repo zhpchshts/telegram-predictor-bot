@@ -496,17 +496,29 @@ def test_shared_tournament_ui_owns_all_common_deadlines_and_results() -> None:
     screen_source = _function_source("renderSharedTournamentScreen")
     champion_source = _function_source("createSharedChampionCard")
     swiss_source = _function_source("createSharedSwissStageCard")
+    lifecycle_source = _function_source("createSharedTournamentLifecycleCard")
+    list_source = _function_source("createSharedTournamentListCard")
 
+    assert "createSharedTournamentLifecycleCard" in screen_source
     assert "createSharedTournamentTeamsCard" in screen_source
     assert "createSharedChampionCard" in screen_source
     assert "createSharedSwissStageCard" in screen_source
     assert "createSharedMatchCreationCard" in screen_source
+    assert "tournament.is_archived !== true" in screen_source
     assert "/champion-prediction/settings`" in champion_source
     assert "/champion`" in champion_source
     assert "во всех чатах" in champion_source
     assert "/swiss-stage/settings`" in swiss_source
     assert "/swiss-stage/result`" in swiss_source
     assert "во всех чатах" in swiss_source
+    assert "/archive`" in lifecycle_source
+    assert "/restore`" in lifecycle_source
+    assert "конкурсы нужно завершить отдельно" in lifecycle_source
+    assert "Вернуть в активные" in lifecycle_source
+    assert "tournament.is_archived === true" in champion_source
+    assert "tournament.is_archived === true" in swiss_source
+    assert '["Активные"' in list_source
+    assert '["Завершённые"' in list_source
 
 
 def test_linked_contest_hides_local_tournament_admin_forms() -> None:
