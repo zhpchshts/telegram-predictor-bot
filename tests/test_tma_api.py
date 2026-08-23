@@ -1824,6 +1824,14 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
             "/api/tma/shared-tournaments/{shared_tournament_id}",
         ): "shared_tournament_management",
         (
+            "POST",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/archive",
+        ): "shared_tournament_management",
+        (
+            "POST",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/restore",
+        ): "shared_tournament_management",
+        (
             "PUT",
             "/api/tma/shared-tournaments/{shared_tournament_id}/teams",
         ): "shared_tournament_management",
@@ -1969,6 +1977,60 @@ def test_shared_tournament_routes_require_explicit_global_allowlist(
     assert response.json()["detail"]["code"] == (
         "shared_tournament_management_forbidden"
     )
+
+
+def test_shared_tournament_api_archives_and_restores_read_only_tournament(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    monkeypatch.setenv("SHARED_TOURNAMENT_ADMIN_IDS", "123")
+    client = TestClient(create_app())
+
+    created_response = client.post(
+        "/api/tma/shared-tournaments",
+        headers=build_tma_headers(),
+        json={"name": "Завершённый ЧМ", "template_key": "world_cup_2026"},
+    )
+    assert created_response.status_code == 201
+    tournament = created_response.json()["shared_tournament"]
+
+    archived_response = client.post(
+        f"/api/tma/shared-tournaments/{tournament['id']}/archive",
+        headers=build_tma_headers(),
+        json={"expected_version": tournament["version"]},
+    )
+    assert archived_response.status_code == 200
+    archived = archived_response.json()["shared_tournament"]
+    assert archived["is_archived"] is True
+
+    blocked_update = client.put(
+        f"/api/tma/shared-tournaments/{tournament['id']}/teams",
+        headers=build_tma_headers(),
+        json={
+            "team_names": ["Испания", "Франция"],
+            "expected_version": archived["version"],
+        },
+    )
+    assert blocked_update.status_code == 409
+    assert "архиве" in blocked_update.json()["detail"]
+
+    listed_response = client.get(
+        "/api/tma/shared-tournaments",
+        headers=build_tma_headers(),
+    )
+    assert listed_response.status_code == 200
+    assert listed_response.json()["shared_tournaments"][0]["is_archived"] is True
+
+    restored_response = client.post(
+        f"/api/tma/shared-tournaments/{tournament['id']}/restore",
+        headers=build_tma_headers(),
+        json={"expected_version": archived["version"]},
+    )
+    assert restored_response.status_code == 200
+    assert restored_response.json()["shared_tournament"]["is_archived"] is False
 
 
 def test_shared_tournament_api_creates_linked_contest_and_blocks_local_edits(

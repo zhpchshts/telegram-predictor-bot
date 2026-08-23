@@ -37,6 +37,10 @@ class SharedTournamentLockedError(ValueError):
     pass
 
 
+class SharedTournamentCompletionUnavailableError(ValueError):
+    pass
+
+
 class SharedMatchNotFoundError(ValueError):
     pass
 
@@ -228,6 +232,170 @@ def create_shared_tournament(
         )
         return _get_shared_tournament_details(
             connection, shared_tournament_id=tournament_id
+        )
+
+
+def archive_shared_tournament(
+    *,
+    database_path: Path,
+    shared_tournament_id: int,
+    expected_version: int,
+    actor_telegram_user_id: int,
+    now_utc: datetime | None = None,
+) -> SharedTournamentDetails:
+    resolved_now = _resolve_now(now_utc)
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        tournament_row = _get_active_tournament_row(
+            connection, shared_tournament_id=shared_tournament_id
+        )
+        _require_expected_tournament_version(
+            tournament_row, expected_version=expected_version
+        )
+
+        incomplete_match = connection.execute(
+            """
+            SELECT 1
+            FROM shared_matches
+            WHERE shared_tournament_id = ?
+              AND (
+                  status != 'finished'
+                  OR home_score_final IS NULL
+                  OR away_score_final IS NULL
+                  OR advancing_team_id IS NULL
+              )
+            LIMIT 1
+            """,
+            (shared_tournament_id,),
+        ).fetchone()
+        if incomplete_match is not None:
+            raise SharedTournamentCompletionUnavailableError(
+                "Сначала внесите финальные результаты всех матчей общего турнира."
+            )
+
+        settings = _get_shared_settings_row(
+            connection, shared_tournament_id=shared_tournament_id
+        )
+        if bool(settings["champion_prediction_enabled"]):
+            champion_deadline = settings["champion_prediction_deadline_at"]
+            if champion_deadline is None:
+                raise SharedTournamentCompletionUnavailableError(
+                    "Сначала укажите дедлайн прогноза на чемпиона."
+                )
+            if _parse_datetime(str(champion_deadline)) > resolved_now:
+                raise SharedTournamentCompletionUnavailableError(
+                    "Общий турнир можно завершить после закрытия прогноза на чемпиона."
+                )
+            if settings["champion_team_id"] is None:
+                raise SharedTournamentCompletionUnavailableError(
+                    "Сначала укажите фактического чемпиона."
+                )
+
+        if bool(settings["swiss_stage_prediction_enabled"]):
+            swiss_deadline = settings["swiss_stage_prediction_deadline_at"]
+            if swiss_deadline is None:
+                raise SharedTournamentCompletionUnavailableError(
+                    "Сначала укажите дедлайн прогноза на швейцарский этап."
+                )
+            if _parse_datetime(str(swiss_deadline)) > resolved_now:
+                raise SharedTournamentCompletionUnavailableError(
+                    "Общий турнир можно завершить после закрытия прогноза "
+                    "на швейцарский этап."
+                )
+            direct_ids, elimination_ids = _get_shared_swiss_result_ids(
+                connection, shared_tournament_id=shared_tournament_id
+            )
+            if len(direct_ids) != int(settings["swiss_direct_qualifier_count"]) or len(
+                elimination_ids
+            ) != int(settings["swiss_elimination_qualifier_count"]):
+                raise SharedTournamentCompletionUnavailableError(
+                    "Сначала укажите фактические итоги швейцарского этапа."
+                )
+
+        updated = connection.execute(
+            """
+            UPDATE shared_tournaments
+            SET is_archived = 1,
+                version = version + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND is_archived = 0 AND version = ?
+            """,
+            (shared_tournament_id, expected_version),
+        )
+        if updated.rowcount != 1:
+            raise SharedTournamentConflictError(
+                "Общий турнир уже был изменён. Обновите данные и повторите действие."
+            )
+        _record_event(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_match_id=None,
+            actor_telegram_user_id=actor_telegram_user_id,
+            event_type="shared_tournament.archived",
+            before_state={"is_archived": False},
+            after_state={"is_archived": True},
+        )
+        return _get_shared_tournament_details(
+            connection, shared_tournament_id=shared_tournament_id
+        )
+
+
+def restore_shared_tournament(
+    *,
+    database_path: Path,
+    shared_tournament_id: int,
+    expected_version: int,
+    actor_telegram_user_id: int,
+) -> SharedTournamentDetails:
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        tournament_row = _get_tournament_row(
+            connection, shared_tournament_id=shared_tournament_id
+        )
+        _require_expected_tournament_version(
+            tournament_row, expected_version=expected_version
+        )
+        if not bool(tournament_row["is_archived"]):
+            raise SharedTournamentConflictError("Общий турнир уже активен.")
+        duplicate = connection.execute(
+            """
+            SELECT 1
+            FROM shared_tournaments
+            WHERE id != ? AND is_archived = 0 AND lower(name) = lower(?)
+            LIMIT 1
+            """,
+            (shared_tournament_id, str(tournament_row["name"])),
+        ).fetchone()
+        if duplicate is not None:
+            raise SharedTournamentConflictError(
+                "Нельзя восстановить общий турнир: активный турнир с таким "
+                "названием уже существует."
+            )
+        updated = connection.execute(
+            """
+            UPDATE shared_tournaments
+            SET is_archived = 0,
+                version = version + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND is_archived = 1 AND version = ?
+            """,
+            (shared_tournament_id, expected_version),
+        )
+        if updated.rowcount != 1:
+            raise SharedTournamentConflictError(
+                "Общий турнир уже был изменён. Обновите данные и повторите действие."
+            )
+        _record_event(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_match_id=None,
+            actor_telegram_user_id=actor_telegram_user_id,
+            event_type="shared_tournament.restored",
+            before_state={"is_archived": True},
+            after_state={"is_archived": False},
+        )
+        return _get_shared_tournament_details(
+            connection, shared_tournament_id=shared_tournament_id
         )
 
 
@@ -1884,14 +2052,21 @@ def _get_shared_match_row(
 def _get_active_tournament_row(
     connection: sqlite3.Connection, *, shared_tournament_id: int
 ) -> sqlite3.Row:
+    row = _get_tournament_row(connection, shared_tournament_id=shared_tournament_id)
+    if bool(row["is_archived"]):
+        raise SharedTournamentLockedError("Общий турнир находится в архиве.")
+    return row
+
+
+def _get_tournament_row(
+    connection: sqlite3.Connection, *, shared_tournament_id: int
+) -> sqlite3.Row:
     row = connection.execute(
         "SELECT * FROM shared_tournaments WHERE id = ?",
         (shared_tournament_id,),
     ).fetchone()
     if row is None:
         raise SharedTournamentNotFoundError("Общий турнир не найден.")
-    if bool(row["is_archived"]):
-        raise SharedTournamentLockedError("Общий турнир находится в архиве.")
     return row
 
 

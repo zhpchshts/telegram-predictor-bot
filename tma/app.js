@@ -7767,23 +7767,33 @@ function createSharedTournamentListCard(bootstrap, tournaments, state = {}) {
     return card;
   }
 
-  const list = createElement("ul", { className: "management-navigation-list" });
-  for (const tournament of tournaments) {
-    const item = createElement("li", { className: "management-list-item" });
-    const button = createManagementNavigationRow(
-      tournament.name,
-      (
-        `${tournament.match_count} ${getRussianPlural(tournament.match_count, "матч", "матча", "матчей")}, `
-        + `${tournament.linked_contest_count} ${getRussianPlural(tournament.linked_contest_count, "конкурс", "конкурса", "конкурсов")}`
-      ),
-      () => {
-        void openSharedTournament(bootstrap, tournament.id);
-      },
-    );
-    item.append(button);
-    list.append(item);
+  const groups = [
+    ["Активные", tournaments.filter((tournament) => tournament.is_archived !== true)],
+    ["Завершённые", tournaments.filter((tournament) => tournament.is_archived === true)],
+  ];
+  for (const [label, group] of groups) {
+    if (group.length === 0) {
+      continue;
+    }
+    card.append(createElement("h3", { text: label }));
+    const list = createElement("ul", { className: "management-navigation-list" });
+    for (const tournament of group) {
+      const item = createElement("li", { className: "management-list-item" });
+      const button = createManagementNavigationRow(
+        tournament.name,
+        (
+          `${tournament.match_count} ${getRussianPlural(tournament.match_count, "матч", "матча", "матчей")}, `
+          + `${tournament.linked_contest_count} ${getRussianPlural(tournament.linked_contest_count, "конкурс", "конкурса", "конкурсов")}`
+        ),
+        () => {
+          void openSharedTournament(bootstrap, tournament.id);
+        },
+      );
+      item.append(button);
+      list.append(item);
+    }
+    card.append(list);
   }
-  card.append(list);
   return card;
 }
 
@@ -7908,9 +7918,118 @@ async function openSharedTournamentManagement(bootstrap, state = {}) {
   }
 }
 
+function createSharedTournamentLifecycleCard(bootstrap, tournament) {
+  const card = createElement("section", { className: "info-card" });
+  const message = createElement("p", { className: "form-message" });
+  if (tournament.is_archived === true) {
+    const restoreButton = createActionButton(
+      "Вернуть в активные",
+      "secondary-action-button",
+    );
+    restoreButton.addEventListener("click", async () => {
+      restoreButton.disabled = true;
+      try {
+        await apiRequest(
+          `/api/tma/shared-tournaments/${tournament.id}/restore`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ expected_version: tournament.version }),
+          },
+        );
+        void openSharedTournament(bootstrap, tournament.id, {
+          message: "Общий турнир возвращён в активные.",
+          messageType: "success",
+        });
+      } catch (error) {
+        setFormMessage(
+          message,
+          error instanceof Error ? error.message : "Не удалось восстановить турнир.",
+          "error",
+        );
+        restoreButton.disabled = false;
+      }
+    });
+    card.append(
+      createElement("h2", { text: "Турнир завершён" }),
+      createElement("p", {
+        className: "subtitle",
+        text: (
+          "Данные доступны только для просмотра. Для позднего исправления "
+          + "результатов верните турнир в активные."
+        ),
+      }),
+      restoreButton,
+      message,
+    );
+    return card;
+  }
+
+  const archiveButton = createActionButton(
+    "Завершить общий турнир",
+    "danger-action-button",
+  );
+  archiveButton.addEventListener("click", async () => {
+    const confirmed = window.confirm(
+      "Завершить общий турнир? Он станет доступен только для просмотра, "
+      + "а автоматическая синхронизация расписания остановится. Связанные "
+      + "конкурсы нужно завершить отдельно.",
+    );
+    if (!confirmed) {
+      return;
+    }
+    archiveButton.disabled = true;
+    try {
+      await apiRequest(
+        `/api/tma/shared-tournaments/${tournament.id}/archive`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_version: tournament.version }),
+        },
+      );
+      void openSharedTournament(bootstrap, tournament.id, {
+        message: "Общий турнир завершён и перемещён в архив.",
+        messageType: "success",
+      });
+    } catch (error) {
+      setFormMessage(
+        message,
+        error instanceof Error ? error.message : "Не удалось завершить турнир.",
+        "error",
+      );
+      archiveButton.disabled = false;
+    }
+  });
+  card.append(
+    createElement("h2", { text: "Завершить общий турнир" }),
+    createElement("p", {
+      className: "subtitle",
+      text: (
+        "Завершение доступно после внесения результатов всех матчей и "
+        + "включённых долгосрочных прогнозов. Конкурсы в чатах останутся активными."
+      ),
+    }),
+    archiveButton,
+    message,
+  );
+  return card;
+}
+
 function createSharedTournamentTeamsCard(bootstrap, tournament, state = {}) {
   const card = createElement("section", { className: "info-card" });
   const heading = createElement("h2", { text: "Команды" });
+  if (tournament.is_archived === true) {
+    const teamNames = tournament.teams.map((team) => team.name).join(", ");
+    card.append(
+      heading,
+      createElement("p", {
+        className: "subtitle",
+        text: teamNames || "Команды не указаны.",
+      }),
+    );
+    return card;
+  }
   const form = createElement("form", { className: "form-fields" });
   const field = createElement("label", { className: "form-field" });
   const input = document.createElement("textarea");
@@ -7969,6 +8088,19 @@ function createSharedChampionCard(bootstrap, tournament) {
   const card = createElement("section", { className: "info-card" });
   card.append(createElement("h2", { text: "Прогноз на чемпиона" }));
   const settings = tournament.champion_prediction || {};
+  if (tournament.is_archived === true) {
+    const lines = settings.is_enabled
+      ? [
+          `Дедлайн: ${formatMatchStartsAt(settings.deadline_at)}`,
+          `Баллы: ${settings.points ?? 0}`,
+          `Фактический чемпион: ${settings.actual_champion?.name || "не указан"}`,
+        ]
+      : ["Прогноз не был включён."];
+    for (const line of lines) {
+      card.append(createElement("p", { className: "subtitle", text: line }));
+    }
+    return card;
+  }
   const form = createElement("form", { className: "form-fields" });
   const enabled = createElement("input");
   enabled.type = "checkbox";
@@ -8075,6 +8207,32 @@ function createSharedSwissStageCard(bootstrap, tournament) {
   const card = createElement("section", { className: "info-card" });
   card.append(createElement("h2", { text: "Швейцарский этап" }));
   const settings = tournament.swiss_stage_prediction || {};
+  if (tournament.is_archived === true) {
+    if (!settings.is_enabled) {
+      card.append(createElement("p", {
+        className: "subtitle",
+        text: "Прогноз не был включён.",
+      }));
+      return card;
+    }
+    const teamsById = new Map(
+      tournament.teams.map((team) => [team.id, team.name]),
+    );
+    const directNames = (settings.direct_qualifier_team_ids || [])
+      .map((teamId) => teamsById.get(teamId) || `#${teamId}`)
+      .join(", ");
+    const eliminationNames = (settings.elimination_qualifier_team_ids || [])
+      .map((teamId) => teamsById.get(teamId) || `#${teamId}`)
+      .join(", ");
+    for (const line of [
+      `Дедлайн: ${formatMatchStartsAt(settings.deadline_at)}`,
+      `Прошли напрямую: ${directNames || "не указаны"}`,
+      `Через стыковой раунд: ${eliminationNames || "не указаны"}`,
+    ]) {
+      card.append(createElement("p", { className: "subtitle", text: line }));
+    }
+    return card;
+  }
   const form = createElement("form", { className: "form-fields" });
   const enabled = createElement("input");
   enabled.type = "checkbox";
@@ -8300,6 +8458,20 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
   const message = createElement("p", { className: "form-message" });
   card.append(heading, impact, message);
 
+  if (tournament.is_archived === true) {
+    const advancingTeam = [match.home_team, match.away_team].find(
+      (team) => team.id === match.result?.advancing_team_id,
+    );
+    const resultText = match.result
+      ? (
+          `Итог: ${match.result.home_score}:${match.result.away_score}`
+          + (advancingTeam ? ` · прошла дальше ${advancingTeam.name}` : "")
+        )
+      : `Статус: ${match.status}`;
+    card.append(createElement("p", { className: "subtitle", text: resultText }));
+    return card;
+  }
+
   const deadlinePassed = new Date(match.starts_at_utc).getTime() <= Date.now();
   if (match.status === "scheduled" && !deadlinePassed) {
     const timeForm = createElement("form", { className: "form-fields" });
@@ -8461,11 +8633,14 @@ function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
     cards.push(createInfoCard("Готово", [state.message]));
   }
   cards.push(
+    createSharedTournamentLifecycleCard(bootstrap, tournament),
     createSharedTournamentTeamsCard(bootstrap, tournament, state),
     createSharedChampionCard(bootstrap, tournament),
     createSharedSwissStageCard(bootstrap, tournament),
-    createSharedMatchCreationCard(bootstrap, tournament, state),
   );
+  if (tournament.is_archived !== true) {
+    cards.push(createSharedMatchCreationCard(bootstrap, tournament, state));
+  }
   for (const match of tournament.matches || []) {
     cards.push(createSharedMatchAdministrationCard(bootstrap, tournament, match));
   }
