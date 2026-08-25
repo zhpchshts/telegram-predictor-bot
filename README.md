@@ -156,10 +156,8 @@ python -m scripts.migrate_shared_tournaments data/predictor.db `
 08:30 по локальному времени, догружает пропущенные копии через SSH, проверяет их
 SHA-256 и хранит 14 дней в `%USERPROFILE%\telegram-predictor-bot-backups`.
 
-Если задан `HEALTHCHECK_CHAT_ID`, бот сразу после запуска и затем раз в
-`HEALTHCHECK_INTERVAL_MINUTES` минут отправляет в этот Telegram-чат сообщение о
-работе Клевера. По умолчанию интервал равен 360 минут; без chat ID сообщения
-отключены.
+Если задан `HEALTHCHECK_CHAT_ID`, бот один раз после запуска отправляет в этот
+Telegram-чат сообщение о работе Клевера. Без chat ID сообщение отключено.
 
 ## Безопасность
 

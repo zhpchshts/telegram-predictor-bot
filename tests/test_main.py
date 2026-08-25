@@ -290,8 +290,8 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
     async def ti2026_schedule_sync_worker(**_kwargs) -> None:
         await background_task("ti2026-schedule-sync")
 
-    async def healthcheck_notification_worker(**_kwargs) -> None:
-        await background_task("telegram-healthcheck")
+    async def startup_healthcheck_notification(**_kwargs) -> None:
+        startup_steps.append("healthcheck-notification")
 
     monkeypatch.setattr(
         main,
@@ -304,7 +304,6 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
             telegram_api_hash="secret-hash",
             telegram_mtproto_session_path=Path("unused-session"),
             healthcheck_chat_id=100,
-            healthcheck_interval_minutes=360,
         ),
     )
     monkeypatch.setattr(
@@ -341,8 +340,8 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
     )
     monkeypatch.setattr(
         main,
-        "run_healthcheck_notification_worker",
-        healthcheck_notification_worker,
+        "send_healthcheck_notification",
+        startup_healthcheck_notification,
     )
 
     app = create_app()
@@ -364,7 +363,6 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         "contest-publication",
         "match-lifecycle",
         "ti2026-schedule-sync",
-        "telegram-healthcheck",
     }
     assert set(cancelled) == set(started)
     assert session_closed is True
@@ -374,3 +372,4 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         "initialize-database",
         "contest-publication-worker",
     ]
+    assert startup_steps.count("healthcheck-notification") == 1

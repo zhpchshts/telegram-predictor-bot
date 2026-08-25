@@ -32,7 +32,6 @@ class Settings:
     telegram_api_hash: str | None
     telegram_mtproto_session_path: Path
     healthcheck_chat_id: int | None
-    healthcheck_interval_minutes: int
     shared_tournament_admin_ids: frozenset[int]
 
 
@@ -88,10 +87,6 @@ def load_settings() -> Settings:
     healthcheck_chat_id = _parse_optional_nonzero_integer_environment(
         "HEALTHCHECK_CHAT_ID"
     )
-    healthcheck_interval_minutes = _parse_positive_integer_environment(
-        "HEALTHCHECK_INTERVAL_MINUTES",
-        default=360,
-    )
     shared_tournament_admin_ids = _parse_positive_integer_list_environment(
         "SHARED_TOURNAMENT_ADMIN_IDS"
     )
@@ -108,7 +103,6 @@ def load_settings() -> Settings:
         telegram_api_hash=telegram_api_hash,
         telegram_mtproto_session_path=telegram_mtproto_session_path,
         healthcheck_chat_id=healthcheck_chat_id,
-        healthcheck_interval_minutes=healthcheck_interval_minutes,
         shared_tournament_admin_ids=shared_tournament_admin_ids,
     )
 
@@ -138,19 +132,6 @@ def _parse_optional_nonzero_integer_environment(name: str) -> int | None:
         raise RuntimeError(f"{name} must be a non-zero integer.") from error
     if parsed_value == 0:
         raise RuntimeError(f"{name} must be a non-zero integer.")
-    return parsed_value
-
-
-def _parse_positive_integer_environment(name: str, *, default: int) -> int:
-    value = os.getenv(name, "").strip()
-    if not value:
-        return default
-    try:
-        parsed_value = int(value)
-    except ValueError as error:
-        raise RuntimeError(f"{name} must be a positive integer.") from error
-    if parsed_value <= 0:
-        raise RuntimeError(f"{name} must be a positive integer.")
     return parsed_value
 
 
