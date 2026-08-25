@@ -78,10 +78,12 @@ python -m app.main
 ```
 
 Проверка состояния будет доступна по адресу
-`http://127.0.0.1:8000/health`. Она проверяет доступность актуальной схемы БД и
-работу Telegram polling, lifecycle worker и обоих publication workers; при
-ошибке возвращается HTTP 503. Для запуска Mini App внутри Telegram нужен
-публичный HTTPS-адрес в `PUBLIC_BASE_URL`.
+`http://127.0.0.1:8000/health`. Endpoint поддерживает методы `GET` и `HEAD`,
+поэтому его можно использовать для внешнего мониторинга, в том числе
+UptimeRobot. Оба метода проверяют доступность актуальной схемы БД и работу
+Telegram polling, lifecycle worker и обоих publication workers; при ошибке
+возвращается HTTP 503, а ответ на `HEAD` не содержит тела. Для запуска Mini App
+внутри Telegram нужен публичный HTTPS-адрес в `PUBLIC_BASE_URL`.
 
 Проверка администраторов Telegram при открытии Mini App ограничена коротким
 таймаутом: недоступность Bot API не блокирует участникам просмотр конкурсов и

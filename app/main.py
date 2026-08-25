@@ -115,6 +115,28 @@ def _background_task_statuses(
     return statuses
 
 
+def _build_health_response(request: Request) -> JSONResponse:
+    database_ok = _database_is_available(
+        getattr(request.app.state, "database_path", None)
+    )
+    task_statuses = _background_task_statuses(
+        getattr(request.app.state, "background_tasks", None)
+    )
+    healthy = database_ok and all(
+        task_status == "ok" for task_status in task_statuses.values()
+    )
+    return JSONResponse(
+        status_code=200 if healthy else 503,
+        content={
+            "status": "ok" if healthy else "unhealthy",
+            "checks": {
+                "database": "ok" if database_ok else "unavailable",
+                "background_tasks": task_statuses,
+            },
+        },
+    )
+
+
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -252,24 +274,14 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health(request: Request) -> JSONResponse:
-        database_ok = _database_is_available(
-            getattr(request.app.state, "database_path", None)
-        )
-        task_statuses = _background_task_statuses(
-            getattr(request.app.state, "background_tasks", None)
-        )
-        healthy = database_ok and all(
-            task_status == "ok" for task_status in task_statuses.values()
-        )
-        return JSONResponse(
-            status_code=200 if healthy else 503,
-            content={
-                "status": "ok" if healthy else "unhealthy",
-                "checks": {
-                    "database": "ok" if database_ok else "unavailable",
-                    "background_tasks": task_statuses,
-                },
-            },
+        return _build_health_response(request)
+
+    @app.head("/health")
+    async def health_head(request: Request) -> Response:
+        health_response = _build_health_response(request)
+        return Response(
+            status_code=health_response.status_code,
+            headers=dict(health_response.headers),
         )
 
     app.mount(

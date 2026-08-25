@@ -52,7 +52,9 @@ def test_health_checks_database_and_background_tasks(tmp_path: Path) -> None:
         for name in main.EXPECTED_BACKGROUND_TASK_NAMES
     }
 
-    response = TestClient(app).get("/health")
+    client = TestClient(app)
+    response = client.get("/health")
+    head_response = client.head("/health")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -64,6 +66,9 @@ def test_health_checks_database_and_background_tasks(tmp_path: Path) -> None:
             },
         },
     }
+    assert head_response.status_code == response.status_code
+    assert head_response.content == b""
+    assert head_response.headers["content-length"] == response.headers["content-length"]
 
 
 def test_health_reports_missing_database_and_stopped_task(tmp_path: Path) -> None:
@@ -74,7 +79,9 @@ def test_health_reports_missing_database_and_stopped_task(tmp_path: Path) -> Non
         for name in main.EXPECTED_BACKGROUND_TASK_NAMES
     }
 
-    response = TestClient(app).get("/health")
+    client = TestClient(app)
+    response = client.get("/health")
+    head_response = client.head("/health")
 
     assert response.status_code == 503
     assert response.json() == {
@@ -90,6 +97,9 @@ def test_health_reports_missing_database_and_stopped_task(tmp_path: Path) -> Non
             },
         },
     }
+    assert head_response.status_code == response.status_code
+    assert head_response.content == b""
+    assert head_response.headers["content-length"] == response.headers["content-length"]
 
 
 def test_create_telegram_bot_uses_configured_fallback_ips(monkeypatch) -> None:
