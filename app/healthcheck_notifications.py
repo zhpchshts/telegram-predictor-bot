@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import logging
 from pathlib import Path
 from typing import Protocol
 
 from app.database import database_connection
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 class TelegramHealthcheckClient(Protocol):
@@ -96,23 +91,3 @@ async def send_healthcheck_notification(
             f"Сохранённых прогнозов: {snapshot.saved_predictions_count}"
         ),
     )
-
-
-async def run_healthcheck_notification_worker(
-    *,
-    bot: TelegramHealthcheckClient,
-    database_path: Path,
-    chat_id: int,
-    interval_minutes: int,
-) -> None:
-    interval_seconds = interval_minutes * 60
-    while True:
-        try:
-            await send_healthcheck_notification(
-                bot=bot,
-                database_path=database_path,
-                chat_id=chat_id,
-            )
-        except Exception:
-            LOGGER.exception("Could not send the Telegram healthcheck notification.")
-        await asyncio.sleep(interval_seconds)

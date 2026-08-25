@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from app.bot import create_dispatcher
 from app.config import load_settings
 from app.database import database_connection, initialize_database
-from app.healthcheck_notifications import run_healthcheck_notification_worker
+from app.healthcheck_notifications import send_healthcheck_notification
 from app.match_prediction_publications import (
     run_match_prediction_publication_worker,
 )
@@ -94,6 +94,22 @@ def _database_is_available(database_path: Path | None) -> bool:
         return False
 
     return True
+
+
+async def _send_startup_healthcheck_notification(
+    *,
+    bot: Bot,
+    database_path: Path,
+    chat_id: int,
+) -> None:
+    try:
+        await send_healthcheck_notification(
+            bot=bot,
+            database_path=database_path,
+            chat_id=chat_id,
+        )
+    except Exception:
+        logger.exception("Could not send the Telegram startup notification.")
 
 
 def _background_task_statuses(
@@ -204,15 +220,14 @@ def create_app() -> FastAPI:
             run_ti2026_schedule_sync_worker(database_path=settings.database_path),
             name="ti2026-schedule-sync",
         )
-        healthcheck_notification_task = (
+        startup_notification_task = (
             asyncio.create_task(
-                run_healthcheck_notification_worker(
+                _send_startup_healthcheck_notification(
                     bot=bot,
                     database_path=settings.database_path,
                     chat_id=settings.healthcheck_chat_id,
-                    interval_minutes=settings.healthcheck_interval_minutes,
                 ),
-                name="telegram-healthcheck-notifications",
+                name="telegram-startup-notification",
             )
             if settings.healthcheck_chat_id is not None
             else None
@@ -223,11 +238,6 @@ def create_app() -> FastAPI:
             contest_publication_task,
             match_lifecycle_task,
             ti2026_schedule_sync_task,
-            *(
-                (healthcheck_notification_task,)
-                if healthcheck_notification_task is not None
-                else ()
-            ),
         )
         background_tasks = {task.get_name(): task for task in started_tasks}
         app.state.database_path = settings.database_path
@@ -236,7 +246,16 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
-            await _cancel_background_tasks(tuple(background_tasks.values()))
+            await _cancel_background_tasks(
+                (
+                    *background_tasks.values(),
+                    *(
+                        (startup_notification_task,)
+                        if startup_notification_task is not None
+                        else ()
+                    ),
+                )
+            )
 
             try:
                 await bot.session.close()

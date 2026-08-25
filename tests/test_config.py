@@ -130,23 +130,19 @@ def test_invalid_mtproto_api_id_does_not_break_settings(monkeypatch) -> None:
 def test_healthcheck_notifications_default_to_disabled(monkeypatch) -> None:
     _set_required_environment(monkeypatch)
     monkeypatch.delenv("HEALTHCHECK_CHAT_ID", raising=False)
-    monkeypatch.delenv("HEALTHCHECK_INTERVAL_MINUTES", raising=False)
 
     settings = load_settings()
 
     assert settings.healthcheck_chat_id is None
-    assert settings.healthcheck_interval_minutes == 360
 
 
-def test_healthcheck_notifications_parse_chat_and_interval(monkeypatch) -> None:
+def test_healthcheck_notifications_parse_chat(monkeypatch) -> None:
     _set_required_environment(monkeypatch)
     monkeypatch.setenv("HEALTHCHECK_CHAT_ID", "-1001234567890")
-    monkeypatch.setenv("HEALTHCHECK_INTERVAL_MINUTES", "120")
 
     settings = load_settings()
 
     assert settings.healthcheck_chat_id == -1001234567890
-    assert settings.healthcheck_interval_minutes == 120
 
 
 def test_shared_tournament_admin_ids_are_optional_and_deduplicated(monkeypatch) -> None:
@@ -172,9 +168,6 @@ def test_shared_tournament_admin_ids_reject_invalid_values(
     [
         ("HEALTHCHECK_CHAT_ID", "invalid"),
         ("HEALTHCHECK_CHAT_ID", "0"),
-        ("HEALTHCHECK_INTERVAL_MINUTES", "invalid"),
-        ("HEALTHCHECK_INTERVAL_MINUTES", "0"),
-        ("HEALTHCHECK_INTERVAL_MINUTES", "-1"),
     ],
 )
 def test_healthcheck_notifications_reject_invalid_values(
@@ -184,7 +177,6 @@ def test_healthcheck_notifications_reject_invalid_values(
 ) -> None:
     _set_required_environment(monkeypatch)
     monkeypatch.delenv("HEALTHCHECK_CHAT_ID", raising=False)
-    monkeypatch.delenv("HEALTHCHECK_INTERVAL_MINUTES", raising=False)
     monkeypatch.setenv(name, value)
 
     with pytest.raises(RuntimeError, match=name):
