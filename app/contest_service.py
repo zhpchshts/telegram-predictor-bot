@@ -1030,10 +1030,9 @@ def complete_contest(
     audit_actor: AuditActor,
     now_utc: datetime | None = None,
 ) -> None:
-    resolved_now_utc = _resolve_now_utc(now_utc)
-
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now_utc = _resolve_now_utc(now_utc)
         contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -1901,10 +1900,9 @@ def save_match_prediction(
         predicted_advancing_team_id,
         field_name="Прогноз победителя противостояния",
     )
-    resolved_now_utc = _resolve_now_utc(now_utc)
-
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now_utc = _resolve_now_utc(now_utc)
         _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -2041,10 +2039,9 @@ def save_match_result(
         advancing_team_id,
         field_name="Победитель противостояния",
     )
-    resolved_now_utc = _resolve_now_utc(now_utc)
-
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now_utc = _resolve_now_utc(now_utc)
         _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -2093,6 +2090,16 @@ def save_match_result(
             username=username,
         )
         previous_result = _match_result_from_row(match_row)
+        saved_result = MatchResult(
+            home_score=normalized_home_score,
+            away_score=normalized_away_score,
+            advancing_team_id=normalized_advancing_team_id,
+        )
+        if str(match_row["status"]) == "finished" and previous_result == saved_result:
+            return MatchResultSaveResult(
+                result=saved_result,
+                was_created=False,
+            )
 
         connection.execute(
             """
@@ -2196,13 +2203,7 @@ def save_match_result(
         if saved_match_row is None:
             raise RuntimeError("Не удалось повторно прочитать результат матча.")
         previous_result_state = _match_result_snapshot(previous_result)
-        saved_result_state = _match_result_snapshot(
-            MatchResult(
-                home_score=normalized_home_score,
-                away_score=normalized_away_score,
-                advancing_team_id=normalized_advancing_team_id,
-            )
-        )
+        saved_result_state = _match_result_snapshot(saved_result)
         if previous_result_state != saved_result_state:
             _record_audit(
                 connection,
@@ -2221,11 +2222,7 @@ def save_match_result(
             )
 
         return MatchResultSaveResult(
-            result=MatchResult(
-                home_score=normalized_home_score,
-                away_score=normalized_away_score,
-                advancing_team_id=normalized_advancing_team_id,
-            ),
+            result=saved_result,
             was_created=previous_result is None,
         )
 
@@ -2248,10 +2245,9 @@ def save_match_prediction_publication_settings(
             "Настройка публикации прогнозов должна быть включена или выключена."
         )
 
-    resolved_now_utc = _resolve_now_utc(now_utc)
-
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now_utc = _resolve_now_utc(now_utc)
         contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -2502,10 +2498,9 @@ def save_champion_prediction(
         predicted_team_id,
         field_name="Прогноз на чемпиона",
     )
-    resolved_now_utc = _resolve_now_utc(now_utc)
-
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now_utc = _resolve_now_utc(now_utc)
         _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -2554,13 +2549,18 @@ def save_champion_prediction(
 
         existing_prediction = connection.execute(
             """
-            SELECT id
+            SELECT id, predicted_team_id
             FROM champion_predictions
             WHERE contest_id = ?
                 AND user_id = ?
             """,
             (contest_id, user_id),
         ).fetchone()
+        if (
+            existing_prediction is not None
+            and int(existing_prediction["predicted_team_id"]) == normalized_team_id
+        ):
+            return _team_summary_from_row(team_row)
 
         connection.execute(
             """
@@ -2623,10 +2623,9 @@ def save_contest_champion(
         field_name="Фактический чемпион",
     )
 
-    resolved_now_utc = _resolve_now_utc(now_utc)
-
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now_utc = _resolve_now_utc(now_utc)
         contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -2911,10 +2910,9 @@ def save_swiss_stage_prediction(
             elimination_team_ids,
         )
     )
-    resolved_now_utc = _resolve_now_utc(now_utc)
-
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now_utc = _resolve_now_utc(now_utc)
         _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
@@ -3011,10 +3009,9 @@ def save_swiss_stage_result(
             elimination_team_ids,
         )
     )
-    resolved_now_utc = _resolve_now_utc(now_utc)
-
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now_utc = _resolve_now_utc(now_utc)
         _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,

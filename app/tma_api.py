@@ -137,6 +137,22 @@ TMA_INIT_DATA_HEADER = "X-Telegram-Init-Data"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 SQLITE_SIGNED_64_MIN = -(2**63)
 SQLITE_SIGNED_64_MAX = 2**63 - 1
+CONTEST_TEMPLATE_OPTIONS = (
+    {
+        "key": "world_cup_2026",
+        "label": "Чемпионат мира 2026",
+    },
+    {
+        "key": "the_international_2026",
+        "label": "The International 2026",
+    },
+)
+SUPPORTED_TEMPLATE_KEYS = frozenset(
+    option["key"] for option in CONTEST_TEMPLATE_OPTIONS
+)
+# Seasonal templates remain supported for historical data, but neither 2026
+# tournament is available for creating new contests.
+CREATABLE_TEMPLATE_KEYS: frozenset[str] = frozenset()
 
 
 def _reject_boolean_integer(value: object) -> object:
@@ -154,6 +170,29 @@ SqliteInteger = Annotated[
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _serialize_creatable_template_options() -> list[dict[str, str]]:
+    return [
+        {"key": option["key"], "label": option["label"]}
+        for option in CONTEST_TEMPLATE_OPTIONS
+        if option["key"] in CREATABLE_TEMPLATE_KEYS
+    ]
+
+
+def _require_creatable_template(template_key: str) -> None:
+    if template_key not in SUPPORTED_TEMPLATE_KEYS:
+        raise _application_http_error(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code="template_unknown",
+            message="Неизвестный шаблон турнира.",
+        )
+    if template_key not in CREATABLE_TEMPLATE_KEYS:
+        raise _application_http_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="template_unavailable",
+            message="Выбранный шаблон больше недоступен для создания.",
+        )
 
 
 def _audit_actor(context: TmaContext, access: AccessDecision) -> AuditActor:
@@ -176,10 +215,7 @@ class CreateContestRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    template_key: Literal[
-        "world_cup_2026",
-        "the_international_2026",
-    ] = "world_cup_2026"
+    template_key: str
     shared_tournament_id: SqliteInteger | None = None
 
 
@@ -262,7 +298,7 @@ class CreateSharedTournamentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    template_key: Literal["world_cup_2026", "the_international_2026"]
+    template_key: str
 
 
 class SaveSharedTournamentTeamsRequest(BaseModel):
@@ -609,6 +645,7 @@ async def get_tma_management_contests(
             )
             if not tournament.is_archived
         ],
+        "contest_templates": _serialize_creatable_template_options(),
         "chat_settings": {
             "app_button_text": chat_settings.app_button_text,
         },
@@ -952,13 +989,15 @@ async def create_tma_contest(
             detail="Не передан ключ идемпотентности создания конкурса.",
         )
 
+    _require_creatable_template(payload.template_key)
     settings = load_settings()
     try:
-        create_contest = (
-            create_the_international_2026_contest
-            if payload.template_key == "the_international_2026"
-            else create_world_cup_2026_contest
-        )
+        if payload.template_key == "world_cup_2026":
+            create_contest = create_world_cup_2026_contest
+        elif payload.template_key == "the_international_2026":
+            create_contest = create_the_international_2026_contest
+        else:  # pragma: no cover - guarded by _require_creatable_template
+            raise RuntimeError("Unsupported creatable contest template.")
         result = create_contest(
             database_path=settings.database_path,
             telegram_chat_id=context.chat.telegram_chat_id,
@@ -1015,7 +1054,8 @@ async def get_tma_shared_tournaments(
             for tournament in list_shared_tournaments(
                 database_path=settings.database_path
             )
-        ]
+        ],
+        "contest_templates": _serialize_creatable_template_options(),
     }
 
 
@@ -1027,6 +1067,7 @@ async def create_tma_shared_tournament(
         Depends(_authorize_shared_tournament_management),
     ],
 ) -> dict[str, object]:
+    _require_creatable_template(payload.template_key)
     settings = load_settings()
     try:
         details = create_shared_tournament(

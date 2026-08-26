@@ -88,6 +88,13 @@ class SharedMatch:
 
 
 @dataclass(frozen=True, slots=True)
+class SharedMatchExternalResolution:
+    match: SharedMatch | None
+    was_linked: bool
+    was_created: bool
+
+
+@dataclass(frozen=True, slots=True)
 class SharedTournamentSummary:
     id: int
     name: str
@@ -243,9 +250,9 @@ def archive_shared_tournament(
     actor_telegram_user_id: int,
     now_utc: datetime | None = None,
 ) -> SharedTournamentDetails:
-    resolved_now = _resolve_now(now_utc)
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now = _resolve_now(now_utc)
         tournament_row = _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
         )
@@ -413,6 +420,32 @@ def save_shared_tournament_teams(
         tournament_row = _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
         )
+        before_names = [
+            str(row["name"])
+            for row in connection.execute(
+                """
+                SELECT teams.name
+                FROM shared_tournament_teams AS selection
+                JOIN teams ON teams.id = selection.team_id
+                WHERE selection.shared_tournament_id = ?
+                ORDER BY selection.position
+                """,
+                (shared_tournament_id,),
+            ).fetchall()
+        ]
+        if tuple(before_names) == normalized_names and (
+            _expected_version_allows_exact_noop(
+                connection,
+                tournament_row,
+                shared_tournament_id=shared_tournament_id,
+                expected_version=expected_version,
+                actor_telegram_user_id=actor_telegram_user_id,
+                event_types=("shared_tournament.teams_updated",),
+            )
+        ):
+            return _get_shared_tournament_details(
+                connection, shared_tournament_id=shared_tournament_id
+            )
         _require_expected_tournament_version(
             tournament_row, expected_version=expected_version
         )
@@ -479,19 +512,6 @@ def save_shared_tournament_teams(
                 "Сумма лимитов швейцарского этапа не может превышать "
                 "количество команд турнира."
             )
-        before_names = [
-            str(row["name"])
-            for row in connection.execute(
-                """
-                SELECT teams.name
-                FROM shared_tournament_teams AS selection
-                JOIN teams ON teams.id = selection.team_id
-                WHERE selection.shared_tournament_id = ?
-                ORDER BY selection.position
-                """,
-                (shared_tournament_id,),
-            ).fetchall()
-        ]
         team_ids = [
             _find_or_create_team(connection, team_name=name)
             for name in normalized_names
@@ -565,17 +585,106 @@ def create_shared_match(
     allow_duplicate_pair: bool = False,
 ) -> SharedMatch:
     normalized_start = _normalize_datetime(starts_at_utc)
-    resolved_now = _resolve_now(now_utc)
-    if _parse_datetime(normalized_start) <= resolved_now:
-        raise ValueError("Время начала нового матча должно быть в будущем.")
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        resolved_now = _resolve_now(now_utc)
+        if _parse_datetime(normalized_start) <= resolved_now:
+            raise ValueError("Время начала нового матча должно быть в будущем.")
+        tournament_row = _get_active_tournament_row(
+            connection, shared_tournament_id=shared_tournament_id
+        )
+        return _create_shared_match_in_connection(
+            connection,
+            tournament_row=tournament_row,
+            shared_tournament_id=shared_tournament_id,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            normalized_start=normalized_start,
+            best_of=best_of,
+            actor_telegram_user_id=actor_telegram_user_id,
+            resolved_now=resolved_now,
+            allow_duplicate_pair=allow_duplicate_pair,
+        )
+
+
+def resolve_shared_match_external_link(
+    *,
+    database_path: Path,
+    shared_tournament_id: int,
+    source: str,
+    external_event_id: str,
+    external_match_id: str,
+    home_team_id: int,
+    away_team_id: int,
+    external_starts_at_utc: str,
+    create_starts_at_utc: str | None,
+    best_of: int | None,
+    actor_telegram_user_id: int,
+    now_utc: datetime | None = None,
+) -> SharedMatchExternalResolution:
+    normalized_source = _normalize_external_identity(source, field_name="Источник")
+    normalized_event_id = _normalize_external_identity(
+        external_event_id,
+        field_name="Идентификатор внешнего турнира",
+    )
+    normalized_match_id = _normalize_external_identity(
+        external_match_id,
+        field_name="Идентификатор внешнего матча",
+    )
+    normalized_external_start = _normalize_datetime(external_starts_at_utc)
+    normalized_create_start = (
+        _normalize_datetime(create_starts_at_utc)
+        if create_starts_at_utc is not None
+        else None
+    )
+
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
         tournament_row = _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
         )
-        normalized_best_of = _normalize_best_of(
-            best_of, template_key=str(tournament_row["template_key"])
-        )
+        linked_row = connection.execute(
+            """
+            SELECT shared_match_id
+            FROM shared_match_external_links
+            WHERE shared_tournament_id = ?
+              AND source = ?
+              AND external_event_id = ?
+              AND external_match_id = ?
+            """,
+            (
+                shared_tournament_id,
+                normalized_source,
+                normalized_event_id,
+                normalized_match_id,
+            ),
+        ).fetchone()
+        if linked_row is not None:
+            linked_match_id = int(linked_row["shared_match_id"])
+            linked_match_row = _get_shared_match_row(
+                connection,
+                shared_tournament_id=shared_tournament_id,
+                shared_match_id=linked_match_id,
+            )
+            if {
+                int(linked_match_row["home_team_id"]),
+                int(linked_match_row["away_team_id"]),
+            } != {home_team_id, away_team_id}:
+                raise SharedMatchConflictError(
+                    "Внешний матч уже связан с другой парой команд."
+                )
+            return SharedMatchExternalResolution(
+                match=_shared_match_from_row(
+                    _get_shared_match_details_row(
+                        connection,
+                        shared_tournament_id=shared_tournament_id,
+                        shared_match_id=linked_match_id,
+                    )
+                ),
+                was_linked=False,
+                was_created=False,
+            )
+
         home_team = _get_shared_team_row(
             connection,
             shared_tournament_id=shared_tournament_id,
@@ -590,15 +699,24 @@ def create_shared_match(
             raise ValueError("Обе команды должны входить в общий турнир.")
         if home_team_id == away_team_id:
             raise ValueError("В матче должны участвовать разные команды.")
-        duplicate = connection.execute(
+
+        candidate_rows = connection.execute(
             """
-            SELECT 1
-            FROM shared_matches
-            WHERE shared_tournament_id = ?
+            SELECT shared_match.*
+            FROM shared_matches AS shared_match
+            WHERE shared_match.shared_tournament_id = ?
               AND (
-                    (home_team_id = ? AND away_team_id = ?)
-                 OR (home_team_id = ? AND away_team_id = ?)
+                    (shared_match.home_team_id = ?
+                     AND shared_match.away_team_id = ?)
+                 OR (shared_match.home_team_id = ?
+                     AND shared_match.away_team_id = ?)
               )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM shared_match_external_links AS external_link
+                  WHERE external_link.shared_match_id = shared_match.id
+              )
+            ORDER BY shared_match.starts_at_utc, shared_match.id
             """,
             (
                 shared_tournament_id,
@@ -607,70 +725,75 @@ def create_shared_match(
                 away_team_id,
                 home_team_id,
             ),
-        ).fetchone()
-        if duplicate is not None and not allow_duplicate_pair:
-            raise SharedMatchConflictError(
-                "Матч между этими командами уже существует в общем турнире."
-            )
-        shared_match_id = int(
-            connection.execute(
-                """
-                INSERT INTO shared_matches (
-                    shared_tournament_id,
-                    home_team_id,
-                    away_team_id,
-                    starts_at_utc,
-                    best_of
-                )
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    shared_tournament_id,
-                    home_team_id,
-                    away_team_id,
-                    normalized_start,
-                    normalized_best_of,
-                ),
-            ).lastrowid
-        )
-        contest_rows = connection.execute(
-            """
-            SELECT contests.id
-            FROM contest_shared_tournaments AS link
-            JOIN contests ON contests.id = link.contest_id
-            WHERE link.shared_tournament_id = ? AND contests.is_active = 1
-            ORDER BY contests.id
-            """,
-            (shared_tournament_id,),
         ).fetchall()
-        shared_match_row = _get_shared_match_row(
-            connection,
-            shared_tournament_id=shared_tournament_id,
-            shared_match_id=shared_match_id,
-        )
-        for contest_row in contest_rows:
-            _create_local_match(
-                connection,
-                contest_id=int(contest_row["id"]),
-                shared_match_row=shared_match_row,
+        if candidate_rows:
+            external_start = _parse_datetime(normalized_external_start)
+            candidate_row = min(
+                candidate_rows,
+                key=lambda row: abs(
+                    (
+                        _parse_datetime(str(row["starts_at_utc"])) - external_start
+                    ).total_seconds()
+                ),
             )
-        _touch_tournament(connection, shared_tournament_id=shared_tournament_id)
-        _record_event(
-            connection,
-            shared_tournament_id=shared_tournament_id,
-            shared_match_id=shared_match_id,
-            actor_telegram_user_id=actor_telegram_user_id,
-            event_type="shared_match.created",
-            before_state=None,
-            after_state=_shared_match_snapshot(shared_match_row),
-            metadata={"linked_contest_count": len(contest_rows)},
-        )
-        return _shared_match_from_row(
-            _get_shared_match_details_row(
+            shared_match_id = int(candidate_row["id"])
+            _insert_shared_match_external_link(
                 connection,
-                shared_tournament_id=shared_tournament_id,
                 shared_match_id=shared_match_id,
+                shared_tournament_id=shared_tournament_id,
+                source=normalized_source,
+                external_event_id=normalized_event_id,
+                external_match_id=normalized_match_id,
             )
+            return SharedMatchExternalResolution(
+                match=_shared_match_from_row(
+                    _get_shared_match_details_row(
+                        connection,
+                        shared_tournament_id=shared_tournament_id,
+                        shared_match_id=shared_match_id,
+                    )
+                ),
+                was_linked=True,
+                was_created=False,
+            )
+
+        if normalized_create_start is None:
+            return SharedMatchExternalResolution(
+                match=None,
+                was_linked=False,
+                was_created=False,
+            )
+
+        created_match = _create_shared_match_in_connection(
+            connection,
+            tournament_row=tournament_row,
+            shared_tournament_id=shared_tournament_id,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            normalized_start=normalized_create_start,
+            best_of=best_of,
+            actor_telegram_user_id=actor_telegram_user_id,
+            resolved_now=_resolve_now(now_utc),
+            allow_duplicate_pair=True,
+        )
+        _insert_shared_match_external_link(
+            connection,
+            shared_match_id=created_match.id,
+            shared_tournament_id=shared_tournament_id,
+            source=normalized_source,
+            external_event_id=normalized_event_id,
+            external_match_id=normalized_match_id,
+        )
+        return SharedMatchExternalResolution(
+            match=_shared_match_from_row(
+                _get_shared_match_details_row(
+                    connection,
+                    shared_tournament_id=shared_tournament_id,
+                    shared_match_id=created_match.id,
+                )
+            ),
+            was_linked=True,
+            was_created=True,
         )
 
 
@@ -685,13 +808,13 @@ def update_shared_match_start(
     now_utc: datetime | None = None,
 ) -> SharedMatch:
     normalized_start = _normalize_datetime(starts_at_utc)
-    resolved_now = _resolve_now(now_utc)
-    if _parse_datetime(normalized_start) <= resolved_now:
-        raise SharedMatchUpdateUnavailableError(
-            "Новое время начала матча должно быть в будущем."
-        )
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now = _resolve_now(now_utc)
+        if _parse_datetime(normalized_start) <= resolved_now:
+            raise SharedMatchUpdateUnavailableError(
+                "Новое время начала матча должно быть в будущем."
+            )
         _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
         )
@@ -800,9 +923,9 @@ def save_shared_match_result(
 ) -> SharedMatch:
     normalized_home_score = _normalize_score(home_score)
     normalized_away_score = _normalize_score(away_score)
-    resolved_now = _resolve_now(now_utc)
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now = _resolve_now(now_utc)
         tournament_row = _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
         )
@@ -811,7 +934,6 @@ def save_shared_match_result(
             shared_tournament_id=shared_tournament_id,
             shared_match_id=shared_match_id,
         )
-        _require_expected_version(match_row, expected_version=expected_version)
         if str(match_row["status"]) == "cancelled":
             raise SharedMatchResultUnavailableError(
                 "Для отменённого матча нельзя сохранить результат."
@@ -831,6 +953,36 @@ def save_shared_match_result(
             away_score=normalized_away_score,
             advancing_team_id=advancing_team_id,
         )
+        if (
+            str(match_row["status"]) == "finished"
+            and match_row["home_score_final"] is not None
+            and int(match_row["home_score_final"]) == normalized_home_score
+            and match_row["away_score_final"] is not None
+            and int(match_row["away_score_final"]) == normalized_away_score
+            and match_row["advancing_team_id"] is not None
+            and int(match_row["advancing_team_id"]) == normalized_advancing_team_id
+            and _expected_version_allows_exact_noop(
+                connection,
+                match_row,
+                shared_tournament_id=shared_tournament_id,
+                expected_version=expected_version,
+                actor_telegram_user_id=actor_telegram_user_id,
+                event_types=(
+                    "shared_match.result_recorded",
+                    "shared_match.result_corrected",
+                ),
+                shared_match_id=shared_match_id,
+                allow_current=True,
+            )
+        ):
+            return _shared_match_from_row(
+                _get_shared_match_details_row(
+                    connection,
+                    shared_tournament_id=shared_tournament_id,
+                    shared_match_id=shared_match_id,
+                )
+            )
+        _require_expected_version(match_row, expected_version=expected_version)
         previous_result_exists = match_row["home_score_final"] is not None
         before_state = _shared_match_snapshot(match_row)
         actor_user_id = _upsert_actor_user(
@@ -992,18 +1144,15 @@ def save_shared_champion_settings(
     actor_username: str | None,
     now_utc: datetime | None = None,
 ) -> SharedTournamentDetails:
-    resolved_now = _resolve_now(now_utc)
     normalized_points = _normalize_non_negative_integer(points, field_name="Баллы")
     normalized_deadline = _normalize_optional_deadline(
         deadline_at, enabled=enabled, field_name="прогноза на чемпиона"
     )
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now = _resolve_now(now_utc)
         tournament_row = _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
-        )
-        _require_expected_tournament_version(
-            tournament_row, expected_version=expected_version
         )
         settings = _get_shared_settings_row(
             connection, shared_tournament_id=shared_tournament_id
@@ -1021,6 +1170,25 @@ def save_shared_champion_settings(
             new_deadline=normalized_deadline,
             now_utc=resolved_now,
             field_name="прогноза на чемпиона",
+        )
+        if (
+            bool(settings["champion_prediction_enabled"]) == enabled
+            and settings["champion_prediction_deadline_at"] == normalized_deadline
+            and int(settings["champion_prediction_points"]) == normalized_points
+            and _expected_version_allows_exact_noop(
+                connection,
+                tournament_row,
+                shared_tournament_id=shared_tournament_id,
+                expected_version=expected_version,
+                actor_telegram_user_id=actor_telegram_user_id,
+                event_types=("shared_tournament.champion_prediction_settings_updated",),
+            )
+        ):
+            return _get_shared_tournament_details(
+                connection, shared_tournament_id=shared_tournament_id
+            )
+        _require_expected_tournament_version(
+            tournament_row, expected_version=expected_version
         )
         before = _shared_settings_snapshot(settings)
         connection.execute(
@@ -1115,17 +1283,14 @@ def save_shared_champion_result(
     actor_username: str | None,
     now_utc: datetime | None = None,
 ) -> SharedTournamentDetails:
-    resolved_now = _resolve_now(now_utc)
     normalized_team_id = _normalize_positive_integer(
         champion_team_id, field_name="Фактический чемпион"
     )
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now = _resolve_now(now_utc)
         tournament_row = _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
-        )
-        _require_expected_tournament_version(
-            tournament_row, expected_version=expected_version
         )
         settings = _get_shared_settings_row(
             connection, shared_tournament_id=shared_tournament_id
@@ -1158,10 +1323,27 @@ def save_shared_champion_result(
             team_id=normalized_team_id,
         )
         previous_team_id = settings["champion_team_id"]
-        if previous_team_id == normalized_team_id:
+        if (
+            previous_team_id == normalized_team_id
+            and _expected_version_allows_exact_noop(
+                connection,
+                tournament_row,
+                shared_tournament_id=shared_tournament_id,
+                expected_version=expected_version,
+                actor_telegram_user_id=actor_telegram_user_id,
+                event_types=(
+                    "shared_tournament.champion_recorded",
+                    "shared_tournament.champion_corrected",
+                ),
+                allow_current=True,
+            )
+        ):
             return _get_shared_tournament_details(
                 connection, shared_tournament_id=shared_tournament_id
             )
+        _require_expected_tournament_version(
+            tournament_row, expected_version=expected_version
+        )
         actor_user_id = _upsert_actor_user(
             connection,
             telegram_user_id=actor_telegram_user_id,
@@ -1242,7 +1424,6 @@ def save_shared_swiss_settings(
     actor_username: str | None,
     now_utc: datetime | None = None,
 ) -> SharedTournamentDetails:
-    resolved_now = _resolve_now(now_utc)
     direct_count = _normalize_positive_integer(
         direct_qualifier_count, field_name="Количество прямых проходов"
     )
@@ -1255,11 +1436,9 @@ def save_shared_swiss_settings(
     )
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now = _resolve_now(now_utc)
         tournament_row = _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
-        )
-        _require_expected_tournament_version(
-            tournament_row, expected_version=expected_version
         )
         settings = _get_shared_settings_row(
             connection, shared_tournament_id=shared_tournament_id
@@ -1294,6 +1473,26 @@ def save_shared_swiss_settings(
                 "Настройки швейцарского этапа нельзя изменить после первого "
                 "прогноза или результата; до дедлайна можно менять только дедлайн."
             )
+        if (
+            bool(settings["swiss_stage_prediction_enabled"]) == enabled
+            and settings["swiss_stage_prediction_deadline_at"] == normalized_deadline
+            and int(settings["swiss_direct_qualifier_count"]) == direct_count
+            and int(settings["swiss_elimination_qualifier_count"]) == elimination_count
+            and _expected_version_allows_exact_noop(
+                connection,
+                tournament_row,
+                shared_tournament_id=shared_tournament_id,
+                expected_version=expected_version,
+                actor_telegram_user_id=actor_telegram_user_id,
+                event_types=("shared_tournament.swiss_settings_updated",),
+            )
+        ):
+            return _get_shared_tournament_details(
+                connection, shared_tournament_id=shared_tournament_id
+            )
+        _require_expected_tournament_version(
+            tournament_row, expected_version=expected_version
+        )
         before = _shared_settings_snapshot(settings)
         connection.execute(
             """
@@ -1396,17 +1595,14 @@ def save_shared_swiss_result(
     actor_username: str | None,
     now_utc: datetime | None = None,
 ) -> SharedTournamentDetails:
-    resolved_now = _resolve_now(now_utc)
     direct_ids, elimination_ids = _normalize_team_id_sets(
         direct_team_ids, elimination_team_ids
     )
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now = _resolve_now(now_utc)
         tournament_row = _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
-        )
-        _require_expected_tournament_version(
-            tournament_row, expected_version=expected_version
         )
         settings = _get_shared_settings_row(
             connection, shared_tournament_id=shared_tournament_id
@@ -1431,12 +1627,28 @@ def save_shared_swiss_result(
         previous_direct, previous_elimination = _get_shared_swiss_result_ids(
             connection, shared_tournament_id=shared_tournament_id
         )
-        if set(previous_direct) == set(direct_ids) and set(previous_elimination) == set(
-            elimination_ids
+        if (
+            set(previous_direct) == set(direct_ids)
+            and set(previous_elimination) == set(elimination_ids)
+            and _expected_version_allows_exact_noop(
+                connection,
+                tournament_row,
+                shared_tournament_id=shared_tournament_id,
+                expected_version=expected_version,
+                actor_telegram_user_id=actor_telegram_user_id,
+                event_types=(
+                    "shared_tournament.swiss_result_recorded",
+                    "shared_tournament.swiss_result_corrected",
+                ),
+                allow_current=True,
+            )
         ):
             return _get_shared_tournament_details(
                 connection, shared_tournament_id=shared_tournament_id
             )
+        _require_expected_tournament_version(
+            tournament_row, expected_version=expected_version
+        )
         was_created = not previous_direct and not previous_elimination
         actor_user_id = _upsert_actor_user(
             connection,
@@ -1547,9 +1759,9 @@ def delete_shared_match(
     actor_username: str | None,
     now_utc: datetime | None = None,
 ) -> SharedMatchDeletionResult:
-    resolved_now = _resolve_now(now_utc)
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        resolved_now = _resolve_now(now_utc)
         _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
         )
@@ -1770,6 +1982,149 @@ def contest_uses_shared_tournament(
             (contest_id,),
         ).fetchone()
         is not None
+    )
+
+
+def _create_shared_match_in_connection(
+    connection: sqlite3.Connection,
+    *,
+    tournament_row: sqlite3.Row,
+    shared_tournament_id: int,
+    home_team_id: int,
+    away_team_id: int,
+    normalized_start: str,
+    best_of: int | None,
+    actor_telegram_user_id: int,
+    resolved_now: datetime,
+    allow_duplicate_pair: bool,
+) -> SharedMatch:
+    if _parse_datetime(normalized_start) <= resolved_now:
+        raise ValueError("Время начала нового матча должно быть в будущем.")
+    normalized_best_of = _normalize_best_of(
+        best_of, template_key=str(tournament_row["template_key"])
+    )
+    home_team = _get_shared_team_row(
+        connection,
+        shared_tournament_id=shared_tournament_id,
+        team_id=home_team_id,
+    )
+    away_team = _get_shared_team_row(
+        connection,
+        shared_tournament_id=shared_tournament_id,
+        team_id=away_team_id,
+    )
+    if home_team is None or away_team is None:
+        raise ValueError("Обе команды должны входить в общий турнир.")
+    if home_team_id == away_team_id:
+        raise ValueError("В матче должны участвовать разные команды.")
+    duplicate = connection.execute(
+        """
+        SELECT 1
+        FROM shared_matches
+        WHERE shared_tournament_id = ?
+          AND (
+                (home_team_id = ? AND away_team_id = ?)
+             OR (home_team_id = ? AND away_team_id = ?)
+          )
+        """,
+        (
+            shared_tournament_id,
+            home_team_id,
+            away_team_id,
+            away_team_id,
+            home_team_id,
+        ),
+    ).fetchone()
+    if duplicate is not None and not allow_duplicate_pair:
+        raise SharedMatchConflictError(
+            "Матч между этими командами уже существует в общем турнире."
+        )
+    shared_match_id = int(
+        connection.execute(
+            """
+            INSERT INTO shared_matches (
+                shared_tournament_id,
+                home_team_id,
+                away_team_id,
+                starts_at_utc,
+                best_of
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                shared_tournament_id,
+                home_team_id,
+                away_team_id,
+                normalized_start,
+                normalized_best_of,
+            ),
+        ).lastrowid
+    )
+    contest_rows = connection.execute(
+        """
+        SELECT contests.id
+        FROM contest_shared_tournaments AS link
+        JOIN contests ON contests.id = link.contest_id
+        WHERE link.shared_tournament_id = ? AND contests.is_active = 1
+        ORDER BY contests.id
+        """,
+        (shared_tournament_id,),
+    ).fetchall()
+    shared_match_row = _get_shared_match_row(
+        connection,
+        shared_tournament_id=shared_tournament_id,
+        shared_match_id=shared_match_id,
+    )
+    for contest_row in contest_rows:
+        _create_local_match(
+            connection,
+            contest_id=int(contest_row["id"]),
+            shared_match_row=shared_match_row,
+        )
+    _touch_tournament(connection, shared_tournament_id=shared_tournament_id)
+    _record_event(
+        connection,
+        shared_tournament_id=shared_tournament_id,
+        shared_match_id=shared_match_id,
+        actor_telegram_user_id=actor_telegram_user_id,
+        event_type="shared_match.created",
+        before_state=None,
+        after_state=_shared_match_snapshot(shared_match_row),
+        metadata={"linked_contest_count": len(contest_rows)},
+    )
+    return _shared_match_from_row(
+        _get_shared_match_details_row(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_match_id=shared_match_id,
+        )
+    )
+
+
+def _insert_shared_match_external_link(
+    connection: sqlite3.Connection,
+    *,
+    shared_match_id: int,
+    shared_tournament_id: int,
+    source: str,
+    external_event_id: str,
+    external_match_id: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO shared_match_external_links (
+            shared_match_id, shared_tournament_id, source,
+            external_event_id, external_match_id
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            shared_match_id,
+            shared_tournament_id,
+            source,
+            external_event_id,
+            external_match_id,
+        ),
     )
 
 
@@ -2484,12 +2839,73 @@ def _require_expected_tournament_version(
         )
 
 
+def _expected_version_allows_exact_noop(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    shared_tournament_id: int,
+    expected_version: int,
+    actor_telegram_user_id: int,
+    event_types: tuple[str, ...],
+    shared_match_id: int | None = None,
+    allow_current: bool = False,
+) -> bool:
+    if (
+        isinstance(expected_version, bool)
+        or not isinstance(expected_version, int)
+        or expected_version <= 0
+    ):
+        return False
+    current_version = int(row["version"])
+    if expected_version == current_version:
+        return allow_current
+    if expected_version != current_version - 1:
+        return False
+
+    if shared_match_id is None:
+        last_event = connection.execute(
+            """
+            SELECT actor_telegram_user_id, event_type
+            FROM shared_tournament_events
+            WHERE shared_tournament_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (shared_tournament_id,),
+        ).fetchone()
+    else:
+        last_event = connection.execute(
+            """
+            SELECT actor_telegram_user_id, event_type
+            FROM shared_tournament_events
+            WHERE shared_tournament_id = ? AND shared_match_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (shared_tournament_id, shared_match_id),
+        ).fetchone()
+    return (
+        last_event is not None
+        and int(last_event["actor_telegram_user_id"]) == actor_telegram_user_id
+        and str(last_event["event_type"]) in event_types
+    )
+
+
 def _normalize_name(value: str) -> str:
     normalized = " ".join(value.split())
     if not normalized:
         raise ValueError("Введите название общего турнира.")
     if len(normalized) > 80:
         raise ValueError("Название общего турнира не должно быть длиннее 80 символов.")
+    return normalized
+
+
+def _normalize_external_identity(value: str, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} должен быть строкой.")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field_name} не должен быть пустым.")
     return normalized
 
 

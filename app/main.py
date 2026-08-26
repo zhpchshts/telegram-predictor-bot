@@ -27,7 +27,6 @@ from app.telegram_username_resolver import (
     UnavailableTelegramUsernameResolver,
 )
 from app.telegram_api_session import TelegramApiAiohttpSession
-from app.ti2026_schedule_sync import run_ti2026_schedule_sync_worker
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TMA_DIRECTORY = PROJECT_ROOT / "tma"
@@ -37,7 +36,6 @@ EXPECTED_BACKGROUND_TASK_NAMES = (
     "match-prediction-publications",
     "contest-publications",
     "match-lifecycle",
-    "ti2026-schedule-sync",
 )
 
 
@@ -165,85 +163,89 @@ def create_app() -> FastAPI:
         )
         app.state.telegram_bot = bot
         username_resolver = UnavailableTelegramUsernameResolver()
-        telegram_api_id = settings.telegram_api_id
-        telegram_api_hash = settings.telegram_api_hash
-        if telegram_api_id is not None and telegram_api_hash is not None:
-            try:
-                username_resolver = TelethonTelegramUsernameResolver(
+        background_tasks: dict[str, asyncio.Task[None]] = {}
+        startup_notification_task: asyncio.Task[None] | None = None
+        try:
+            telegram_api_id = settings.telegram_api_id
+            telegram_api_hash = settings.telegram_api_hash
+            if telegram_api_id is not None and telegram_api_hash is not None:
+                candidate_resolver = TelethonTelegramUsernameResolver(
                     api_id=telegram_api_id,
                     api_hash=telegram_api_hash,
                     bot_token=settings.bot_token,
                     session_path=settings.telegram_mtproto_session_path,
                 )
-                await username_resolver.start()
-            except Exception as error:
+                try:
+                    await candidate_resolver.start()
+                except asyncio.CancelledError:
+                    await candidate_resolver.close()
+                    raise
+                except Exception as error:
+                    try:
+                        await candidate_resolver.close()
+                    except Exception:
+                        logger.exception(
+                            "Could not close Telegram MTProto after failed startup."
+                        )
+                    logger.warning(
+                        "Telegram MTProto initialization failed (%s); username "
+                        "resolution is disabled.",
+                        type(error).__name__,
+                    )
+                else:
+                    username_resolver = candidate_resolver
+            elif telegram_api_id is not None or telegram_api_hash is not None:
                 logger.warning(
-                    "Telegram MTProto initialization failed (%s); username "
-                    "resolution is disabled.",
-                    type(error).__name__,
+                    "Telegram MTProto configuration is incomplete; username "
+                    "resolution is disabled."
                 )
-                username_resolver = UnavailableTelegramUsernameResolver()
-        elif telegram_api_id is not None or telegram_api_hash is not None:
-            logger.warning(
-                "Telegram MTProto configuration is incomplete; username "
-                "resolution is disabled."
-            )
-        app.state.telegram_username_resolver = username_resolver
-        dispatcher = create_dispatcher(settings)
 
-        polling_task = asyncio.create_task(
-            dispatcher.start_polling(
-                bot,
-                allowed_updates=dispatcher.resolve_used_update_types(),
-            ),
-            name="telegram-polling",
-        )
-        publication_task = asyncio.create_task(
-            run_match_prediction_publication_worker(
-                bot=bot,
-                database_path=settings.database_path,
-            ),
-            name="match-prediction-publications",
-        )
-        contest_publication_task = asyncio.create_task(
-            run_contest_publication_worker(
-                bot=bot,
-                database_path=settings.database_path,
-            ),
-            name="contest-publications",
-        )
-        match_lifecycle_task = asyncio.create_task(
-            run_match_lifecycle_worker(database_path=settings.database_path),
-            name="match-lifecycle",
-        )
-        ti2026_schedule_sync_task = asyncio.create_task(
-            run_ti2026_schedule_sync_worker(database_path=settings.database_path),
-            name="ti2026-schedule-sync",
-        )
-        startup_notification_task = (
-            asyncio.create_task(
-                _send_startup_healthcheck_notification(
+            app.state.telegram_username_resolver = username_resolver
+            dispatcher = create_dispatcher(settings)
+
+            polling_task = asyncio.create_task(
+                dispatcher.start_polling(
+                    bot,
+                    allowed_updates=dispatcher.resolve_used_update_types(),
+                ),
+                name="telegram-polling",
+            )
+            background_tasks[polling_task.get_name()] = polling_task
+            publication_task = asyncio.create_task(
+                run_match_prediction_publication_worker(
                     bot=bot,
                     database_path=settings.database_path,
-                    chat_id=settings.healthcheck_chat_id,
                 ),
-                name="telegram-startup-notification",
+                name="match-prediction-publications",
             )
-            if settings.healthcheck_chat_id is not None
-            else None
-        )
-        started_tasks = (
-            polling_task,
-            publication_task,
-            contest_publication_task,
-            match_lifecycle_task,
-            ti2026_schedule_sync_task,
-        )
-        background_tasks = {task.get_name(): task for task in started_tasks}
-        app.state.database_path = settings.database_path
-        app.state.background_tasks = background_tasks
+            background_tasks[publication_task.get_name()] = publication_task
+            contest_publication_task = asyncio.create_task(
+                run_contest_publication_worker(
+                    bot=bot,
+                    database_path=settings.database_path,
+                ),
+                name="contest-publications",
+            )
+            background_tasks[contest_publication_task.get_name()] = (
+                contest_publication_task
+            )
+            match_lifecycle_task = asyncio.create_task(
+                run_match_lifecycle_worker(database_path=settings.database_path),
+                name="match-lifecycle",
+            )
+            background_tasks[match_lifecycle_task.get_name()] = match_lifecycle_task
+            if settings.healthcheck_chat_id is not None:
+                startup_notification_task = asyncio.create_task(
+                    _send_startup_healthcheck_notification(
+                        bot=bot,
+                        database_path=settings.database_path,
+                        chat_id=settings.healthcheck_chat_id,
+                    ),
+                    name="telegram-startup-notification",
+                )
+            app.state.database_path = settings.database_path
+            app.state.background_tasks = background_tasks
 
-        try:
             yield
         finally:
             await _cancel_background_tasks(
@@ -263,10 +265,14 @@ def create_app() -> FastAPI:
                 try:
                     await username_resolver.close()
                 finally:
-                    del app.state.telegram_bot
-                    del app.state.telegram_username_resolver
-                    del app.state.background_tasks
-                    del app.state.database_path
+                    for state_name in (
+                        "telegram_bot",
+                        "telegram_username_resolver",
+                        "background_tasks",
+                        "database_path",
+                    ):
+                        if hasattr(app.state, state_name):
+                            delattr(app.state, state_name)
 
     app = FastAPI(
         title="Клевер",
@@ -280,14 +286,22 @@ def create_app() -> FastAPI:
     app.include_router(tma_api_router)
 
     @app.middleware("http")
-    async def disable_tma_cache(
+    async def apply_response_security_policy(
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         response = await call_next(request)
 
-        if request.url.path == "/tma" or request.url.path.startswith("/tma/"):
+        path = request.url.path
+        if (
+            path == "/tma"
+            or path.startswith("/tma/")
+            or path == "/api/tma"
+            or path.startswith("/api/tma/")
+        ):
             response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
 
         return response
 

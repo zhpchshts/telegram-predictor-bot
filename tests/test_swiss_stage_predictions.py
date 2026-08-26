@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 
+from app import contest_service
 from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
     ContestCompletionUnavailableError,
@@ -111,6 +113,68 @@ def _save_alice_prediction(
         elimination_team_ids=[teams["Гамма"], teams["Дельта"]],
         now_utc=OPEN_TIME,
     )
+
+
+def test_swiss_prediction_checks_deadline_after_acquiring_write_lock(
+    database_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contest_id = _create_contest(database_path)
+    teams = _configure(database_path, contest_id=contest_id)
+    contender_connected = Event()
+    clock = {"now": datetime(2030, 1, 1, 11, 59, 59, tzinfo=timezone.utc)}
+    original_database_connection = contest_service.database_connection
+
+    @contextmanager
+    def coordinated_database_connection(path: Path):
+        with original_database_connection(path) as connection:
+            contender_connected.set()
+            yield connection
+
+    def controlled_now_utc(_value: datetime | None) -> datetime:
+        return clock["now"]
+
+    monkeypatch.setattr(
+        contest_service,
+        "database_connection",
+        coordinated_database_connection,
+    )
+    monkeypatch.setattr(contest_service, "_resolve_now_utc", controlled_now_utc)
+
+    with database_connection(database_path) as lock_connection:
+        lock_connection.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            prediction_future = executor.submit(
+                save_swiss_stage_prediction,
+                database_path=database_path,
+                telegram_chat_id=CHAT_ID,
+                contest_id=contest_id,
+                telegram_user_id=ALICE_ID,
+                first_name="Алиса",
+                last_name=None,
+                username="alice",
+                direct_team_ids=[teams["Альфа"], teams["Бета"]],
+                elimination_team_ids=[teams["Гамма"], teams["Дельта"]],
+            )
+            assert contender_connected.wait(timeout=5)
+            clock["now"] = datetime(
+                2030,
+                1,
+                1,
+                12,
+                0,
+                tzinfo=timezone.utc,
+            )
+            lock_connection.execute("COMMIT")
+            with pytest.raises(PredictionUnavailableError, match="уже закрыт"):
+                prediction_future.result(timeout=5)
+
+    with database_connection(database_path) as connection:
+        prediction_count = connection.execute(
+            "SELECT COUNT(*) FROM swiss_stage_predictions WHERE contest_id = ?",
+            (contest_id,),
+        ).fetchone()[0]
+    assert prediction_count == 0
 
 
 def test_swiss_stage_defaults_to_three_direct_and_five_playoff_teams(

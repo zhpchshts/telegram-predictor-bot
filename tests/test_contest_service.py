@@ -1441,6 +1441,156 @@ def test_save_match_result_creates_corrects_recalculates_scores_and_writes_event
     ]
 
 
+def test_save_match_result_exact_retry_is_a_side_effect_free_noop(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "idempotent-result.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        starts_at_utc="2030-06-11T18:00:00Z",
+    ).match
+    save_match_prediction_publication_settings(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        enabled=True,
+        now_utc=datetime(2030, 6, 1, tzinfo=timezone.utc),
+        audit_actor=AUDIT_ACTOR,
+    )
+    first = save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        advancing_team_id=match.home_team_id,
+        now_utc=datetime(2030, 6, 11, 18, 0, tzinfo=timezone.utc),
+    )
+
+    def result_side_effects() -> tuple[int, int, tuple[object, ...]]:
+        with create_connection(database_path) as connection:
+            event_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM event_log
+                    WHERE contest_id = ?
+                      AND event_type IN (
+                          'match.result_recorded',
+                          'match.result_corrected'
+                      )
+                    """,
+                    (contest.id,),
+                ).fetchone()[0]
+            )
+            audit_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM audit_events
+                    WHERE contest_id = ?
+                      AND event_type IN ('match_result_set', 'match_result_changed')
+                    """,
+                    (contest.id,),
+                ).fetchone()[0]
+            )
+            publication = connection.execute(
+                """
+                SELECT desired_revision, latest_event_id, updated_at
+                FROM contest_publications
+                WHERE contest_id = ?
+                  AND publication_type = 'match_result'
+                  AND entity_id = ?
+                """,
+                (contest.id, match.id),
+            ).fetchone()
+        assert publication is not None
+        return event_count, audit_count, tuple(publication)
+
+    side_effects_before_retry = result_side_effects()
+    repeated = save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        advancing_team_id=match.home_team_id,
+        now_utc=datetime(2030, 6, 11, 18, 1, tzinfo=timezone.utc),
+    )
+
+    assert first.was_created is True
+    assert repeated.was_created is False
+    assert repeated.result == first.result
+    assert result_side_effects() == side_effects_before_retry
+
+
+def test_save_match_result_repairs_finished_result_with_inconsistent_status(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "inconsistent-result-status.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        starts_at_utc="2030-06-11T18:00:00Z",
+    ).match
+    first = save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        advancing_team_id=match.home_team_id,
+        now_utc=datetime(2030, 6, 11, 18, 0, tzinfo=timezone.utc),
+    )
+    with create_connection(database_path) as connection:
+        connection.execute(
+            "UPDATE matches SET status = 'started' WHERE id = ?",
+            (match.id,),
+        )
+        correction_count_before = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM event_log
+                WHERE contest_id = ? AND event_type = 'match.result_corrected'
+                """,
+                (contest.id,),
+            ).fetchone()[0]
+        )
+
+    repaired = save_test_result(
+        database_path=database_path,
+        contest_id=contest.id,
+        match_id=match.id,
+        advancing_team_id=match.home_team_id,
+        now_utc=datetime(2030, 6, 11, 18, 1, tzinfo=timezone.utc),
+    )
+
+    with create_connection(database_path) as connection:
+        stored_status = str(
+            connection.execute(
+                "SELECT status FROM matches WHERE id = ?",
+                (match.id,),
+            ).fetchone()["status"]
+        )
+        correction_count_after = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM event_log
+                WHERE contest_id = ? AND event_type = 'match.result_corrected'
+                """,
+                (contest.id,),
+            ).fetchone()[0]
+        )
+
+    assert repaired.was_created is False
+    assert repaired.result == first.result
+    assert stored_status == "finished"
+    assert correction_count_after == correction_count_before + 1
+
+
 def test_save_match_result_rejects_match_before_start_without_writes(
     tmp_path: Path,
 ) -> None:
@@ -2577,6 +2727,147 @@ def test_update_match_start_resolves_current_time_after_acquiring_write_lock(
 
     assert time_was_resolved.is_set()
     assert updated_match.starts_at_utc == "2030-06-12T18:00:00Z"
+
+
+def test_save_match_prediction_checks_deadline_after_acquiring_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "prediction-deadline-race.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        starts_at_utc="2030-06-11T18:00:00Z",
+    ).match
+    contender_connected = Event()
+    clock = {"now": datetime(2030, 6, 11, 17, 59, 59, tzinfo=timezone.utc)}
+    original_database_connection = contest_service.database_connection
+
+    @contextmanager
+    def coordinated_database_connection(path: Path):
+        with original_database_connection(path) as connection:
+            contender_connected.set()
+            yield connection
+
+    def controlled_now_utc(_value: datetime | None) -> datetime:
+        return clock["now"]
+
+    monkeypatch.setattr(
+        contest_service,
+        "database_connection",
+        coordinated_database_connection,
+    )
+    monkeypatch.setattr(contest_service, "_resolve_now_utc", controlled_now_utc)
+
+    with create_connection(database_path) as lock_connection:
+        lock_connection.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            prediction_future = executor.submit(
+                save_match_prediction,
+                database_path=database_path,
+                telegram_chat_id=TELEGRAM_CHAT_ID,
+                contest_id=contest.id,
+                match_id=match.id,
+                telegram_user_id=TELEGRAM_USER_ID,
+                first_name="Eugene",
+                last_name="Sabir",
+                username="evsab",
+                predicted_home_score=2,
+                predicted_away_score=1,
+                predicted_advancing_team_id=match.home_team_id,
+            )
+            assert contender_connected.wait(timeout=5)
+            clock["now"] = datetime(
+                2030,
+                6,
+                11,
+                18,
+                0,
+                tzinfo=timezone.utc,
+            )
+            lock_connection.execute("COMMIT")
+            with pytest.raises(PredictionUnavailableError, match="уже закрыты"):
+                prediction_future.result(timeout=5)
+
+    with create_connection(database_path) as connection:
+        prediction_count = connection.execute(
+            "SELECT COUNT(*) FROM match_predictions WHERE match_id = ?",
+            (match.id,),
+        ).fetchone()[0]
+    assert prediction_count == 0
+
+
+def test_publication_enablement_time_is_resolved_after_acquiring_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "publication-enablement-race.db"
+    initialize_database(database_path)
+    contest = create_contest(database_path=database_path).contest
+    create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        starts_at_utc="2030-06-11T18:00:00Z",
+    )
+    contender_connected = Event()
+    clock = {"now": datetime(2030, 6, 11, 17, 59, 59, tzinfo=timezone.utc)}
+    original_database_connection = contest_service.database_connection
+
+    @contextmanager
+    def coordinated_database_connection(path: Path):
+        with original_database_connection(path) as connection:
+            contender_connected.set()
+            yield connection
+
+    def controlled_now_utc(_value: datetime | None) -> datetime:
+        return clock["now"]
+
+    monkeypatch.setattr(
+        contest_service,
+        "database_connection",
+        coordinated_database_connection,
+    )
+    monkeypatch.setattr(contest_service, "_resolve_now_utc", controlled_now_utc)
+
+    with create_connection(database_path) as lock_connection:
+        lock_connection.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            enable_future = executor.submit(
+                save_match_prediction_publication_settings,
+                database_path=database_path,
+                telegram_chat_id=TELEGRAM_CHAT_ID,
+                contest_id=contest.id,
+                telegram_user_id=TELEGRAM_USER_ID,
+                first_name="Eugene",
+                last_name="Sabir",
+                username="evsab",
+                enabled=True,
+                audit_actor=AUDIT_ACTOR,
+            )
+            assert contender_connected.wait(timeout=5)
+            clock["now"] = datetime(
+                2030,
+                6,
+                11,
+                18,
+                0,
+                tzinfo=timezone.utc,
+            )
+            lock_connection.execute("COMMIT")
+            enable_future.result(timeout=5)
+
+    with create_connection(database_path) as connection:
+        enabled_at = connection.execute(
+            """
+            SELECT match_prediction_publication_enabled_at
+            FROM contests
+            WHERE id = ?
+            """,
+            (contest.id,),
+        ).fetchone()["match_prediction_publication_enabled_at"]
+    assert enabled_at == "2030-06-11T18:00:00Z"
 
 
 @pytest.mark.parametrize(

@@ -3,9 +3,14 @@
 let telegram = window.Telegram?.WebApp || null;
 let activeBootstrap = null;
 let currentViewMode = "participant";
+let currentViewToken = 0;
 
 const TELEGRAM_INIT_DATA_QUERY_PARAM = "tgWebAppData";
 const IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+const PREDICTION_DEADLINE_SYNC_EVENT = "tma:prediction-deadline-sync";
+const PREDICTION_FLUSH_EVENT = "tma:prediction-flush";
+const PREDICTION_SAVE_WAIT_TIMEOUT_MS = 15_000;
+const MAX_TIMER_DELAY_MS = 2_147_000_000;
 const CONTEST_NAME_MAX_LENGTH = 80;
 const CONTEST_TABS = [
   { id: "matches", label: "Матчи" },
@@ -101,9 +106,130 @@ const AUDIT_ROLE_LABELS = Object.freeze({
   participant: "Участник",
 });
 const AUDIT_PAGE_SIZE = 30;
+const matchPredictionSaveQueues = new Map();
 
 const chatSummaryElement = document.querySelector("#chat-summary");
 const appContentElement = document.querySelector("#app-content");
+
+function flushMatchPredictionForms() {
+  for (const form of appContentElement.querySelectorAll(
+    ".match-prediction-form",
+  )) {
+    form.dispatchEvent(new Event(PREDICTION_FLUSH_EVENT));
+  }
+}
+
+function replaceAppContent(...children) {
+  flushMatchPredictionForms();
+  currentViewToken += 1;
+  appContentElement.replaceChildren(...children);
+  return currentViewToken;
+}
+
+function isCurrentView(viewToken) {
+  return viewToken === currentViewToken;
+}
+
+class StaleViewRequestError extends Error {
+  constructor() {
+    super("The view changed before the request completed.");
+    this.name = "StaleViewRequestError";
+  }
+}
+
+async function apiRequestForCurrentView(path, options = {}) {
+  const viewToken = currentViewToken;
+  let result;
+  try {
+    result = await apiRequest(path, options);
+  } catch (error) {
+    if (!isCurrentView(viewToken)) {
+      throw new StaleViewRequestError();
+    }
+    throw error;
+  }
+  if (!isCurrentView(viewToken)) {
+    throw new StaleViewRequestError();
+  }
+  return result;
+}
+
+function queueMatchPredictionSave(contestId, matchId, payload) {
+  const queueKey = `${contestId}:${matchId}`;
+  const sendSave = () => apiRequest(
+    `/api/tma/contests/${contestId}/matches/${matchId}/prediction`,
+    {
+      method: "PUT",
+      keepalive: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  const previousSave = matchPredictionSaveQueues.get(queueKey);
+  const request = previousSave
+    ? previousSave.catch(() => undefined).then(sendSave)
+    : sendSave();
+  let trackedRequest;
+  trackedRequest = request.finally(() => {
+    if (matchPredictionSaveQueues.get(queueKey) === trackedRequest) {
+      matchPredictionSaveQueues.delete(queueKey);
+    }
+  });
+  void trackedRequest.catch(() => undefined);
+  matchPredictionSaveQueues.set(queueKey, trackedRequest);
+  return trackedRequest;
+}
+
+async function waitForMatchPredictionSaves(contestId) {
+  const queuePrefix = `${contestId}:`;
+  const drainSaves = async () => {
+    while (true) {
+      const pendingSaves = [...matchPredictionSaveQueues.entries()]
+        .filter(([queueKey]) => queueKey.startsWith(queuePrefix))
+        .map(([, request]) => request);
+      if (pendingSaves.length === 0) {
+        return;
+      }
+      await Promise.allSettled(pendingSaves);
+    }
+  };
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(new Error(
+        "Не удалось дождаться сохранения прогноза. "
+        + "Проверьте соединение и откройте конкурс ещё раз.",
+      ));
+    }, PREDICTION_SAVE_WAIT_TIMEOUT_MS);
+  });
+
+  try {
+    await Promise.race([drainSaves(), timeout]);
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function syncVisiblePredictionDeadlines() {
+  for (const form of appContentElement.querySelectorAll(
+    ".match-prediction-form[data-prediction-deadline]",
+  )) {
+    form.dispatchEvent(new Event(PREDICTION_DEADLINE_SYNC_EVENT));
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    flushMatchPredictionForms();
+    return;
+  }
+  if (document.visibilityState === "visible") {
+    syncVisiblePredictionDeadlines();
+  }
+});
+
+window.addEventListener("pagehide", flushMatchPredictionForms);
+window.addEventListener("pageshow", syncVisiblePredictionDeadlines);
 
 function setChatSummary(text = "") {
   chatSummaryElement.textContent = text;
@@ -203,6 +329,9 @@ function createStatusCard(title, message) {
   });
 
   indicator.setAttribute("aria-hidden", "true");
+  card.setAttribute("role", "status");
+  card.setAttribute("aria-live", "polite");
+  card.setAttribute("aria-atomic", "true");
 
   content.append(heading, description);
   card.append(indicator, content);
@@ -244,6 +373,12 @@ function createActionButton(text, className, type = "button") {
 }
 
 function setFormMessage(messageElement, message, type = "") {
+  messageElement.setAttribute("role", type === "error" ? "alert" : "status");
+  messageElement.setAttribute(
+    "aria-live",
+    type === "error" ? "assertive" : "polite",
+  );
+  messageElement.setAttribute("aria-atomic", "true");
   messageElement.textContent = message || "";
   messageElement.hidden = !message;
   messageElement.classList.toggle("is-error", type === "error");
@@ -348,7 +483,7 @@ function getUserDisplayName(user) {
 
 function renderLoading() {
   setChatSummary("Загружаем конкурсы этого чата…");
-  appContentElement.replaceChildren(
+  return replaceAppContent(
     createStatusCard(
       "Открываем конкурсы",
       "Проверяем доступ к конкурсам этого чата…",
@@ -472,7 +607,60 @@ function createContestsCard(
   return container;
 }
 
+function getCreatableContestTemplates(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const templates = [];
+  const seenKeys = new Set();
+  for (const template of value) {
+    const key = typeof template?.key === "string" ? template.key.trim() : "";
+    const label = typeof template?.label === "string"
+      ? template.label.trim()
+      : "";
+    if (!key || !label || seenKeys.has(key)) {
+      continue;
+    }
+    templates.push({ key, label });
+    seenKeys.add(key);
+  }
+  return templates;
+}
+
+function fillContestTemplateSelect(select, templates, selectedKey = "") {
+  select.replaceChildren();
+  if (templates.length === 0) {
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    emptyOption.textContent = "Шаблонов нет";
+    emptyOption.disabled = true;
+    emptyOption.selected = true;
+    select.append(emptyOption);
+    select.disabled = true;
+    return;
+  }
+
+  for (const template of templates) {
+    const option = document.createElement("option");
+    option.value = template.key;
+    option.textContent = template.label;
+    select.append(option);
+  }
+  select.value = templates.some((template) => template.key === selectedKey)
+    ? selectedKey
+    : templates[0].key;
+  select.disabled = false;
+}
+
 function createContestFormCard(bootstrap, state) {
+  const contestTemplates = getCreatableContestTemplates(
+    state.managementData?.contest_templates,
+  );
+  const creatableTemplateKeys = new Set(
+    contestTemplates.map((template) => template.key),
+  );
+  const hasTemplates = contestTemplates.length > 0;
   const card = createElement("section", {
     className: "info-card contest-form-card",
   });
@@ -481,7 +669,7 @@ function createContestFormCard(bootstrap, state) {
   });
   const description = createElement("p", {
     className: "subtitle",
-    text: "Первый вариант — конкурс прогнозов на Чемпионат мира 2026.",
+    text: "Выберите шаблон и настройте новый конкурс прогнозов.",
   });
   const form = createElement("form", {
     className: "form-fields",
@@ -500,19 +688,16 @@ function createContestFormCard(bootstrap, state) {
   templateInput.className = "text-input";
   templateInput.id = "contest-template-key";
   templateInput.name = "contest-template-key";
-  for (const [value, label] of [
-    ["world_cup_2026", "Чемпионат мира 2026"],
-    ["the_international_2026", "The International 2026"],
-  ]) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    templateInput.append(option);
-  }
-  templateInput.value = state.draftTemplateKey || "world_cup_2026";
-  const sharedTournaments = Array.isArray(state.managementData?.shared_tournaments)
-    ? state.managementData.shared_tournaments
-    : [];
+  fillContestTemplateSelect(
+    templateInput,
+    contestTemplates,
+    state.draftTemplateKey,
+  );
+  const sharedTournaments = (
+    Array.isArray(state.managementData?.shared_tournaments)
+      ? state.managementData.shared_tournaments
+      : []
+  ).filter((tournament) => creatableTemplateKeys.has(tournament.template_key));
   const sourceField = createElement("label", {
     className: "form-field",
   });
@@ -547,11 +732,7 @@ function createContestFormCard(bootstrap, state) {
   });
   const hint = createElement("p", {
     className: "form-hint",
-    text: (
-      "Например: «ЧМ-2026: прогнозы». " +
-      "Правила первого конкурса: 3 очка за точный счёт, " +
-      "2 — за разницу голов, 1 — за исход."
-    ),
+    text: "Параметры матчей и начисления зависят от выбранного шаблона.",
   });
   const message = createElement("p", {
     className: "form-message",
@@ -570,11 +751,24 @@ function createContestFormCard(bootstrap, state) {
   input.type = "text";
   input.maxLength = CONTEST_NAME_MAX_LENGTH;
   input.autocomplete = "off";
-  input.placeholder = "ЧМ-2026: прогнозы";
+  input.placeholder = "Название конкурса";
   input.value = state.draftName || "";
   input.required = true;
+  input.disabled = !hasTemplates;
+  sourceInput.disabled = !hasTemplates;
+  continueButton.disabled = !hasTemplates;
 
   function updateTemplateCopy() {
+    if (!hasTemplates) {
+      templateInput.disabled = true;
+      sourceInput.disabled = true;
+      input.disabled = true;
+      continueButton.disabled = true;
+      description.textContent = "Сейчас нет доступных шаблонов конкурса.";
+      hint.textContent = "Новые шаблоны появятся в этом списке.";
+      return;
+    }
+
     const selectedSource = sourceInput.selectedOptions[0];
     const sharedTemplateKey = selectedSource?.dataset?.templateKey || "";
     if (sharedTemplateKey) {
@@ -583,15 +777,29 @@ function createContestFormCard(bootstrap, state) {
     } else {
       templateInput.disabled = false;
     }
+    const selectedTemplate = contestTemplates.find(
+      (template) => template.key === templateInput.value,
+    );
     const isTi = templateInput.value === "the_international_2026";
-    description.textContent = sharedTemplateKey
-      ? "Команды, матчи, дедлайны и результаты будут синхронизироваться с общим турниром."
-      : isTi
-        ? "Конкурс прогнозов на The International 2026."
-        : "Конкурс прогнозов на Чемпионат мира 2026.";
-    hint.textContent = isTi
-      ? "Серии плей-офф: 2 балла за точный счёт, 1 — за правильного победителя."
-      : "3 очка за точный счёт, 2 — за разницу голов, 1 — за исход.";
+    const isWorldCup = templateInput.value === "world_cup_2026";
+    if (sharedTemplateKey) {
+      description.textContent = "Команды, матчи, дедлайны и результаты будут синхронизироваться с общим турниром.";
+    } else if (isTi) {
+      description.textContent = "Конкурс прогнозов на The International 2026.";
+    } else if (isWorldCup) {
+      description.textContent = "Конкурс прогнозов на Чемпионат мира 2026.";
+    } else {
+      description.textContent = selectedTemplate
+        ? `Конкурс прогнозов по шаблону «${selectedTemplate.label}».`
+        : "Выберите шаблон конкурса.";
+    }
+    if (isTi) {
+      hint.textContent = "Серии плей-офф: 2 балла за точный счёт, 1 — за правильного победителя.";
+    } else if (isWorldCup) {
+      hint.textContent = "3 очка за точный счёт, 2 — за разницу голов, 1 — за исход.";
+    } else {
+      hint.textContent = "Параметры матчей и начисления зависят от выбранного шаблона.";
+    }
   }
   templateInput.addEventListener("change", updateTemplateCopy);
   sourceInput.addEventListener("change", updateTemplateCopy);
@@ -612,6 +820,11 @@ function createContestFormCard(bootstrap, state) {
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
+
+    if (!creatableTemplateKeys.has(templateInput.value)) {
+      setFormMessage(message, "Сейчас нет доступных шаблонов.", "error");
+      return;
+    }
 
     const contestName = normalizeContestName(input.value);
 
@@ -640,6 +853,9 @@ function createContestFormCard(bootstrap, state) {
 }
 
 function createContestConfirmationCard(bootstrap, state) {
+  const selectedTemplate = getCreatableContestTemplates(
+    state.managementData?.contest_templates,
+  ).find((template) => template.key === state.draftTemplateKey);
   const card = createElement("section", {
     className: "info-card contest-form-card",
   });
@@ -655,10 +871,7 @@ function createContestConfirmationCard(bootstrap, state) {
   });
   const details = createElement("p", {
     className: "form-hint",
-    text: (
-      "Будет создан активный конкурс на Чемпионат мира 2026 " +
-      "со стандартными правилами начисления очков."
-    ),
+    text: "Проверьте название и выбранный шаблон конкурса.",
   });
   const message = createElement("p", {
     className: "form-message",
@@ -676,10 +889,17 @@ function createContestConfirmationCard(bootstrap, state) {
     "submit",
   );
 
-  details.textContent = state.draftTemplateKey === "the_international_2026"
-    ? "Будет создан конкурс The International 2026 с прогнозом Swiss и сериями Bo3/Bo5."
-    : "Будет создан конкурс Чемпионата мира 2026 со стандартными футбольными правилами.";
-  if (state.draftSharedTournamentId) {
+  if (!selectedTemplate) {
+    details.textContent = "Выбранный шаблон больше недоступен для создания.";
+    createButton.disabled = true;
+  } else if (state.draftTemplateKey === "the_international_2026") {
+    details.textContent = "Будет создан конкурс The International 2026 с прогнозом Swiss и сериями Bo3/Bo5.";
+  } else if (state.draftTemplateKey === "world_cup_2026") {
+    details.textContent = "Будет создан конкурс Чемпионата мира 2026 со стандартными футбольными правилами.";
+  } else {
+    details.textContent = `Будет создан конкурс по шаблону «${selectedTemplate.label}».`;
+  }
+  if (selectedTemplate && state.draftSharedTournamentId) {
     const tournament = state.managementData?.shared_tournaments?.find(
       (item) => item.id === state.draftSharedTournamentId,
     );
@@ -711,12 +931,20 @@ function createContestConfirmationCard(bootstrap, state) {
   });
 
   createButton.addEventListener("click", async () => {
+    if (!selectedTemplate) {
+      setFormMessage(
+        message,
+        "Выбранный шаблон больше недоступен для создания.",
+        "error",
+      );
+      return;
+    }
     createButton.disabled = true;
     backButton.disabled = true;
     createButton.textContent = "Создаём…";
 
     try {
-      const result = await apiRequest("/api/tma/contests", {
+      const result = await apiRequestForCurrentView("/api/tma/contests", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -724,7 +952,7 @@ function createContestConfirmationCard(bootstrap, state) {
         },
         body: JSON.stringify({
           name: state.draftName,
-          template_key: state.draftTemplateKey || "world_cup_2026",
+          template_key: state.draftTemplateKey,
           shared_tournament_id: state.draftSharedTournamentId || null,
         }),
       });
@@ -768,6 +996,26 @@ function createContestConfirmationCard(bootstrap, state) {
         ? error.message
         : "Не удалось создать конкурс.";
 
+      if (error?.code === "template_unavailable") {
+        const contestTemplates = getCreatableContestTemplates(
+          state.managementData?.contest_templates,
+        ).filter((template) => template.key !== state.draftTemplateKey);
+        renderContestCreationState(bootstrap, {
+          ...state,
+          mode: "form",
+          managementData: {
+            ...(state.managementData || {}),
+            contest_templates: contestTemplates,
+          },
+          draftTemplateKey: "",
+          draftSharedTournamentId: null,
+          idempotencyKey: "",
+          formMessage: errorMessage,
+          formMessageType: "error",
+        });
+        return;
+      }
+
       renderContestCreationState(bootstrap, {
         ...state,
         mode: "confirm",
@@ -799,7 +1047,7 @@ function renderContestCreationScreen(bootstrap, state = {}) {
     ? createContestConfirmationCard(bootstrap, creationState)
     : createContestFormCard(bootstrap, creationState);
 
-  appContentElement.replaceChildren(
+  replaceAppContent(
     createAdministrativeHeader(bootstrap, {
       title: "Создание конкурса",
       backLabel: "← К управлению",
@@ -954,7 +1202,7 @@ function createContestCompletionCard(bootstrap, contest, state) {
     completeButton.textContent = "Завершаем…";
 
     try {
-      const result = await apiRequest(
+      const result = await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/complete`,
         {
           method: "POST",
@@ -1117,7 +1365,7 @@ function createContestDeletionCard(bootstrap, contest, state) {
     deleteButton.textContent = "Удаляем…";
 
     try {
-      await apiRequest(`/api/tma/contests/${contest.id}`, {
+      await apiRequestForCurrentView(`/api/tma/contests/${contest.id}`, {
         method: "DELETE",
       });
 
@@ -2079,10 +2327,15 @@ function createPredictionScoreSummary(predictionScore) {
 }
 
 function createPredictionProgressSummary() {
-  return createElement("p", {
+  const summary = createElement("p", {
     className: "form-hint match-prediction-progress",
     text: "Прогнозы сохранены: 0 из 0.",
   });
+
+  summary.setAttribute("role", "status");
+  summary.setAttribute("aria-live", "polite");
+  summary.setAttribute("aria-atomic", "true");
+  return summary;
 }
 
 function updatePredictionProgress(summary) {
@@ -2098,16 +2351,26 @@ function updatePredictionProgress(summary) {
   const saved = statuses.filter(
     (status) => status.dataset.saveState === "saved",
   ).length;
+  const closed = statuses.filter(
+    (status) => status.dataset.saveState === "closed",
+  ).length;
 
   if (total === 0) {
     summary.textContent = "Нет матчей, для которых сейчас можно сделать прогноз.";
     return;
   }
 
-  summary.textContent =
-    saved === total
-      ? `Прогнозы сохранены: ${saved} из ${total}.`
-      : `Прогнозы сохранены: ${saved} из ${total}. Осталось: ${total - saved}.`;
+  if (closed > 0) {
+    summary.textContent = (
+      `Прогнозы сохранены: ${saved} из ${total}. `
+      + `Не сохранено до закрытия: ${closed}.`
+    );
+    return;
+  }
+
+  summary.textContent = saved === total
+    ? `Прогнозы сохранены: ${saved} из ${total}.`
+    : `Прогнозы сохранены: ${saved} из ${total}. Осталось: ${total - saved}.`;
 }
 
 function ensurePredictionProgressSummary(section) {
@@ -2410,7 +2673,7 @@ function createMatchResultSection(
     submitButton.textContent = "Сохраняем…";
 
     try {
-      const resultPayload = await apiRequest(
+      const resultPayload = await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/matches/${match.id}/result`,
         {
           method: "PUT",
@@ -2590,6 +2853,10 @@ function createMatchPredictionSection(contest, match) {
     "secondary-action-button",
   );
 
+  saveStatus.setAttribute("role", "status");
+  saveStatus.setAttribute("aria-live", "polite");
+  saveStatus.setAttribute("aria-atomic", "true");
+
   homeScoreInput.id = `match-${match.id}-home-score`;
   homeScoreInput.name = `match-${match.id}-home-score`;
   homeScoreInput.type = "number";
@@ -2695,8 +2962,67 @@ function createMatchPredictionSection(contest, match) {
     : null;
 
   let saveTimer = null;
+  let deadlineTimer = null;
+
+  function syncPredictionDeadline() {
+    if (isMatchPredictionOpen(match)) {
+      return false;
+    }
+
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    }
+
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+
+    seriesScoreInput.disabled = true;
+    homeScoreInput.disabled = true;
+    awayScoreInput.disabled = true;
+    advancingTeamField.element.disabled = true;
+    form.setAttribute("aria-disabled", "true");
+
+    const payload = readPredictionPayload();
+    const isSaved = (
+      payload.isReady
+      && getPayloadFingerprint(payload) === lastSavedFingerprint
+    );
+    setSaveStatus(
+      isSaved
+        ? "Сохранено. Приём прогнозов завершён."
+        : "Приём прогнозов завершён. Последние изменения не сохранены.",
+      isSaved ? "saved" : "closed",
+    );
+    return true;
+  }
+
+  function schedulePredictionDeadlineSync() {
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    }
+    const deadline = new Date(match.starts_at_utc).getTime();
+    const remaining = deadline - Date.now();
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      syncPredictionDeadline();
+      return;
+    }
+    deadlineTimer = window.setTimeout(() => {
+      deadlineTimer = null;
+      if (!form.isConnected || syncPredictionDeadline()) {
+        return;
+      }
+      schedulePredictionDeadlineSync();
+    }, Math.min(remaining, MAX_TIMER_DELAY_MS));
+  }
 
   function scheduleSave() {
+    if (syncPredictionDeadline()) {
+      return;
+    }
     if (saveTimer !== null) {
       window.clearTimeout(saveTimer);
       saveTimer = null;
@@ -2721,6 +3047,9 @@ function createMatchPredictionSection(contest, match) {
   }
 
   async function savePrediction() {
+    if (syncPredictionDeadline()) {
+      return;
+    }
     if (isSaving) {
       return;
     }
@@ -2741,13 +3070,10 @@ function createMatchPredictionSection(contest, match) {
     setSaveStatus("Сохраняем…", "saving");
 
     try {
-      const result = await apiRequest(
-        `/api/tma/contests/${contest.id}/matches/${match.id}/prediction`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        },
+      const result = await queueMatchPredictionSave(
+        contest.id,
+        match.id,
+        payload,
       );
       if (!result || !result.prediction) {
         throw new Error("Сервер вернул некорректный ответ при сохранении прогноза.");
@@ -2756,8 +3082,10 @@ function createMatchPredictionSection(contest, match) {
       match.prediction = result.prediction;
       lastSavedFingerprint = fingerprint;
     } catch (error) {
-      lastSavedFingerprint = null;
       isSaving = false;
+      if (syncPredictionDeadline()) {
+        return;
+      }
       const currentPayload = readPredictionPayload();
       if (
         currentPayload.isReady &&
@@ -2778,6 +3106,9 @@ function createMatchPredictionSection(contest, match) {
     }
 
     isSaving = false;
+    if (syncPredictionDeadline()) {
+      return;
+    }
     const currentPayload = readPredictionPayload();
     if (!currentPayload.isReady) {
       setSaveStatus(currentPayload.message, "draft");
@@ -2825,11 +3156,34 @@ function createMatchPredictionSection(contest, match) {
     }
     void savePrediction();
   });
+  form.addEventListener(PREDICTION_FLUSH_EVENT, () => {
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    }
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    void savePrediction();
+  });
+  form.dataset.predictionDeadline = match.starts_at_utc;
+  form.addEventListener(
+    PREDICTION_DEADLINE_SYNC_EVENT,
+    () => {
+      if (!syncPredictionDeadline()) {
+        schedulePredictionDeadlineSync();
+      }
+    },
+  );
 
   if (prediction) {
     setSaveStatus("Сохранено.", "saved");
   } else {
     setSaveStatus("", "draft");
+  }
+  if (!syncPredictionDeadline()) {
+    schedulePredictionDeadlineSync();
   }
 
   Promise.resolve().then(() => {
@@ -3088,7 +3442,7 @@ function createSwissStageTeamSelector(
     submitButton.disabled = true;
     submitButton.textContent = "Сохраняем…";
     try {
-      const result = await apiRequest(endpoint, {
+      const result = await apiRequestForCurrentView(endpoint, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3629,7 +3983,7 @@ function createChampionPredictionSettingsDisclosure(
     submitButton.textContent = "Сохраняем…";
 
     try {
-      const result = await apiRequest(
+      const result = await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/champion-prediction/settings`,
         {
           method: "PUT",
@@ -3778,7 +4132,7 @@ function createChampionPredictionChoiceSection(
     submitButton.textContent = "Сохраняем…";
 
     try {
-      const result = await apiRequest(
+      const result = await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/champion-prediction`,
         {
           method: "PUT",
@@ -3927,7 +4281,7 @@ function createContestChampionSection(
     submitButton.textContent = "Сохраняем…";
 
     try {
-      const result = await apiRequest(
+      const result = await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/champion`,
         {
           method: "PUT",
@@ -4119,7 +4473,7 @@ function createMatchPredictionPublicationSettingsDisclosure(
     submitButton.textContent = "Сохраняем…";
 
     try {
-      const result = await apiRequest(
+      const result = await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/match-prediction-publication/settings`,
         {
           method: "PUT",
@@ -4189,7 +4543,7 @@ function createPredictionReminderPublicationSection(contest) {
     setFormMessage(message, "");
 
     try {
-      const result = await apiRequest(
+      const result = await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/prediction-reminders/publish`,
         { method: "POST" },
       );
@@ -4261,7 +4615,7 @@ function createIntermediateLeaderboardPublicationSection(contest) {
     setFormMessage(message, "");
 
     try {
-      const result = await apiRequest(
+      const result = await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/leaderboard-publications`,
         {
           method: "POST",
@@ -4411,7 +4765,7 @@ function createTournamentTeamsAdministrationCard(contest, state, onUpdated) {
     submitButton.disabled = true;
     submitButton.textContent = "Сохраняем…";
     try {
-      const result = await apiRequest(
+      const result = await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/teams`,
         {
           method: "PUT",
@@ -4606,7 +4960,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
     submitButton.disabled = true;
     submitButton.textContent = "Сохраняем…";
     try {
-      const result = await apiRequest(
+      const result = await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/swiss-stage-prediction/settings`,
         {
           method: "PUT",
@@ -4937,7 +5291,7 @@ function createMatchDeletionSection(
     deleteButton.textContent = "Удаляем…";
 
     try {
-      await apiRequest(
+      await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/matches/${match.id}`,
         {
           method: "DELETE",
@@ -5057,7 +5411,7 @@ function createMatchStartEditingSection(
     submitButton.textContent = "Сохраняем…";
 
     try {
-      await apiRequest(
+      await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/matches/${match.id}`,
         {
           method: "PUT",
@@ -5602,7 +5956,7 @@ function createMatchFormCard(bootstrap, contest, state) {
     submitButton.textContent = "Добавляем…";
 
     try {
-      const result = await apiRequest(
+      const result = await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/matches`,
         {
           method: "POST",
@@ -5660,7 +6014,7 @@ function renderContestDetailsLoading(bootstrap) {
   const userName = getUserDisplayName(user);
 
   setChatSummary(`Привет, ${userName}. Чат «${chatTitle}».`);
-  appContentElement.replaceChildren(
+  return replaceAppContent(
     createStatusCard(
       "Открываем конкурс",
       "Загружаем матчи и настройки конкурса…",
@@ -5689,7 +6043,7 @@ function renderContestDetailsError(bootstrap, message) {
   card.append(actions);
 
   setChatSummary(`Привет, ${userName}. Чат «${chatTitle}».`);
-  appContentElement.replaceChildren(card);
+  replaceAppContent(card);
 }
 
 function renderContestDetailsScreen(bootstrap, contest, state = {}) {
@@ -5774,7 +6128,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
   }
 
   setChatSummary(`Привет, ${userName}. Чат «${chatTitle}».`);
-  appContentElement.replaceChildren(...cards);
+  replaceAppContent(...cards);
 }
 
 function renderContestDetailsRoute(bootstrap, contest, state = {}) {
@@ -5950,7 +6304,7 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
     );
   }
 
-  appContentElement.replaceChildren(...cards);
+  replaceAppContent(...cards);
 }
 
 function renderContestManagementError(bootstrap, message) {
@@ -5971,20 +6325,28 @@ function renderContestManagementError(bootstrap, message) {
   });
   actions.append(backButton);
   card.append(actions);
-  appContentElement.replaceChildren(
+  replaceAppContent(
     createManagementHeaderCard(bootstrap),
     card,
   );
 }
 
 async function openContest(bootstrap, contestId, state = {}) {
-  renderContestDetailsLoading(bootstrap);
+  const viewToken = renderContestDetailsLoading(bootstrap);
 
   try {
+    await waitForMatchPredictionSaves(contestId);
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     const path = state.managementMode === true
       ? `/api/tma/management/contests/${contestId}`
       : `/api/tma/contests/${contestId}`;
-    const result = await apiRequest(path);
+    const result = await apiRequestForCurrentView(path);
+
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
 
     if (!result || !result.contest) {
       throw new Error("Сервер вернул некорректный ответ при открытии конкурса.");
@@ -5996,6 +6358,9 @@ async function openContest(bootstrap, contestId, state = {}) {
       renderContestDetailsScreen(bootstrap, result.contest, state);
     }
   } catch (error) {
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     if (
       state.managementMode === true
       && handleManagementRequestError(
@@ -6812,7 +7177,7 @@ function createAuditHeaderCard(bootstrap) {
 function renderAuditScreen(bootstrap, state) {
   currentViewMode = "management";
   setChatSummary();
-  appContentElement.replaceChildren(
+  return replaceAppContent(
     createAuditHeaderCard(bootstrap),
     createAuditFiltersCard(bootstrap, state),
     createAuditListCard(bootstrap, state),
@@ -6850,11 +7215,14 @@ async function loadAuditEvents(bootstrap, state, append) {
     state.nextCursor = null;
     state.initialized = false;
   }
-  renderAuditScreen(bootstrap, state);
+  const viewToken = renderAuditScreen(bootstrap, state);
 
   let managementRequestFailed = false;
   try {
-    const result = await apiRequest(buildAuditRequestPath(state, append));
+    const result = await apiRequestForCurrentView(buildAuditRequestPath(state, append));
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     const incomingEvents = Array.isArray(result.events) ? result.events : [];
     const combined = append ? [...state.events, ...incomingEvents] : incomingEvents;
     const seenEventIds = new Set();
@@ -6877,6 +7245,9 @@ async function loadAuditEvents(bootstrap, state, append) {
     };
     state.initialized = true;
   } catch (error) {
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     if (handleManagementRequestError(error)) {
       managementRequestFailed = true;
       return;
@@ -6885,7 +7256,7 @@ async function loadAuditEvents(bootstrap, state, append) {
     state.initialized = true;
   } finally {
     state.loading = false;
-    if (!managementRequestFailed) {
+    if (!managementRequestFailed && isCurrentView(viewToken)) {
       renderAuditScreen(bootstrap, state);
     }
   }
@@ -6984,7 +7355,7 @@ function createSupermoderatorManagementCard() {
     setFormMessage(listStatus, "Загружаем назначения…");
     listContainer.replaceChildren(listStatus);
     try {
-      const result = await apiRequest("/api/tma/access/supermoderators");
+      const result = await apiRequestForCurrentView("/api/tma/access/supermoderators");
       renderSupermoderatorAssignments(
         listContainer,
         Array.isArray(result.assignments) ? result.assignments : [],
@@ -7031,7 +7402,7 @@ function createSupermoderatorManagementCard() {
     findButton.textContent = "Ищем…";
     setFormMessage(formMessage, "Ищем пользователя в Telegram…");
     try {
-      const result = await apiRequest("/api/tma/access/users/resolve", {
+      const result = await apiRequestForCurrentView("/api/tma/access/users/resolve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target }),
@@ -7048,7 +7419,7 @@ function createSupermoderatorManagementCard() {
           findButton.disabled = true;
           findButton.textContent = "Назначаем…";
           try {
-            await apiRequest(
+            await apiRequestForCurrentView(
               `/api/tma/access/supermoderators/${selectedUser.telegram_user_id}`,
               { method: "PUT" },
             );
@@ -7098,7 +7469,7 @@ function createSupermoderatorManagementCard() {
 function renderSupermoderatorManagementScreen(bootstrap) {
   currentViewMode = "management";
   setChatSummary();
-  appContentElement.replaceChildren(
+  replaceAppContent(
     createAdministrativeHeader(bootstrap, {
       title: "Супермодераторы",
       backLabel: "← К управлению",
@@ -7161,7 +7532,7 @@ function renderSupermoderatorAssignments(container, assignments, reload) {
       revokeButton.disabled = true;
       revokeButton.textContent = "Отзываем…";
       try {
-        await apiRequest(
+        await apiRequestForCurrentView(
           `/api/tma/access/supermoderators/${assignment.user.telegram_user_id}`,
           { method: "DELETE" },
         );
@@ -7683,7 +8054,7 @@ function createChatSettingsCard(bootstrap, managementData, state = {}) {
     input.disabled = true;
     submitButton.textContent = "Сохраняем…";
     try {
-      const result = await apiRequest("/api/tma/management/chat-settings", {
+      const result = await apiRequestForCurrentView("/api/tma/management/chat-settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ app_button_text: appButtonText }),
@@ -7797,7 +8168,13 @@ function createSharedTournamentListCard(bootstrap, tournaments, state = {}) {
   return card;
 }
 
-function createSharedTournamentCreationCard(bootstrap, state = {}) {
+function createSharedTournamentCreationCard(
+  bootstrap,
+  contestTemplatesValue,
+  state = {},
+) {
+  const contestTemplates = getCreatableContestTemplates(contestTemplatesValue);
+  const hasTemplates = contestTemplates.length > 0;
   const card = createElement("section", {
     className: "info-card contest-form-card",
   });
@@ -7808,7 +8185,8 @@ function createSharedTournamentCreationCard(bootstrap, state = {}) {
   nameInput.type = "text";
   nameInput.required = true;
   nameInput.maxLength = CONTEST_NAME_MAX_LENGTH;
-  nameInput.placeholder = "Чемпионат мира 2026";
+  nameInput.placeholder = "Название общего турнира";
+  nameInput.disabled = !hasTemplates;
   nameField.append(
     createElement("span", { className: "form-field-label", text: "Название" }),
     nameInput,
@@ -7816,15 +8194,7 @@ function createSharedTournamentCreationCard(bootstrap, state = {}) {
   const templateField = createElement("label", { className: "form-field" });
   const templateInput = document.createElement("select");
   templateInput.className = "text-input";
-  for (const [value, label] of [
-    ["world_cup_2026", "Чемпионат мира 2026"],
-    ["the_international_2026", "The International 2026"],
-  ]) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    templateInput.append(option);
-  }
+  fillContestTemplateSelect(templateInput, contestTemplates);
   templateField.append(
     createElement("span", { className: "form-field-label", text: "Шаблон" }),
     templateInput,
@@ -7840,11 +8210,16 @@ function createSharedTournamentCreationCard(bootstrap, state = {}) {
     "primary-action-button",
     "submit",
   );
+  submitButton.disabled = !hasTemplates;
   form.append(nameField, templateField, submitButton, message);
   card.append(heading, form);
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (!hasTemplates || !templateInput.value) {
+      setFormMessage(message, "Сейчас нет доступных шаблонов.", "error");
+      return;
+    }
     const name = normalizeContestName(nameInput.value);
     if (!name) {
       setFormMessage(message, "Введите название общего турнира.", "error");
@@ -7852,7 +8227,7 @@ function createSharedTournamentCreationCard(bootstrap, state = {}) {
     }
     submitButton.disabled = true;
     try {
-      const result = await apiRequest("/api/tma/shared-tournaments", {
+      const result = await apiRequestForCurrentView("/api/tma/shared-tournaments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, template_key: templateInput.value }),
@@ -7862,12 +8237,21 @@ function createSharedTournamentCreationCard(bootstrap, state = {}) {
       if (handleManagementRequestError(error)) {
         return;
       }
+      if (error?.code === "template_unavailable") {
+        void openSharedTournamentManagement(bootstrap, {
+          creationMessage: error instanceof Error
+            ? error.message
+            : "Выбранный шаблон больше недоступен для создания.",
+          creationMessageType: "error",
+        });
+        return;
+      }
       setFormMessage(
         message,
         error instanceof Error ? error.message : "Не удалось создать турнир.",
         "error",
       );
-      submitButton.disabled = false;
+      submitButton.disabled = !hasTemplates;
     }
   });
   return card;
@@ -7876,11 +8260,12 @@ function createSharedTournamentCreationCard(bootstrap, state = {}) {
 function renderSharedTournamentManagementScreen(
   bootstrap,
   tournaments,
+  contestTemplates,
   state = {},
 ) {
   currentViewMode = "management";
   setChatSummary();
-  appContentElement.replaceChildren(
+  replaceAppContent(
     createAdministrativeHeader(bootstrap, {
       title: "Общие турниры",
       backLabel: "← К управлению",
@@ -7890,31 +8275,43 @@ function renderSharedTournamentManagementScreen(
       description: "Глобальный раздел: изменения не ограничены текущим чатом.",
     }),
     createSharedTournamentListCard(bootstrap, tournaments, state),
-    createSharedTournamentCreationCard(bootstrap, state),
+    createSharedTournamentCreationCard(bootstrap, contestTemplates, state),
   );
 }
 
 async function openSharedTournamentManagement(bootstrap, state = {}) {
   activeBootstrap = bootstrap;
   currentViewMode = "management";
-  appContentElement.replaceChildren(
+  const viewToken = replaceAppContent(
     createStatusCard("Открываем общие турниры", "Загружаем расписания…"),
   );
   try {
-    const result = await apiRequest("/api/tma/shared-tournaments");
+    const result = await apiRequestForCurrentView("/api/tma/shared-tournaments");
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     renderSharedTournamentManagementScreen(
       bootstrap,
       Array.isArray(result.shared_tournaments) ? result.shared_tournaments : [],
+      Array.isArray(result.contest_templates) ? result.contest_templates : [],
       state,
     );
   } catch (error) {
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     if (handleManagementRequestError(error)) {
       return;
     }
-    renderSharedTournamentManagementScreen(bootstrap, [], {
-      message: error instanceof Error ? error.message : "Не удалось загрузить турниры.",
-      messageType: "error",
-    });
+    renderSharedTournamentManagementScreen(
+      bootstrap,
+      [],
+      [],
+      {
+        message: error instanceof Error ? error.message : "Не удалось загрузить турниры.",
+        messageType: "error",
+      },
+    );
   }
 }
 
@@ -7929,7 +8326,7 @@ function createSharedTournamentLifecycleCard(bootstrap, tournament) {
     restoreButton.addEventListener("click", async () => {
       restoreButton.disabled = true;
       try {
-        await apiRequest(
+        await apiRequestForCurrentView(
           `/api/tma/shared-tournaments/${tournament.id}/restore`,
           {
             method: "POST",
@@ -7980,7 +8377,7 @@ function createSharedTournamentLifecycleCard(bootstrap, tournament) {
     }
     archiveButton.disabled = true;
     try {
-      await apiRequest(
+      await apiRequestForCurrentView(
         `/api/tma/shared-tournaments/${tournament.id}/archive`,
         {
           method: "POST",
@@ -8060,7 +8457,7 @@ function createSharedTournamentTeamsCard(bootstrap, tournament, state = {}) {
       .filter(Boolean);
     submitButton.disabled = true;
     try {
-      await apiRequest(`/api/tma/shared-tournaments/${tournament.id}/teams`, {
+      await apiRequestForCurrentView(`/api/tma/shared-tournaments/${tournament.id}/teams`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -8127,7 +8524,7 @@ function createSharedChampionCard(bootstrap, tournament) {
     event.preventDefault();
     saveButton.disabled = true;
     try {
-      await apiRequest(
+      await apiRequestForCurrentView(
         `/api/tma/shared-tournaments/${tournament.id}/champion-prediction/settings`,
         {
           method: "PUT",
@@ -8181,7 +8578,7 @@ function createSharedChampionCard(bootstrap, tournament) {
       event.preventDefault();
       resultButton.disabled = true;
       try {
-        await apiRequest(`/api/tma/shared-tournaments/${tournament.id}/champion`, {
+        await apiRequestForCurrentView(`/api/tma/shared-tournaments/${tournament.id}/champion`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -8264,7 +8661,7 @@ function createSharedSwissStageCard(bootstrap, tournament) {
     event.preventDefault();
     saveButton.disabled = true;
     try {
-      await apiRequest(`/api/tma/shared-tournaments/${tournament.id}/swiss-stage/settings`, {
+      await apiRequestForCurrentView(`/api/tma/shared-tournaments/${tournament.id}/swiss-stage/settings`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -8319,7 +8716,7 @@ function createSharedSwissStageCard(bootstrap, tournament) {
       event.preventDefault();
       resultButton.disabled = true;
       try {
-        await apiRequest(`/api/tma/shared-tournaments/${tournament.id}/swiss-stage/result`, {
+        await apiRequestForCurrentView(`/api/tma/shared-tournaments/${tournament.id}/swiss-stage/result`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -8407,7 +8804,7 @@ function createSharedMatchCreationCard(bootstrap, tournament, state = {}) {
     }
     submitButton.disabled = true;
     try {
-      await apiRequest(`/api/tma/shared-tournaments/${tournament.id}/matches`, {
+      await apiRequestForCurrentView(`/api/tma/shared-tournaments/${tournament.id}/matches`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -8489,7 +8886,7 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
       const startsAt = new Date(startInput.value);
       saveButton.disabled = true;
       try {
-        await apiRequest(
+        await apiRequestForCurrentView(
           `/api/tma/shared-tournaments/${tournament.id}/matches/${match.id}`,
           {
             method: "PUT",
@@ -8549,7 +8946,7 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
       event.preventDefault();
       saveResultButton.disabled = true;
       try {
-        await apiRequest(
+        await apiRequestForCurrentView(
           `/api/tma/shared-tournaments/${tournament.id}/matches/${match.id}/result`,
           {
             method: "PUT",
@@ -8591,7 +8988,7 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
     }
     deleteButton.disabled = true;
     try {
-      const result = await apiRequest(
+      const result = await apiRequestForCurrentView(
         `/api/tma/shared-tournaments/${tournament.id}/matches/${match.id}`
           + `?expected_version=${match.version}`,
         { method: "DELETE" },
@@ -8644,22 +9041,28 @@ function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
   for (const match of tournament.matches || []) {
     cards.push(createSharedMatchAdministrationCard(bootstrap, tournament, match));
   }
-  appContentElement.replaceChildren(...cards);
+  replaceAppContent(...cards);
 }
 
 async function openSharedTournament(bootstrap, tournamentId, state = {}) {
   currentViewMode = "management";
-  appContentElement.replaceChildren(
+  const viewToken = replaceAppContent(
     createStatusCard("Открываем общий турнир", "Загружаем матчи…"),
   );
   try {
-    const result = await apiRequest(`/api/tma/shared-tournaments/${tournamentId}`);
+    const result = await apiRequestForCurrentView(`/api/tma/shared-tournaments/${tournamentId}`);
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     renderSharedTournamentScreen(bootstrap, result.shared_tournament, state);
   } catch (error) {
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     if (handleManagementRequestError(error)) {
       return;
     }
-    appContentElement.replaceChildren(
+    replaceAppContent(
       createAdministrativeHeader(bootstrap, {
         title: "Общий турнир",
         backLabel: "← К общим турнирам",
@@ -8707,13 +9110,16 @@ function renderManagementScreen(bootstrap, managementData, state = {}) {
   if (accessCard) {
     cards.push(accessCard);
   }
-  appContentElement.replaceChildren(...cards);
+  replaceAppContent(...cards);
 }
 
 function handleManagementRequestError(
   error,
   message = "Права изменились. Недоступный экран управления закрыт.",
 ) {
+  if (error instanceof StaleViewRequestError) {
+    return true;
+  }
   if (error?.status !== 403 || !activeBootstrap) {
     return false;
   }
@@ -8727,16 +9133,22 @@ async function openManagement(bootstrap, state = {}) {
   activeBootstrap = bootstrap;
   currentViewMode = "management";
   setChatSummary();
-  appContentElement.replaceChildren(
+  const viewToken = replaceAppContent(
     createStatusCard(
       "Открываем управление",
       "Проверяем права и загружаем конкурсы текущего чата…",
     ),
   );
   try {
-    const result = await apiRequest("/api/tma/management/contests");
+    const result = await apiRequestForCurrentView("/api/tma/management/contests");
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     renderManagementScreen(bootstrap, result || {}, state);
   } catch (error) {
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     if (error?.status === 403) {
       const nextBootstrap = {
         ...bootstrap,
@@ -8751,7 +9163,7 @@ async function openManagement(bootstrap, state = {}) {
     const message = error instanceof Error
       ? error.message
       : "Не удалось открыть управление.";
-    appContentElement.replaceChildren(
+    replaceAppContent(
       createManagementHeaderCard(bootstrap),
       createInfoCard("Не удалось открыть управление", [message]),
     );
@@ -8759,13 +9171,19 @@ async function openManagement(bootstrap, state = {}) {
 }
 
 async function openContestList(bootstrap, state = {}) {
-  renderLoading();
+  const viewToken = renderLoading();
 
   try {
-    const refreshedBootstrap = await apiRequest("/api/tma/bootstrap");
+    const refreshedBootstrap = await apiRequestForCurrentView("/api/tma/bootstrap");
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     activeBootstrap = refreshedBootstrap;
     renderContestScreen(refreshedBootstrap, state);
   } catch (error) {
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     const message = error instanceof Error
       ? error.message
       : "Не удалось обновить список конкурсов.";
@@ -8813,7 +9231,7 @@ function renderContestScreen(bootstrap, state = {}) {
   if (canManageContests(bootstrap)) {
     cards.push(createManagementNavigationCard(bootstrap));
   }
-  appContentElement.replaceChildren(...cards);
+  replaceAppContent(...cards);
 }
 
 function renderBootstrap(bootstrap) {
@@ -8821,11 +9239,24 @@ function renderBootstrap(bootstrap) {
   renderContestScreen(bootstrap);
 }
 
-function renderError(message) {
+function renderError(message, { canRetry = false } = {}) {
   setChatSummary("Не удалось открыть конкурсы.");
-  appContentElement.replaceChildren(
-    createInfoCard("Не удалось открыть Клевер", [message]),
-  );
+  const card = createInfoCard("Не удалось открыть Клевер", [message]);
+
+  if (canRetry) {
+    const actions = createElement("div", { className: "form-actions" });
+    const retryButton = createActionButton(
+      "Попробовать снова",
+      "primary-action-button",
+    );
+    retryButton.addEventListener("click", () => {
+      void initialize();
+    });
+    actions.append(retryButton);
+    card.append(actions);
+  }
+
+  replaceAppContent(card);
 }
 
 async function apiRequest(path, options = {}) {
@@ -8835,13 +9266,22 @@ async function apiRequest(path, options = {}) {
     throw new Error(buildMissingInitDataMessage());
   }
 
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      "X-Telegram-Init-Data": initData,
-      ...(options.headers || {}),
-    },
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      cache: "no-store",
+      ...options,
+      headers: {
+        "X-Telegram-Init-Data": initData,
+        ...(options.headers || {}),
+      },
+    });
+  } catch {
+    throw new Error(
+      "Не удалось связаться с сервером. "
+      + "Проверьте соединение и повторите попытку.",
+    );
+  }
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("application/json")
     ? await response.json()
@@ -8870,6 +9310,11 @@ function handleError(error) {
     ? error.message
     : "Не удалось открыть Клевер.";
 
+  if (message === buildMissingInitDataMessage()) {
+    renderError(message);
+    return;
+  }
+
   if (message === "Telegram init data start_param is required.") {
     renderError(buildMissingChatContextMessage());
     return;
@@ -8885,16 +9330,23 @@ function handleError(error) {
     return;
   }
 
-  renderError(message);
+  renderError(message, { canRetry: true });
 }
 
 async function initialize() {
-  renderLoading();
+  const viewToken = renderLoading();
+  refreshTelegramWebApp()?.ready?.();
 
   try {
-    const bootstrap = await apiRequest("/api/tma/bootstrap");
+    const bootstrap = await apiRequestForCurrentView("/api/tma/bootstrap");
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     renderBootstrap(bootstrap);
   } catch (error) {
+    if (!isCurrentView(viewToken)) {
+      return;
+    }
     handleError(error);
   }
 }

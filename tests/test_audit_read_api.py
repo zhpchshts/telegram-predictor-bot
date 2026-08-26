@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app import tma_api
 from app.access_control import TelegramAdministratorsClient
 from app.audit_service import (
     AuditActor,
@@ -60,6 +61,11 @@ def _configure_environment(
     monkeypatch.setenv(
         "ROLE_ENFORCEMENT_ENABLED",
         "true" if enforcement_enabled else "false",
+    )
+    monkeypatch.setattr(
+        tma_api,
+        "CREATABLE_TEMPLATE_KEYS",
+        tma_api.SUPPORTED_TEMPLATE_KEYS,
     )
 
 
@@ -457,7 +463,10 @@ def test_deleted_contest_acceptance_flow_is_readable_through_tma_api(
     contest_response = client.post(
         "/api/tma/contests",
         headers=create_contest_headers,
-        json={"name": "Проверка аудита"},
+        json={
+            "name": "Проверка аудита",
+            "template_key": "world_cup_2026",
+        },
     )
     assert contest_response.status_code == 201
     contest_id = contest_response.json()["contest"]["id"]

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 
+from app import contest_service
 from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
     ChampionPredictionSettingsLockedError,
@@ -19,6 +21,7 @@ from app.contest_service import (
     save_champion_prediction,
     save_champion_prediction_settings,
     save_contest_champion,
+    save_match_prediction_publication_settings,
 )
 from app.database import database_connection, initialize_database
 from tests.support import ensure_contest_teams
@@ -179,6 +182,152 @@ def _mark_all_matches_finished(
                 """,
                 (match_row["home_team_id"], match_row["tie_id"]),
             )
+
+
+def test_champion_prediction_checks_deadline_after_acquiring_write_lock(
+    database_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contest_id = _create_contest(database_path)
+    _, spain_team_id, _, _ = _create_matches(
+        database_path,
+        contest_id=contest_id,
+    )
+    _configure_champion_prediction(database_path, contest_id=contest_id)
+    contender_connected = Event()
+    clock = {"now": datetime(2030, 1, 1, 11, 59, 59, tzinfo=timezone.utc)}
+    original_database_connection = contest_service.database_connection
+
+    @contextmanager
+    def coordinated_database_connection(path: Path):
+        with original_database_connection(path) as connection:
+            contender_connected.set()
+            yield connection
+
+    def controlled_now_utc(_value: datetime | None) -> datetime:
+        return clock["now"]
+
+    monkeypatch.setattr(
+        contest_service,
+        "database_connection",
+        coordinated_database_connection,
+    )
+    monkeypatch.setattr(contest_service, "_resolve_now_utc", controlled_now_utc)
+
+    with database_connection(database_path) as lock_connection:
+        lock_connection.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            prediction_future = executor.submit(
+                save_champion_prediction,
+                database_path=database_path,
+                telegram_chat_id=CHAT_ID,
+                contest_id=contest_id,
+                telegram_user_id=ALICE_TELEGRAM_USER_ID,
+                first_name="Алиса",
+                last_name=None,
+                username="alice",
+                predicted_team_id=spain_team_id,
+            )
+            assert contender_connected.wait(timeout=5)
+            clock["now"] = datetime(
+                2030,
+                1,
+                1,
+                12,
+                0,
+                tzinfo=timezone.utc,
+            )
+            lock_connection.execute("COMMIT")
+            with pytest.raises(PredictionUnavailableError, match="уже закрыт"):
+                prediction_future.result(timeout=5)
+
+    with database_connection(database_path) as connection:
+        prediction_count = connection.execute(
+            "SELECT COUNT(*) FROM champion_predictions WHERE contest_id = ?",
+            (contest_id,),
+        ).fetchone()[0]
+    assert prediction_count == 0
+
+
+def test_champion_prediction_exact_retry_does_not_revise_publication(
+    database_path: Path,
+) -> None:
+    contest_id = _create_contest(database_path)
+    _, spain_team_id, _, _ = _create_matches(
+        database_path,
+        contest_id=contest_id,
+    )
+    save_match_prediction_publication_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ADMIN_TELEGRAM_USER_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        enabled=True,
+        now_utc=OPEN_PREDICTION_TIME,
+        audit_actor=AUDIT_ACTOR,
+    )
+    _configure_champion_prediction(database_path, contest_id=contest_id)
+    first = save_champion_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_TELEGRAM_USER_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        predicted_team_id=spain_team_id,
+        now_utc=OPEN_PREDICTION_TIME,
+    )
+
+    def prediction_side_effects() -> tuple[int, tuple[tuple[object, ...], ...]]:
+        with database_connection(database_path) as connection:
+            event_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM event_log
+                    WHERE contest_id = ?
+                      AND event_type IN (
+                          'champion_prediction.created',
+                          'champion_prediction.updated'
+                      )
+                    """,
+                    (contest_id,),
+                ).fetchone()[0]
+            )
+            publications = connection.execute(
+                """
+                SELECT publication_type, desired_revision, latest_event_id, updated_at
+                FROM contest_publications
+                WHERE contest_id = ?
+                  AND publication_type IN (
+                      'champion_predictions',
+                      'champion_result'
+                  )
+                ORDER BY publication_type
+                """,
+                (contest_id,),
+            ).fetchall()
+        return event_count, tuple(tuple(row) for row in publications)
+
+    side_effects_before_retry = prediction_side_effects()
+    repeated = save_champion_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_TELEGRAM_USER_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        predicted_team_id=spain_team_id,
+        now_utc=OPEN_PREDICTION_TIME,
+    )
+
+    assert repeated == first
+    assert prediction_side_effects() == side_effects_before_retry
 
 
 def test_champion_prediction_card_lists_candidates_and_saves_selection(

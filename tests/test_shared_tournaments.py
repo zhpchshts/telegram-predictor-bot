@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event
 
 import pytest
 
+from app import shared_tournament_service
 from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
     SharedTournamentManagedError,
     create_world_cup_2026_contest,
     save_champion_prediction,
     save_match_prediction,
+    save_match_prediction_publication_settings,
     save_swiss_stage_prediction,
     update_match_start,
 )
@@ -101,6 +106,225 @@ def _local_match_ids(database_path: Path, shared_match_id: int) -> dict[int, int
                 (shared_match_id,),
             )
         }
+
+
+def test_shared_versioned_writes_accept_only_exact_single_step_retries(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "shared-exact-retries.db"
+    initialize_database(database_path)
+    initial = create_shared_tournament(
+        database_path=database_path,
+        name="Чемпионат мира 2026",
+        template_key="world_cup_2026",
+        actor_telegram_user_id=OWNER_ID,
+    )
+
+    def shared_event_count() -> int:
+        with create_connection(database_path) as connection:
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM shared_tournament_events"
+                ).fetchone()[0]
+            )
+
+    teams = save_shared_tournament_teams(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        team_names=["Испания", "Франция"],
+        expected_version=initial.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+    )
+    events_after_teams = shared_event_count()
+    repeated_teams = save_shared_tournament_teams(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        team_names=["Испания", "Франция"],
+        expected_version=initial.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+    )
+    assert repeated_teams == teams
+    assert shared_event_count() == events_after_teams
+
+    champion_settings = save_shared_champion_settings(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        enabled=True,
+        deadline_at="2030-06-01T12:00:00Z",
+        points=7,
+        expected_version=teams.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-05-01T00:00:00Z"),
+    )
+    events_after_champion_settings = shared_event_count()
+    repeated_champion_settings = save_shared_champion_settings(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        enabled=True,
+        deadline_at="2030-06-01T12:00:00Z",
+        points=7,
+        expected_version=teams.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-05-01T00:01:00Z"),
+    )
+    assert repeated_champion_settings == champion_settings
+    assert shared_event_count() == events_after_champion_settings
+
+    with pytest.raises(SharedTournamentConflictError, match="уже был изменён"):
+        save_shared_tournament_teams(
+            database_path=database_path,
+            shared_tournament_id=initial.tournament.id,
+            team_names=["Испания", "Франция"],
+            expected_version=teams.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+        )
+
+    with pytest.raises(SharedTournamentConflictError, match="уже был изменён"):
+        save_shared_tournament_teams(
+            database_path=database_path,
+            shared_tournament_id=initial.tournament.id,
+            team_names=["Испания", "Франция"],
+            expected_version=initial.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+        )
+
+    swiss_settings = save_shared_swiss_settings(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        enabled=True,
+        deadline_at="2030-06-01T12:00:00Z",
+        direct_qualifier_count=1,
+        elimination_qualifier_count=1,
+        expected_version=champion_settings.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-05-01T00:00:00Z"),
+    )
+    events_after_swiss_settings = shared_event_count()
+    repeated_swiss_settings = save_shared_swiss_settings(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        enabled=True,
+        deadline_at="2030-06-01T12:00:00Z",
+        direct_qualifier_count=1,
+        elimination_qualifier_count=1,
+        expected_version=champion_settings.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-05-01T00:01:00Z"),
+    )
+    assert repeated_swiss_settings == swiss_settings
+    assert shared_event_count() == events_after_swiss_settings
+
+    match = create_shared_match(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        home_team_id=teams.teams[0].id,
+        away_team_id=teams.teams[1].id,
+        starts_at_utc="2030-06-01T13:00:00Z",
+        best_of=None,
+        actor_telegram_user_id=OWNER_ID,
+        now_utc=_time("2030-05-01T00:00:00Z"),
+    )
+    saved_match = save_shared_match_result(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        shared_match_id=match.id,
+        home_score=2,
+        away_score=1,
+        advancing_team_id=teams.teams[0].id,
+        expected_version=match.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-06-01T14:00:00Z"),
+    )
+    events_after_match_result = shared_event_count()
+    repeated_match = save_shared_match_result(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        shared_match_id=match.id,
+        home_score=2,
+        away_score=1,
+        advancing_team_id=teams.teams[0].id,
+        expected_version=match.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-06-01T14:01:00Z"),
+    )
+    assert repeated_match == saved_match
+    assert shared_event_count() == events_after_match_result
+
+    before_champion_result = get_shared_tournament_details(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+    )
+    champion = save_shared_champion_result(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        champion_team_id=teams.teams[0].id,
+        expected_version=before_champion_result.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-06-01T14:00:00Z"),
+    )
+    events_after_champion = shared_event_count()
+    repeated_champion = save_shared_champion_result(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        champion_team_id=teams.teams[0].id,
+        expected_version=before_champion_result.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-06-01T14:01:00Z"),
+    )
+    assert repeated_champion == champion
+    assert shared_event_count() == events_after_champion
+
+    swiss = save_shared_swiss_result(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        direct_team_ids=[teams.teams[0].id],
+        elimination_team_ids=[teams.teams[1].id],
+        expected_version=champion.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-06-01T14:00:00Z"),
+    )
+    events_after_swiss = shared_event_count()
+    repeated_swiss = save_shared_swiss_result(
+        database_path=database_path,
+        shared_tournament_id=initial.tournament.id,
+        direct_team_ids=[teams.teams[0].id],
+        elimination_team_ids=[teams.teams[1].id],
+        expected_version=champion.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-06-01T14:01:00Z"),
+    )
+    assert repeated_swiss == swiss
+    assert shared_event_count() == events_after_swiss
 
 
 def test_shared_tournament_archive_requires_results_and_can_be_restored(
@@ -487,6 +711,72 @@ def test_shared_start_update_is_atomic_and_deadline_never_reopens(
     assert second.id in local_ids
 
 
+def test_shared_start_update_checks_deadline_after_acquiring_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "shared-match-deadline-race.db"
+    initialize_database(database_path)
+    shared = _create_shared_tournament(database_path)
+    match = create_shared_match(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        home_team_id=shared.teams[0].id,
+        away_team_id=shared.teams[1].id,
+        starts_at_utc="2030-06-01T12:00:00Z",
+        best_of=None,
+        actor_telegram_user_id=OWNER_ID,
+        now_utc=_time("2030-05-01T00:00:00Z"),
+    )
+    contender_connected = Event()
+    clock = {"now": _time("2030-06-01T11:59:59Z")}
+    original_database_connection = shared_tournament_service.database_connection
+
+    @contextmanager
+    def coordinated_database_connection(path: Path):
+        with original_database_connection(path) as connection:
+            contender_connected.set()
+            yield connection
+
+    def controlled_now(_value: datetime | None) -> datetime:
+        return clock["now"]
+
+    monkeypatch.setattr(
+        shared_tournament_service,
+        "database_connection",
+        coordinated_database_connection,
+    )
+    monkeypatch.setattr(shared_tournament_service, "_resolve_now", controlled_now)
+
+    with create_connection(database_path) as lock_connection:
+        lock_connection.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            update_future = executor.submit(
+                update_shared_match_start,
+                database_path=database_path,
+                shared_tournament_id=shared.tournament.id,
+                shared_match_id=match.id,
+                starts_at_utc="2030-06-02T12:00:00Z",
+                expected_version=match.version,
+                actor_telegram_user_id=OWNER_ID,
+            )
+            assert contender_connected.wait(timeout=5)
+            clock["now"] = _time("2030-06-01T12:00:00Z")
+            lock_connection.execute("COMMIT")
+            with pytest.raises(
+                SharedMatchUpdateUnavailableError,
+                match="Дедлайн матча уже наступил",
+            ):
+                update_future.result(timeout=5)
+
+    unchanged = get_shared_tournament_details(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+    )
+    assert unchanged.matches[0].starts_at_utc == "2030-06-01T12:00:00Z"
+    assert unchanged.matches[0].version == match.version
+
+
 def test_shared_result_recalculates_every_contest_and_correction_changes_scores(
     tmp_path: Path,
 ) -> None:
@@ -525,6 +815,22 @@ def test_shared_result_recalculates_every_contest_and_correction_changes_scores(
     ]
     local_ids = _local_match_ids(database_path, match.id)
     for contest, chat_id in contests:
+        save_match_prediction_publication_settings(
+            database_path=database_path,
+            telegram_chat_id=chat_id,
+            contest_id=contest.id,
+            telegram_user_id=OWNER_ID,
+            first_name="Eugene",
+            last_name="Sabir",
+            username="evsab",
+            enabled=True,
+            now_utc=_time("2030-05-01T00:00:00Z"),
+            audit_actor=AuditActor(
+                telegram_chat_id=chat_id,
+                telegram_user_id=OWNER_ID,
+                role=AuditActorRole.TELEGRAM_ADMIN,
+            ),
+        )
         save_match_prediction(
             database_path=database_path,
             telegram_chat_id=chat_id,
@@ -554,6 +860,67 @@ def test_shared_result_recalculates_every_contest_and_correction_changes_scores(
         actor_username="evsab",
         now_utc=_time("2030-06-01T13:00:00Z"),
     )
+
+    def result_side_effects() -> tuple[int, int, tuple[tuple[object, ...], ...]]:
+        with create_connection(database_path) as connection:
+            shared_event_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM shared_tournament_events
+                    WHERE shared_tournament_id = ?
+                      AND event_type IN (
+                          'shared_match.result_recorded',
+                          'shared_match.result_corrected'
+                      )
+                    """,
+                    (shared.tournament.id,),
+                ).fetchone()[0]
+            )
+            local_event_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM event_log
+                    WHERE event_type IN (
+                        'shared_match.result_recorded',
+                        'shared_match.result_corrected'
+                    )
+                    """
+                ).fetchone()[0]
+            )
+            publications = connection.execute(
+                """
+                SELECT contest_id, desired_revision, latest_event_id, updated_at
+                FROM contest_publications
+                WHERE publication_type = 'match_result'
+                ORDER BY contest_id
+                """
+            ).fetchall()
+        return (
+            shared_event_count,
+            local_event_count,
+            tuple(tuple(row) for row in publications),
+        )
+
+    side_effects_before_retry = result_side_effects()
+    replayed = save_shared_match_result(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        shared_match_id=match.id,
+        home_score=2,
+        away_score=1,
+        advancing_team_id=shared.teams[0].id,
+        expected_version=match.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-06-01T13:01:00Z"),
+    )
+    assert replayed == saved
+    assert result_side_effects() == side_effects_before_retry
+
     with create_connection(database_path) as connection:
         assert (
             connection.execute(

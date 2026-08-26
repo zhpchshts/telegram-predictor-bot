@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app import tma_api
 from app.database import create_connection, database_connection, initialize_database
 from app.main import create_app as create_application
 from app.tma_api import get_telegram_administrators_client
@@ -51,6 +52,11 @@ def configure_test_environment(*, monkeypatch, database_path: Path) -> None:
     monkeypatch.setenv("BOT_USERNAME", "ZhpchshtsPredictorBot")
     monkeypatch.setenv("DATABASE_PATH", str(database_path))
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "false")
+    monkeypatch.setattr(
+        tma_api,
+        "CREATABLE_TEMPLATE_KEYS",
+        tma_api.SUPPORTED_TEMPLATE_KEYS,
+    )
 
 
 def build_tma_headers() -> dict[str, str]:
@@ -84,7 +90,10 @@ def create_tma_contest(client: TestClient) -> dict[str, object]:
             **build_tma_headers(),
             "Idempotency-Key": "create-contest",
         },
-        json={"name": "ЧМ-2026: прогнозы"},
+        json={
+            "name": "ЧМ-2026: прогнозы",
+            "template_key": "world_cup_2026",
+        },
     )
 
     assert response.status_code == 201
@@ -184,6 +193,13 @@ def test_champion_prediction_api_configures_selects_and_records_champion(
             "name": "Аргентина",
         }
     }
+    repeated_prediction_response = client.put(
+        f"/api/tma/contests/{contest['id']}/champion-prediction",
+        headers=build_tma_headers(),
+        json={"predicted_team_id": match["home_team_id"]},
+    )
+    assert repeated_prediction_response.status_code == 200
+    assert repeated_prediction_response.json() == prediction_response.json()
 
     unavailable_champion_response = client.put(
         f"/api/tma/contests/{contest['id']}/champion",

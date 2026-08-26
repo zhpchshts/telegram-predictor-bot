@@ -38,7 +38,7 @@ def test_management_hub_header_shows_chat_context_and_returns_to_contests() -> N
     assert "Режим управления" not in header_source
     assert 'bootstrap.context?.chat?.title || "этого чата"' in shared_header_source
     assert "Чат «${chatTitle}»" in shared_header_source
-    assert 'apiRequest("/api/tma/bootstrap")' in refresh_source
+    assert 'apiRequestForCurrentView("/api/tma/bootstrap")' in refresh_source
     assert "renderContestScreen(refreshedBootstrap, state)" in refresh_source
     assert "renderContestScreen(bootstrap" in refresh_source
 
@@ -140,18 +140,49 @@ def test_contest_creation_has_its_own_screen_and_back_navigation() -> None:
     assert "createContestConfirmationCard" not in hub_source
 
 
-def test_ti_creation_and_series_controls_are_present() -> None:
+def test_empty_template_catalog_disables_new_creation() -> None:
+    select_source = _function_source("fillContestTemplateSelect")
     contest_form_source = _function_source("createContestFormCard")
     confirmation_source = _function_source("createContestConfirmationCard")
+    shared_form_source = _function_source("createSharedTournamentCreationCard")
+    shared_open_source = _function_source("openSharedTournamentManagement")
+    full_source = _source()
+
+    assert 'emptyOption.textContent = "Шаблонов нет"' in select_source
+    assert "emptyOption.disabled = true" in select_source
+    assert "emptyOption.selected = true" in select_source
+    assert "select.disabled = true" in select_source
+
+    assert "state.managementData?.contest_templates" in contest_form_source
+    assert "creatableTemplateKeys.has(tournament.template_key)" in contest_form_source
+    assert "continueButton.disabled = !hasTemplates" in contest_form_source
+    assert "if (!creatableTemplateKeys.has(templateInput.value))" in contest_form_source
+    assert "draftTemplateKey: templateInput.value" in contest_form_source
+    assert "template_key: state.draftTemplateKey" in confirmation_source
+    assert confirmation_source.index("if (!selectedTemplate)") < (
+        confirmation_source.index('state.draftTemplateKey === "the_international_2026"')
+    )
+    assert 'error?.code === "template_unavailable"' in confirmation_source
+    assert "contest_templates: contestTemplates" in confirmation_source
+    assert 'mode: "form"' in confirmation_source
+    assert '|| "world_cup_2026"' not in full_source
+
+    assert (
+        "fillContestTemplateSelect(templateInput, contestTemplates)"
+        in shared_form_source
+    )
+    assert "submitButton.disabled = !hasTemplates" in shared_form_source
+    assert "if (!hasTemplates || !templateInput.value)" in shared_form_source
+    assert 'error?.code === "template_unavailable"' in shared_form_source
+    assert "openSharedTournamentManagement(bootstrap" in shared_form_source
+    assert "result.contest_templates" in shared_open_source
+
+
+def test_ti_series_controls_and_historical_rules_are_preserved() -> None:
     match_form_source = _function_source("createMatchFormCard")
     prediction_source = _function_source("createMatchPredictionSection")
     result_source = _function_source("createMatchResultSection")
     score_options_source = _function_source("getSeriesScoreOptions")
-
-    assert 'templateInput.id = "contest-template-key"' in contest_form_source
-    assert '"the_international_2026", "The International 2026"' in contest_form_source
-    assert "draftTemplateKey: templateInput.value" in contest_form_source
-    assert "template_key: state.draftTemplateKey" in confirmation_source
 
     assert 'bestOfInput.id = "match-best-of"' in match_form_source
     assert "const value of [3, 5]" in match_form_source

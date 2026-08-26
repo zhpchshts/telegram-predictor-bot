@@ -240,7 +240,7 @@ def test_management_always_uses_explicit_contest_selection_and_lazy_api() -> Non
     )
     row_source = _function_source("createManagementContestRow")
 
-    assert 'apiRequest("/api/tma/management/contests")' in source
+    assert 'apiRequestForCurrentView("/api/tma/management/contests")' in source
     assert (
         "createManagementContestListCard(contests, bootstrap, managementData)"
         in management_source
