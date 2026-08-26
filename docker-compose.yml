@@ -12,6 +12,11 @@ services:
       - "127.0.0.1:8001:8000"
     volumes:
       - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test:
         - CMD

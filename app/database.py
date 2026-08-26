@@ -8,6 +8,7 @@ from pathlib import Path
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
+BEGIN IMMEDIATE;
 
 CREATE TABLE IF NOT EXISTS chats (
     id INTEGER PRIMARY KEY,
@@ -693,21 +694,35 @@ CREATE INDEX IF NOT EXISTS idx_contest_publications_due_reconcile
 CREATE INDEX IF NOT EXISTS idx_contest_publications_active_claim
     ON contest_publications(claim_expires_at)
     WHERE claim_token IS NOT NULL;
+
+COMMIT;
 """
+
+
+SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
 
 
 def create_connection(database_path: Path) -> sqlite3.Connection:
     database_path.parent.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(database_path)
+    connection = sqlite3.connect(
+        database_path,
+        timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+    )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON;")
     return connection
 
 
 def initialize_database(database_path: Path) -> None:
-    with create_connection(database_path) as connection:
+    connection = create_connection(database_path)
+    try:
         connection.executescript(SCHEMA)
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 @contextmanager

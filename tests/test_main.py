@@ -4,6 +4,7 @@ import re
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+import pytest
 
 from app import main
 from app.database import initialize_database
@@ -39,7 +40,24 @@ def test_tma_index_is_available() -> None:
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert "x-frame-options" not in response.headers
     assert "Клевер" in response.text
+
+
+def test_private_tma_api_responses_are_not_cacheable() -> None:
+    app = create_app()
+    app.state.telegram_bot = object()
+    client = TestClient(app)
+
+    response = client.get("/api/tma/bootstrap")
+
+    assert response.status_code == 401
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert "x-frame-options" not in response.headers
 
 
 def test_health_checks_database_and_background_tasks(tmp_path: Path) -> None:
@@ -93,7 +111,6 @@ def test_health_reports_missing_database_and_stopped_task(tmp_path: Path) -> Non
                 "match-prediction-publications": "ok",
                 "contest-publications": "ok",
                 "match-lifecycle": "ok",
-                "ti2026-schedule-sync": "ok",
             },
         },
     }
@@ -287,9 +304,6 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
     async def match_lifecycle_worker(**_kwargs) -> None:
         await background_task("match-lifecycle")
 
-    async def ti2026_schedule_sync_worker(**_kwargs) -> None:
-        await background_task("ti2026-schedule-sync")
-
     async def startup_healthcheck_notification(**_kwargs) -> None:
         startup_steps.append("healthcheck-notification")
 
@@ -335,11 +349,6 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
     )
     monkeypatch.setattr(
         main,
-        "run_ti2026_schedule_sync_worker",
-        ti2026_schedule_sync_worker,
-    )
-    monkeypatch.setattr(
-        main,
         "send_healthcheck_notification",
         startup_healthcheck_notification,
     )
@@ -362,7 +371,6 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         "match-publication",
         "contest-publication",
         "match-lifecycle",
-        "ti2026-schedule-sync",
     }
     assert set(cancelled) == set(started)
     assert session_closed is True
@@ -373,3 +381,69 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         "contest-publication-worker",
     ]
     assert startup_steps.count("healthcheck-notification") == 1
+
+
+def test_lifespan_cleans_up_resources_when_startup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_closed = False
+    resolver_closed = False
+
+    class FakeSession:
+        async def close(self) -> None:
+            nonlocal session_closed
+            session_closed = True
+
+    class FakeBot:
+        def __init__(self, **_kwargs) -> None:
+            self.session = FakeSession()
+
+    class FakeUsernameResolver:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def start(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            nonlocal resolver_closed
+            resolver_closed = True
+
+    monkeypatch.setattr(
+        main,
+        "load_settings",
+        lambda: SimpleNamespace(
+            bot_token="dummy",
+            telegram_bot_api_fallback_ips=(),
+            database_path=Path("unused.db"),
+            telegram_api_id=12345,
+            telegram_api_hash="secret-hash",
+            telegram_mtproto_session_path=Path("unused-session"),
+            healthcheck_chat_id=None,
+        ),
+    )
+    monkeypatch.setattr(main, "initialize_database", lambda _path: None)
+    monkeypatch.setattr(main, "Bot", FakeBot)
+    monkeypatch.setattr(
+        main,
+        "TelethonTelegramUsernameResolver",
+        FakeUsernameResolver,
+    )
+
+    def fail_dispatcher_creation(_settings):
+        raise RuntimeError("synthetic startup failure")
+
+    monkeypatch.setattr(main, "create_dispatcher", fail_dispatcher_creation)
+    app = create_app()
+
+    async def exercise_lifespan() -> None:
+        async with app.router.lifespan_context(app):
+            raise AssertionError("Application startup unexpectedly succeeded.")
+
+    with pytest.raises(RuntimeError, match="synthetic startup failure"):
+        asyncio.run(exercise_lifespan())
+
+    assert session_closed is True
+    assert resolver_closed is True
+    assert not hasattr(app.state, "telegram_bot")
+    assert not hasattr(app.state, "telegram_username_resolver")

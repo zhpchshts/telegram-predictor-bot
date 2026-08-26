@@ -215,6 +215,11 @@ def configure_test_environment(
     )
     monkeypatch.setenv("DATABASE_PATH", str(database_path))
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "false")
+    monkeypatch.setattr(
+        tma_api,
+        "CREATABLE_TEMPLATE_KEYS",
+        tma_api.SUPPORTED_TEMPLATE_KEYS,
+    )
 
 
 def build_context_init_data() -> str:
@@ -996,6 +1001,7 @@ def test_management_contest_list_is_minimal_and_scoped_to_launch_chat(
         "capabilities",
         "chat_settings",
         "shared_tournaments",
+        "contest_templates",
     }
     assert response_data["capabilities"] == {
         "can_create_contests": True,
@@ -1005,6 +1011,13 @@ def test_management_contest_list_is_minimal_and_scoped_to_launch_chat(
         "can_manage_shared_tournaments": False,
     }
     assert response_data["shared_tournaments"] == []
+    assert response_data["contest_templates"] == [
+        {"key": "world_cup_2026", "label": "Чемпионат мира 2026"},
+        {
+            "key": "the_international_2026",
+            "label": "The International 2026",
+        },
+    ]
     assert response_data["chat_settings"] == {"app_button_text": "Открыть Клевер"}
     contests = response_data["contests"]
     assert contests == [
@@ -1285,7 +1298,7 @@ def test_contest_management_requires_verified_rights_even_without_feature_flag(
     response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(idempotency_key="enforcement-disabled"),
-        json={"name": "Разрешённый конкурс"},
+        json={"name": "Разрешённый конкурс", "template_key": "world_cup_2026"},
     )
 
     assert response.status_code == 403
@@ -1311,7 +1324,10 @@ def test_local_supermoderator_is_recorded_in_audit_when_telegram_is_unavailable(
     response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(idempotency_key="unenforced-supermoderator"),
-        json={"name": "Конкурс локального супермодератора"},
+        json={
+            "name": "Конкурс локального супермодератора",
+            "template_key": "world_cup_2026",
+        },
     )
 
     assert response.status_code == 201
@@ -1340,7 +1356,7 @@ def test_telegram_admin_can_manage_contests_with_enforcement(
     response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(idempotency_key="telegram-admin"),
-        json={"name": "Конкурс администратора"},
+        json={"name": "Конкурс администратора", "template_key": "world_cup_2026"},
     )
 
     assert response.status_code == 201
@@ -1390,7 +1406,10 @@ def test_contest_audit_uses_exact_access_decision_from_dependency(
     response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(idempotency_key="same-access-decision"),
-        json={"name": "Конкурс с единым решением"},
+        json={
+            "name": "Конкурс с единым решением",
+            "template_key": "world_cup_2026",
+        },
     )
 
     assert response.status_code == 201
@@ -1435,7 +1454,10 @@ def test_telegram_admin_gain_and_loss_apply_to_the_next_request(
     monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "true")
     telegram_client = MutableTelegramAdministratorsClient([])
     client = TestClient(create_app_with_telegram_client(telegram_client))
-    payload = {"name": "Конкурс с актуальными правами"}
+    payload = {
+        "name": "Конкурс с актуальными правами",
+        "template_key": "world_cup_2026",
+    }
 
     denied_before_gain = client.post(
         "/api/tma/contests",
@@ -1452,7 +1474,7 @@ def test_telegram_admin_gain_and_loss_apply_to_the_next_request(
     denied_after_loss = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(idempotency_key="admin-rights-after-loss"),
-        json={"name": "Второй конкурс"},
+        json={"name": "Второй конкурс", "template_key": "world_cup_2026"},
     )
 
     assert denied_before_gain.status_code == 403
@@ -1487,7 +1509,10 @@ def test_verified_supermoderator_can_manage_contests_with_enforcement(
     response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(idempotency_key="verified-supermoderator"),
-        json={"name": "Конкурс супермодератора"},
+        json={
+            "name": "Конкурс супермодератора",
+            "template_key": "world_cup_2026",
+        },
     )
 
     assert response.status_code == 201
@@ -1534,7 +1559,7 @@ def test_supermoderator_assignment_from_another_chat_does_not_grant_access(
     response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(idempotency_key="other-chat-supermoderator"),
-        json={"name": "Недоступный конкурс"},
+        json={"name": "Недоступный конкурс", "template_key": "world_cup_2026"},
     )
 
     assert response.status_code == 403
@@ -1557,7 +1582,7 @@ def test_participant_cannot_manage_contests_or_create_idempotency_record(
     response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(idempotency_key="participant-denied"),
-        json={"name": "Запрещённый конкурс"},
+        json={"name": "Запрещённый конкурс", "template_key": "world_cup_2026"},
     )
 
     assert response.status_code == 403
@@ -1654,7 +1679,7 @@ def test_contest_management_verification_unavailable_is_503(
     response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(idempotency_key="verification-unavailable"),
-        json={"name": "Недоступный конкурс"},
+        json={"name": "Недоступный конкурс", "template_key": "world_cup_2026"},
     )
 
     assert response.status_code == 503
@@ -1679,7 +1704,10 @@ def test_local_supermoderator_can_manage_when_telegram_is_unavailable(
     response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(idempotency_key="local-supermoderator"),
-        json={"name": "Конкурс супермодератора"},
+        json={
+            "name": "Конкурс супермодератора",
+            "template_key": "world_cup_2026",
+        },
     )
 
     assert response.status_code == 201
@@ -1706,7 +1734,10 @@ def test_supermoderator_assignment_and_revocation_apply_to_next_request(
         create_app_with_telegram_client(UnavailableTelegramAdministratorsClient())
     )
     headers = build_tma_headers(idempotency_key="role-refresh")
-    payload = {"name": "Проверка актуальной роли"}
+    payload = {
+        "name": "Проверка актуальной роли",
+        "template_key": "world_cup_2026",
+    }
 
     assert (
         client.post("/api/tma/contests", headers=headers, json=payload).status_code
@@ -2063,6 +2094,17 @@ def test_shared_tournament_api_creates_linked_contest_and_blocks_local_edits(
     tournament_after_teams = teams_response.json()["shared_tournament"]
     teams = tournament_after_teams["teams"]
 
+    teams_retry_response = client.put(
+        f"/api/tma/shared-tournaments/{tournament['id']}/teams",
+        headers=build_tma_headers(),
+        json={
+            "team_names": ["Испания", "Франция"],
+            "expected_version": tournament["version"],
+        },
+    )
+    assert teams_retry_response.status_code == 200
+    assert teams_retry_response.json()["shared_tournament"] == tournament_after_teams
+
     champion_settings_response = client.put(
         f"/api/tma/shared-tournaments/{tournament['id']}/champion-prediction/settings",
         headers=build_tma_headers(),
@@ -2411,7 +2453,7 @@ def test_create_contest_rejects_missing_init_data(
     response = client.post(
         "/api/tma/contests",
         headers={"Idempotency-Key": "create-contest-1"},
-        json={"name": "ЧМ-2026: прогнозы"},
+        json={"name": "ЧМ-2026: прогнозы", "template_key": "world_cup_2026"},
     )
 
     assert response.status_code == 401
@@ -2458,7 +2500,7 @@ def test_create_contest_requires_idempotency_key(
     response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(),
-        json={"name": "ЧМ-2026: прогнозы"},
+        json={"name": "ЧМ-2026: прогнозы", "template_key": "world_cup_2026"},
     )
 
     assert response.status_code == 400
@@ -2467,7 +2509,151 @@ def test_create_contest_requires_idempotency_key(
     }
 
 
-def test_create_contest_creates_world_cup_2026_contest(
+def test_template_catalog_is_empty_after_2026_seasons(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    monkeypatch.setattr(tma_api, "CREATABLE_TEMPLATE_KEYS", frozenset())
+    monkeypatch.setenv("SHARED_TOURNAMENT_ADMIN_IDS", "123")
+    client = TestClient(create_app())
+
+    management_response = client.get(
+        "/api/tma/management/contests",
+        headers=build_tma_headers(),
+    )
+    shared_response = client.get(
+        "/api/tma/shared-tournaments",
+        headers=build_tma_headers(),
+    )
+
+    assert management_response.status_code == 200
+    assert management_response.json()["contest_templates"] == []
+    assert shared_response.status_code == 200
+    assert shared_response.json()["contest_templates"] == []
+
+
+@pytest.mark.parametrize(
+    "template_key",
+    ["world_cup_2026", "the_international_2026"],
+)
+def test_create_contest_rejects_retired_template_without_writes(
+    monkeypatch,
+    tmp_path: Path,
+    template_key: str,
+) -> None:
+    database_path = tmp_path / f"{template_key}.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    monkeypatch.setattr(tma_api, "CREATABLE_TEMPLATE_KEYS", frozenset())
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="retired-template"),
+        json={"name": "Поздний конкурс", "template_key": template_key},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": {
+            "code": "template_unavailable",
+            "message": "Выбранный шаблон больше недоступен для создания.",
+        }
+    }
+    with create_connection(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM contests").fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM contest_creation_requests"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_create_contest_requires_explicit_known_template(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+
+    missing_response = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="missing-template"),
+        json={"name": "Без шаблона"},
+    )
+    unknown_response = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="unknown-template"),
+        json={"name": "Неизвестный шаблон", "template_key": "unknown"},
+    )
+
+    assert missing_response.status_code == 422
+    assert missing_response.json()["detail"][0]["loc"] == ["body", "template_key"]
+    assert unknown_response.status_code == 422
+    assert unknown_response.json() == {
+        "detail": {
+            "code": "template_unknown",
+            "message": "Неизвестный шаблон турнира.",
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "template_key",
+    ["world_cup_2026", "the_international_2026"],
+)
+def test_create_shared_tournament_rejects_retired_template_without_writes(
+    monkeypatch,
+    tmp_path: Path,
+    template_key: str,
+) -> None:
+    database_path = tmp_path / f"shared-{template_key}.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    monkeypatch.setattr(tma_api, "CREATABLE_TEMPLATE_KEYS", frozenset())
+    monkeypatch.setenv("SHARED_TOURNAMENT_ADMIN_IDS", "123")
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/tma/shared-tournaments",
+        headers=build_tma_headers(),
+        json={"name": "Поздний турнир", "template_key": template_key},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "template_unavailable"
+    with create_connection(database_path) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM shared_tournaments").fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM shared_tournament_events"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_create_contest_creates_world_cup_2026_when_template_is_enabled(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -2485,7 +2671,7 @@ def test_create_contest_creates_world_cup_2026_contest(
         headers=build_tma_headers(
             idempotency_key="create-contest-1",
         ),
-        json={"name": "ЧМ-2026: прогнозы"},
+        json={"name": "ЧМ-2026: прогнозы", "template_key": "world_cup_2026"},
     )
 
     assert response.status_code == 201
@@ -2531,7 +2717,7 @@ def test_create_contest_creates_world_cup_2026_contest(
     assert audit_actor_role == "telegram_admin"
 
 
-def test_create_contest_creates_the_international_2026_contest(
+def test_create_contest_creates_the_international_2026_when_template_is_enabled(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -2588,14 +2774,14 @@ def test_create_contest_reuses_result_for_same_idempotency_key(
         headers=build_tma_headers(
             idempotency_key="same-request",
         ),
-        json={"name": "ЧМ-2026: прогнозы"},
+        json={"name": "ЧМ-2026: прогнозы", "template_key": "world_cup_2026"},
     )
     second_response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(
             idempotency_key="same-request",
         ),
-        json={"name": "ЧМ-2026: прогнозы"},
+        json={"name": "ЧМ-2026: прогнозы", "template_key": "world_cup_2026"},
     )
 
     assert first_response.status_code == 201
@@ -2638,14 +2824,14 @@ def test_create_contest_rejects_reused_key_with_different_name(
         headers=build_tma_headers(
             idempotency_key="same-request",
         ),
-        json={"name": "Первый конкурс"},
+        json={"name": "Первый конкурс", "template_key": "world_cup_2026"},
     )
     second_response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(
             idempotency_key="same-request",
         ),
-        json={"name": "Другой конкурс"},
+        json={"name": "Другой конкурс", "template_key": "world_cup_2026"},
     )
 
     assert first_response.status_code == 201
@@ -2682,7 +2868,7 @@ def test_create_contest_validates_name_without_creating_records(
         headers=build_tma_headers(
             idempotency_key="invalid-name",
         ),
-        json={"name": "   "},
+        json={"name": "   ", "template_key": "world_cup_2026"},
     )
 
     assert response.status_code == 422
@@ -2720,14 +2906,14 @@ def test_create_contest_allows_parallel_contests_in_one_chat(
         headers=build_tma_headers(
             idempotency_key="first-request",
         ),
-        json={"name": "Основной конкурс"},
+        json={"name": "Основной конкурс", "template_key": "world_cup_2026"},
     )
     second_response = client.post(
         "/api/tma/contests",
         headers=build_tma_headers(
             idempotency_key="second-request",
         ),
-        json={"name": "Конкурс для друзей"},
+        json={"name": "Конкурс для друзей", "template_key": "world_cup_2026"},
     )
 
     assert first_response.status_code == 201
@@ -3631,6 +3817,15 @@ def test_save_match_result_creates_updates_and_returns_result(
             "advancing_team_id": 2,
         },
     )
+    repeated_response = client.put(
+        f"/api/tma/contests/{contest['id']}/matches/{match_id}/result",
+        headers=build_tma_headers(),
+        json={
+            "home_score": 1,
+            "away_score": 1,
+            "advancing_team_id": 2,
+        },
+    )
 
     assert first_response.status_code == 201
     assert first_response.json() == {
@@ -3651,6 +3846,8 @@ def test_save_match_result_creates_updates_and_returns_result(
         },
         "was_created": False,
     }
+    assert repeated_response.status_code == 200
+    assert repeated_response.json() == second_response.json()
 
     contest_response = client.get(
         f"/api/tma/contests/{contest['id']}",

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.config import load_settings
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _set_required_environment(monkeypatch) -> None:
@@ -181,3 +186,25 @@ def test_healthcheck_notifications_reject_invalid_values(
 
     with pytest.raises(RuntimeError, match=name):
         load_settings()
+
+
+def test_docker_build_context_excludes_runtime_secrets_and_database_sidecars() -> None:
+    patterns = {
+        line.strip()
+        for line in (PROJECT_ROOT / ".dockerignore")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert {
+        ".env",
+        ".env.*",
+        "data/",
+        "*.db",
+        "*.db-*",
+        "*.sqlite3",
+        "*.sqlite3-*",
+        "*.session",
+        "*.session-*",
+    } <= patterns

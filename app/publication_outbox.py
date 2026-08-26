@@ -695,6 +695,7 @@ def claim_next_publication(
     expires_value = serialize_service_time(now + timedelta(seconds=lease_seconds))
 
     with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         while True:
             row = connection.execute(
                 """

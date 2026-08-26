@@ -98,6 +98,56 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
     assert tables_count == 43
 
 
+def test_initialize_database_rolls_back_all_schema_changes_on_failure(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "historical.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE contests (
+                id INTEGER PRIMARY KEY,
+                is_active INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX idx_contests_active_chat_id
+                ON contests(is_active);
+            """
+        )
+
+    with pytest.raises(sqlite3.OperationalError, match="no such column: chat_id"):
+        initialize_database(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+
+    assert tables == {"contests"}
+    assert "idx_contests_active_chat_id" in indexes
+
+
+def test_create_connection_configures_integrity_and_lock_waiting(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+
+    with create_connection(database_path) as connection:
+        foreign_keys_enabled = connection.execute("PRAGMA foreign_keys").fetchone()[0]
+        busy_timeout_ms = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+
+    assert foreign_keys_enabled == 1
+    assert busy_timeout_ms == 5000
+
+
 def test_current_schema_supports_only_known_contest_templates(tmp_path: Path) -> None:
     database_path = tmp_path / "predictor.db"
     initialize_database(database_path)
