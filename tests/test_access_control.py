@@ -15,7 +15,7 @@ from app.access_control import (
 )
 from app.audit_service import AuditActor, AuditActorRole
 from app.database import create_connection, initialize_database
-from app.supermoderator_service import assign_supermoderator
+from app.supermoderator_service import assign_supermoderator_with_status
 
 
 TELEGRAM_CHAT_ID = -100123
@@ -98,13 +98,13 @@ def test_telegram_administrator_has_priority_over_local_assignment(
 ) -> None:
     database_path = tmp_path / "predictor.db"
     chat_id, user_id, actor_id = _create_access_records(database_path)
-    assignment = assign_supermoderator(
+    assignment = assign_supermoderator_with_status(
         database_path=database_path,
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
         audit_actor=AUDIT_ACTOR,
-    )
+    ).assignment
     telegram_client = FakeTelegramClient([TELEGRAM_USER_ID])
 
     access = asyncio.run(
@@ -113,7 +113,6 @@ def test_telegram_administrator_has_priority_over_local_assignment(
             telegram_chat_id=TELEGRAM_CHAT_ID,
             telegram_user_id=TELEGRAM_USER_ID,
             telegram_client=telegram_client,
-            enforcement_enabled=False,
         )
     )
 
@@ -136,7 +135,6 @@ def test_telegram_administrator_has_priority_over_local_assignment(
             telegram_chat_id=TELEGRAM_CHAT_ID,
             telegram_user_id=TELEGRAM_USER_ID,
             telegram_client=telegram_client,
-            enforcement_enabled=False,
         )
     )
     assert access_after_removal.role is AccessRole.SUPERMODERATOR
@@ -153,28 +151,25 @@ def test_verified_non_admin_role_depends_on_local_assignment(tmp_path: Path) -> 
             telegram_chat_id=TELEGRAM_CHAT_ID,
             telegram_user_id=TELEGRAM_USER_ID,
             telegram_client=telegram_client,
-            enforcement_enabled=True,
         )
     )
     assert participant_access.role is AccessRole.PARTICIPANT
     assert participant_access.can_manage_contests is False
     assert participant_access.can_manage_roles is False
-    assert participant_access.enforcement_enabled is True
 
-    assign_supermoderator(
+    _ = assign_supermoderator_with_status(
         database_path=database_path,
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
         audit_actor=AUDIT_ACTOR,
-    )
+    ).assignment
     supermoderator_access = asyncio.run(
         determine_access(
             database_path=database_path,
             telegram_chat_id=TELEGRAM_CHAT_ID,
             telegram_user_id=TELEGRAM_USER_ID,
             telegram_client=telegram_client,
-            enforcement_enabled=False,
         )
     )
     assert supermoderator_access.role is AccessRole.SUPERMODERATOR
@@ -196,7 +191,6 @@ def test_telegram_unavailable_is_distinct_and_preserves_local_role(
             telegram_chat_id=TELEGRAM_CHAT_ID,
             telegram_user_id=TELEGRAM_USER_ID,
             telegram_client=unavailable_client,
-            enforcement_enabled=False,
         )
     )
     assert (
@@ -207,20 +201,19 @@ def test_telegram_unavailable_is_distinct_and_preserves_local_role(
     assert unavailable_access.can_manage_roles is False
     with_assignment_path = tmp_path / "with.db"
     chat_id, user_id, actor_id = _create_access_records(with_assignment_path)
-    assignment = assign_supermoderator(
+    assignment = assign_supermoderator_with_status(
         database_path=with_assignment_path,
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
         audit_actor=AUDIT_ACTOR,
-    )
+    ).assignment
     supermoderator_access = asyncio.run(
         determine_access(
             database_path=with_assignment_path,
             telegram_chat_id=TELEGRAM_CHAT_ID,
             telegram_user_id=TELEGRAM_USER_ID,
             telegram_client=unavailable_client,
-            enforcement_enabled=False,
         )
     )
     assert (
@@ -251,7 +244,6 @@ def test_telegram_timeout_returns_unavailable_and_cancels_request(
             telegram_chat_id=TELEGRAM_CHAT_ID,
             telegram_user_id=TELEGRAM_USER_ID,
             telegram_client=client,
-            enforcement_enabled=False,
             telegram_timeout_seconds=0.01,
         )
     )
@@ -274,6 +266,5 @@ def test_database_errors_are_not_reported_as_telegram_unavailable(
                 telegram_chat_id=TELEGRAM_CHAT_ID,
                 telegram_user_id=TELEGRAM_USER_ID,
                 telegram_client=UnavailableTelegramClient([]),
-                enforcement_enabled=False,
             )
         )

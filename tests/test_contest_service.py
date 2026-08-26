@@ -1857,6 +1857,7 @@ def _leaderboard_sort_test_row(
         "telegram_user_id": telegram_user_id,
         "first_name": first_name,
         "last_name": None,
+        "username": None,
         "total_points": total_points,
         "exact_score_count": exact_score_count,
         "goal_difference_count": goal_difference_count,
@@ -1865,7 +1866,8 @@ def _leaderboard_sort_test_row(
         "correct_champion_count": correct_champion_count,
         "match_predictions_count": match_predictions_count,
         "champion_prediction_count": 0,
-        "total_matches_count": 100,
+        "swiss_stage_prediction_count": 0,
+        "calculated_predictions_count": 0,
     }
 
 

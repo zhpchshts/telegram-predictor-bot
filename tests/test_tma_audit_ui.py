@@ -248,17 +248,6 @@ def test_management_always_uses_explicit_contest_selection_and_lazy_api() -> Non
     assert "contests.length === 1" not in management_source
     assert "contests.length === 1" not in list_source
     assert "{ managementMode: true }" in row_source
-    assert 'currentViewMode = "participant"' in source
-    assert 'currentViewMode = "management"' in source
-
-
-def test_successful_participant_contest_render_resets_view_mode() -> None:
-    participant_source = _function_source(
-        "renderContestDetailsScreen",
-        "renderContestDetailsRoute",
-    )
-
-    assert 'currentViewMode = "participant";' in participant_source
 
 
 def test_management_open_errors_stay_in_management_contour() -> None:

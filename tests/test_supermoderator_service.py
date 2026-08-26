@@ -14,7 +14,6 @@ from app.database import create_connection, initialize_database
 from app import supermoderator_service
 from app.supermoderator_service import (
     SupermoderatorAssignmentNotFoundError,
-    assign_supermoderator,
     assign_supermoderator_with_status,
     get_active_supermoderator_assignment,
     revoke_supermoderator,
@@ -58,20 +57,20 @@ def test_assignment_lifecycle_is_idempotent_and_preserves_history(
     initialize_database(database_path)
     chat_id, user_id, actor_id = _create_chat_and_users(database_path)
 
-    first = assign_supermoderator(
+    first = assign_supermoderator_with_status(
         database_path=database_path,
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
         audit_actor=AUDIT_ACTOR,
-    )
-    repeated = assign_supermoderator(
+    ).assignment
+    repeated = assign_supermoderator_with_status(
         database_path=database_path,
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
         audit_actor=AUDIT_ACTOR,
-    )
+    ).assignment
 
     assert repeated == first
     assert (
@@ -102,13 +101,13 @@ def test_assignment_lifecycle_is_idempotent_and_preserves_history(
         is None
     )
 
-    second = assign_supermoderator(
+    second = assign_supermoderator_with_status(
         database_path=database_path,
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
         audit_actor=AUDIT_ACTOR,
-    )
+    ).assignment
     assert second.id != first.id
 
     with create_connection(database_path) as connection:
@@ -138,13 +137,13 @@ def test_concurrent_assignment_returns_single_active_record(
 
     def assign():
         start_barrier.wait()
-        return assign_supermoderator(
+        return assign_supermoderator_with_status(
             database_path=database_path,
             chat_id=chat_id,
             user_id=user_id,
             assigned_by_user_id=actor_id,
             audit_actor=AUDIT_ACTOR,
-        )
+        ).assignment
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(assign) for _ in range(2)]
@@ -170,13 +169,13 @@ def test_concurrent_revoke_and_reassignment_keep_audit_snapshots_consistent(
     database_path = tmp_path / "predictor.db"
     initialize_database(database_path)
     chat_id, user_id, actor_id = _create_chat_and_users(database_path)
-    initial_assignment = assign_supermoderator(
+    initial_assignment = assign_supermoderator_with_status(
         database_path=database_path,
         chat_id=chat_id,
         user_id=user_id,
         assigned_by_user_id=actor_id,
         audit_actor=AUDIT_ACTOR,
-    )
+    ).assignment
     audit_actor = AuditActor(
         telegram_chat_id=-100123,
         telegram_user_id=456,

@@ -79,23 +79,6 @@ def get_active_supermoderator_assignment_by_telegram_ids(
     return _assignment_from_row(row) if row is not None else None
 
 
-def assign_supermoderator(
-    *,
-    database_path: Path,
-    chat_id: int,
-    user_id: int,
-    assigned_by_user_id: int,
-    audit_actor: AuditActor,
-) -> SupermoderatorAssignment:
-    return assign_supermoderator_with_status(
-        database_path=database_path,
-        chat_id=chat_id,
-        user_id=user_id,
-        assigned_by_user_id=assigned_by_user_id,
-        audit_actor=audit_actor,
-    ).assignment
-
-
 def assign_supermoderator_with_status(
     *,
     database_path: Path,

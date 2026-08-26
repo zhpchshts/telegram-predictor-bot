@@ -1098,40 +1098,6 @@ def _validate_leaderboard_invariant(leaderboard) -> None:
         )
 
 
-def _format_tiebreak_explanation(
-    winner_name: str,
-    reason: LeaderboardTiebreakReason,
-) -> str:
-    winner = escape_rich_text(winner_name)
-    explanations = {
-        "exact_score": (
-            f"При равенстве очков {winner} занял первое место благодаря "
-            "большему количеству точных счетов."
-        ),
-        "goal_difference": (
-            f"При равенстве очков {winner} занял первое место благодаря "
-            "большему количеству угаданных разниц мячей."
-        ),
-        "outcome": (
-            f"При равенстве очков {winner} занял первое место благодаря "
-            "большему количеству угаданных исходов."
-        ),
-        "drawn_advancing_team": (
-            f"При равенстве очков {winner} занял первое место благодаря "
-            "большему количеству правильных прогнозов прошедшей команды."
-        ),
-        "champion": (
-            f"При равенстве очков {winner} занял первое место благодаря "
-            "правильному прогнозу чемпиона."
-        ),
-        "draw": (
-            "Все дополнительные показатели участников с первого и второго "
-            "места совпали. Победитель определён жребием."
-        ),
-    }
-    return explanations[reason]
-
-
 def _single_message(
     rich_html: str,
     *,

@@ -1973,18 +1973,6 @@ def attach_shared_tournament(
         )
 
 
-def contest_uses_shared_tournament(
-    connection: sqlite3.Connection, *, contest_id: int
-) -> bool:
-    return (
-        connection.execute(
-            "SELECT 1 FROM contest_shared_tournaments WHERE contest_id = ?",
-            (contest_id,),
-        ).fetchone()
-        is not None
-    )
-
-
 def _create_shared_match_in_connection(
     connection: sqlite3.Connection,
     *,

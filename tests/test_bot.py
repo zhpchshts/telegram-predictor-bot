@@ -17,8 +17,6 @@ def _settings(database_path: Path) -> Settings:
         bot_token="123456789:test-token",
         bot_username="ZhpchshtsPredictorBot",
         database_path=database_path,
-        public_base_url=None,
-        role_enforcement_enabled=False,
         telegram_admin_check_timeout_seconds=3.0,
         telegram_bot_api_fallback_ips=(),
         telegram_api_id=None,

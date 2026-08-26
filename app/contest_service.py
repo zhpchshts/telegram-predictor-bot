@@ -314,7 +314,6 @@ class ContestLeaderboardEntry:
     champion_prediction_count: int
     swiss_stage_prediction_count: int
     calculated_predictions_count: int
-    total_matches_count: int
     tiebreak_metrics: LeaderboardTiebreakMetrics
     prediction_history: tuple[MatchSummary, ...] = ()
     champion_prediction_history: ChampionPredictionHistory | None = None
@@ -828,17 +827,7 @@ def get_contest_details(
                             AND swiss_stage_prediction_settings.enabled = 1
                     ) THEN 1
                     ELSE 0
-                END AS calculated_predictions_count,
-                (
-                    SELECT COUNT(*)
-                    FROM matches
-                    JOIN stages
-                        ON stages.id = matches.stage_id
-                    JOIN competitions
-                        ON competitions.id = stages.competition_id
-                    WHERE competitions.contest_id = ?
-                        AND matches.status != 'cancelled'
-                ) AS total_matches_count
+                END AS calculated_predictions_count
             FROM contest_participants
             JOIN users
                 ON users.id = contest_participants.user_id
@@ -854,7 +843,6 @@ def get_contest_details(
             ORDER BY users.id ASC
             """,
             (
-                contest_id,
                 contest_id,
                 contest_id,
                 contest_id,
@@ -5231,23 +5219,14 @@ def _contest_leaderboard_from_rows(
                 participant_name=participant_name,
                 participant_username=(
                     str(row["username"]).strip() or None
-                    if "username" in row.keys() and row["username"] is not None
+                    if row["username"] is not None
                     else None
                 ),
                 total_points=total_points,
                 match_predictions_count=int(row["match_predictions_count"]),
                 champion_prediction_count=int(row["champion_prediction_count"]),
-                swiss_stage_prediction_count=(
-                    int(row["swiss_stage_prediction_count"])
-                    if "swiss_stage_prediction_count" in row.keys()
-                    else 0
-                ),
-                calculated_predictions_count=(
-                    int(row["calculated_predictions_count"])
-                    if "calculated_predictions_count" in row.keys()
-                    else 0
-                ),
-                total_matches_count=int(row["total_matches_count"]),
+                swiss_stage_prediction_count=int(row["swiss_stage_prediction_count"]),
+                calculated_predictions_count=int(row["calculated_predictions_count"]),
                 tiebreak_metrics=_leaderboard_tiebreak_metrics(row),
                 prediction_history=history_by_user.get(int(row["user_id"]), ()),
                 champion_prediction_history=champion_history_by_user.get(

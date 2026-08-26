@@ -417,14 +417,6 @@ CREATE TABLE IF NOT EXISTS tie_predictions (
     UNIQUE (tie_id, user_id)
 );
 
-CREATE TABLE IF NOT EXISTS champion_prediction_candidates (
-  contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
-  team_id INTEGER NOT NULL REFERENCES teams(id),
-  position INTEGER NOT NULL CHECK (position >= 0),
-  PRIMARY KEY (contest_id, team_id),
-  UNIQUE (contest_id, position)
-);
-
 CREATE TABLE IF NOT EXISTS champion_predictions (
   id INTEGER PRIMARY KEY,
   contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
@@ -445,15 +437,6 @@ CREATE TABLE IF NOT EXISTS swiss_stage_prediction_settings (
         CHECK (elimination_qualifier_count > 0),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS swiss_stage_prediction_candidates (
-    contest_id INTEGER NOT NULL
-        REFERENCES swiss_stage_prediction_settings(contest_id) ON DELETE CASCADE,
-    team_id INTEGER NOT NULL REFERENCES teams(id),
-    position INTEGER NOT NULL CHECK (position >= 0),
-    PRIMARY KEY (contest_id, team_id),
-    UNIQUE (contest_id, position)
 );
 
 CREATE TABLE IF NOT EXISTS swiss_stage_predictions (
@@ -627,8 +610,6 @@ CREATE TABLE IF NOT EXISTS contest_publication_messages (
 CREATE INDEX IF NOT EXISTS idx_contests_chat_id
     ON contests(chat_id);
 
-DROP INDEX IF EXISTS idx_contests_active_chat_id;
-
 CREATE INDEX IF NOT EXISTS idx_competitions_contest_id
     ON competitions(contest_id);
 
@@ -664,9 +645,6 @@ CREATE INDEX IF NOT EXISTS idx_champion_predictions_contest_id
 
 CREATE INDEX IF NOT EXISTS idx_champion_predictions_user_id
   ON champion_predictions(user_id);
-
-CREATE INDEX IF NOT EXISTS idx_champion_prediction_candidates_team_id
-  ON champion_prediction_candidates(team_id);
 
 CREATE INDEX IF NOT EXISTS idx_contest_teams_team_id
     ON contest_teams(team_id);

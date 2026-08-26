@@ -22,7 +22,7 @@ from app.audit_service import (
 )
 from app.database import create_connection, initialize_database
 from app.main import create_app as create_application
-from app.supermoderator_service import assign_supermoderator
+from app.supermoderator_service import assign_supermoderator_with_status
 from app.tma_api import get_telegram_administrators_client
 from app.tma_auth import calculate_init_data_hash
 from app.tma_launch import create_tma_launch_token
@@ -53,15 +53,10 @@ def _configure_environment(
     monkeypatch,
     *,
     database_path: Path,
-    enforcement_enabled: bool = True,
 ) -> None:
     monkeypatch.setenv("BOT_TOKEN", BOT_TOKEN)
     monkeypatch.setenv("BOT_USERNAME", "ZhpchshtsPredictorBot")
     monkeypatch.setenv("DATABASE_PATH", str(database_path))
-    monkeypatch.setenv(
-        "ROLE_ENFORCEMENT_ENABLED",
-        "true" if enforcement_enabled else "false",
-    )
     monkeypatch.setattr(
         tma_api,
         "CREATABLE_TEMPLATE_KEYS",
@@ -218,41 +213,27 @@ def test_supermoderator_reads_audit_with_fresh_access_check(
         first_name="Евгений",
         last_name="Сабиров",
     )
-    assign_supermoderator(
+    _ = assign_supermoderator_with_status(
         database_path=database_path,
         chat_id=chat_actor.chat_id,
         user_id=chat_actor.actor_user_id,
         assigned_by_user_id=chat_actor.actor_user_id,
         audit_actor=actor,
-    )
+    ).assignment
     _record_event(database_path, actor=actor)
     _configure_environment(monkeypatch, database_path=database_path)
     telegram_client = MutableTelegramAdministratorsClient([])
 
-    enforced_response = TestClient(_create_app(telegram_client)).get(
+    response = TestClient(_create_app(telegram_client)).get(
         "/api/tma/audit-events",
         headers=_build_headers(),
     )
 
-    assert enforced_response.status_code == 200
+    assert response.status_code == 200
     assert telegram_client.calls == 1
 
-    _configure_environment(
-        monkeypatch,
-        database_path=database_path,
-        enforcement_enabled=False,
-    )
-    unenforced_client = MutableTelegramAdministratorsClient([])
-    unenforced_response = TestClient(_create_app(unenforced_client)).get(
-        "/api/tma/audit-events",
-        headers=_build_headers(),
-    )
 
-    assert unenforced_response.status_code == 200
-    assert unenforced_client.calls == 1
-
-
-def test_participant_cannot_read_audit_when_role_enforcement_is_enabled(
+def test_participant_cannot_read_audit(
     monkeypatch,
     tmp_path: Path,
 ) -> None:

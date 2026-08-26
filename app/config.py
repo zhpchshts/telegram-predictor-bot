@@ -24,8 +24,6 @@ class Settings:
     bot_token: str
     bot_username: str
     database_path: Path
-    public_base_url: str | None
-    role_enforcement_enabled: bool
     telegram_admin_check_timeout_seconds: float
     telegram_bot_api_fallback_ips: tuple[str, ...]
     telegram_api_id: int | None
@@ -33,19 +31,6 @@ class Settings:
     telegram_mtproto_session_path: Path
     healthcheck_chat_id: int | None
     shared_tournament_admin_ids: frozenset[int]
-
-
-def _parse_boolean_environment(name: str, *, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None or not value.strip():
-        return default
-
-    normalized_value = value.strip().lower()
-    if normalized_value in {"1", "true", "yes", "on"}:
-        return True
-    if normalized_value in {"0", "false", "no", "off"}:
-        return False
-    raise RuntimeError(f"{name} must be one of: true, false, 1, 0, yes, no, on, off.")
 
 
 def load_settings() -> Settings:
@@ -62,11 +47,6 @@ def load_settings() -> Settings:
         else DEFAULT_DATABASE_PATH
     )
 
-    public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/") or None
-    role_enforcement_enabled = _parse_boolean_environment(
-        "ROLE_ENFORCEMENT_ENABLED",
-        default=False,
-    )
     telegram_admin_check_timeout_seconds = _parse_positive_float_environment(
         "TELEGRAM_ADMIN_CHECK_TIMEOUT_SECONDS",
         default=3.0,
@@ -95,8 +75,6 @@ def load_settings() -> Settings:
         bot_token=bot_token,
         bot_username=bot_username,
         database_path=database_path,
-        public_base_url=public_base_url,
-        role_enforcement_enabled=role_enforcement_enabled,
         telegram_admin_check_timeout_seconds=(telegram_admin_check_timeout_seconds),
         telegram_bot_api_fallback_ips=telegram_bot_api_fallback_ips,
         telegram_api_id=telegram_api_id,

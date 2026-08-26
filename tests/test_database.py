@@ -15,7 +15,6 @@ def test_initialize_database_creates_current_schema(tmp_path: Path) -> None:
 
     expected_tables = {
         "audit_events",
-        "champion_prediction_candidates",
         "champion_predictions",
         "chat_settings",
         "chats",
@@ -36,7 +35,6 @@ def test_initialize_database_creates_current_schema(tmp_path: Path) -> None:
         "scoring_rule_sets",
         "stages",
         "supermoderator_assignments",
-        "swiss_stage_prediction_candidates",
         "swiss_stage_prediction_selections",
         "swiss_stage_prediction_settings",
         "swiss_stage_predictions",
@@ -95,7 +93,7 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
             """
         ).fetchone()[0]
 
-    assert tables_count == 43
+    assert tables_count == 41
 
 
 def test_initialize_database_rolls_back_all_schema_changes_on_failure(
@@ -310,96 +308,6 @@ def test_current_schema_allows_only_supported_best_of_values(tmp_path: Path) -> 
             )
 
     assert [row["best_of"] for row in stored_values] == [None, 3, 5]
-
-
-def test_champion_candidate_snapshot_is_ordered_unique_and_contest_scoped(
-    tmp_path: Path,
-) -> None:
-    database_path = tmp_path / "predictor.db"
-    initialize_database(database_path)
-
-    with create_connection(database_path) as connection:
-        chat_id = connection.execute(
-            "INSERT INTO chats (telegram_chat_id, title) VALUES (?, ?)",
-            (-1001234567890, "Test chat"),
-        ).lastrowid
-        first_contest_id = connection.execute(
-            """
-            INSERT INTO contests (chat_id, name, slug)
-            VALUES (?, ?, ?)
-            """,
-            (chat_id, "First", "first"),
-        ).lastrowid
-        second_contest_id = connection.execute(
-            """
-            INSERT INTO contests (chat_id, name, slug)
-            VALUES (?, ?, ?)
-            """,
-            (chat_id, "Second", "second"),
-        ).lastrowid
-        first_team_id = connection.execute(
-            "INSERT INTO teams (name) VALUES (?)",
-            ("Team A",),
-        ).lastrowid
-        second_team_id = connection.execute(
-            "INSERT INTO teams (name) VALUES (?)",
-            ("Team B",),
-        ).lastrowid
-
-        connection.executemany(
-            """
-            INSERT INTO champion_prediction_candidates (
-                contest_id,
-                team_id,
-                position
-            )
-            VALUES (?, ?, ?)
-            """,
-            [
-                (first_contest_id, first_team_id, 0),
-                (first_contest_id, second_team_id, 1),
-                (second_contest_id, first_team_id, 0),
-            ],
-        )
-
-        with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(
-                """
-                INSERT INTO champion_prediction_candidates (
-                    contest_id,
-                    team_id,
-                    position
-                )
-                VALUES (?, ?, ?)
-                """,
-                (first_contest_id, first_team_id, 2),
-            )
-
-        with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(
-                """
-                INSERT INTO champion_prediction_candidates (
-                    contest_id,
-                    team_id,
-                    position
-                )
-                VALUES (?, ?, ?)
-                """,
-                (first_contest_id, second_team_id, 0),
-            )
-
-        connection.execute("DELETE FROM contests WHERE id = ?", (first_contest_id,))
-        remaining_rows = connection.execute(
-            """
-            SELECT contest_id, team_id, position
-            FROM champion_prediction_candidates
-            ORDER BY contest_id, position
-            """
-        ).fetchall()
-
-    assert [tuple(row) for row in remaining_rows] == [
-        (second_contest_id, first_team_id, 0)
-    ]
 
 
 def test_current_schema_allows_multiple_active_contests_in_one_chat(

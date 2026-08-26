@@ -38,7 +38,6 @@ class AccessDecision:
     role: AccessRole | None
     can_manage_contests: bool
     can_manage_roles: bool
-    enforcement_enabled: bool
     administrators: TelegramAdministratorsSnapshot | None
 
 
@@ -82,7 +81,6 @@ async def determine_access(
     telegram_chat_id: int,
     telegram_user_id: int,
     telegram_client: TelegramAdministratorsClient,
-    enforcement_enabled: bool,
     telegram_timeout_seconds: float | None = None,
 ) -> AccessDecision:
     local_assignment = get_active_supermoderator_assignment_by_telegram_ids(
@@ -102,7 +100,6 @@ async def determine_access(
         return _build_access_decision(
             verification_status=AccessVerificationStatus.UNAVAILABLE,
             role=role,
-            enforcement_enabled=enforcement_enabled,
             administrators=None,
         )
 
@@ -117,31 +114,7 @@ async def determine_access(
     return _build_access_decision(
         verification_status=AccessVerificationStatus.VERIFIED,
         role=role,
-        enforcement_enabled=enforcement_enabled,
         administrators=administrators,
-    )
-
-
-def determine_unenforced_access(
-    *,
-    database_path: Path,
-    telegram_chat_id: int,
-    telegram_user_id: int,
-) -> AccessDecision:
-    local_assignment = get_active_supermoderator_assignment_by_telegram_ids(
-        database_path=database_path,
-        telegram_chat_id=telegram_chat_id,
-        telegram_user_id=telegram_user_id,
-    )
-    return _build_access_decision(
-        verification_status=AccessVerificationStatus.UNAVAILABLE,
-        role=(
-            AccessRole.SUPERMODERATOR
-            if local_assignment is not None
-            else AccessRole.PARTICIPANT
-        ),
-        enforcement_enabled=False,
-        administrators=None,
     )
 
 
@@ -149,7 +122,6 @@ def _build_access_decision(
     *,
     verification_status: AccessVerificationStatus,
     role: AccessRole | None,
-    enforcement_enabled: bool,
     administrators: TelegramAdministratorsSnapshot | None,
 ) -> AccessDecision:
     can_manage_contests = role in {
@@ -165,6 +137,5 @@ def _build_access_decision(
         role=role,
         can_manage_contests=can_manage_contests,
         can_manage_roles=can_manage_roles,
-        enforcement_enabled=enforcement_enabled,
         administrators=administrators,
     )

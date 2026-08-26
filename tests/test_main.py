@@ -187,7 +187,7 @@ def test_tma_explains_unavailable_telegram_admin_verification() -> None:
     assert '"Не удалось открыть управление"' in management_source
     assert "error.message" in management_source
     assert "await openContestList(nextBootstrap" in management_source
-    assert "can_access_management: false" in management_source
+    assert "can_manage_contests: false" in management_source
 
 
 def test_tma_hides_contest_management_without_access() -> None:
@@ -195,7 +195,7 @@ def test_tma_hides_contest_management_without_access() -> None:
     details_source = _function_source("renderContestDetailsScreen")
     screen_source = _function_source("renderContestScreen")
 
-    assert "return bootstrap.can_access_management === true" in source
+    assert "return bootstrap.access?.can_manage_contests === true" in source
     assert "if (canManageContests(bootstrap))" in screen_source
     assert "createManagementNavigationCard(bootstrap)" in screen_source
     assert "createMatchFormCard" not in details_source

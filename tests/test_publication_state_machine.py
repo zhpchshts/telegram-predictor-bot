@@ -34,7 +34,7 @@ from app.publication_outbox import (
     create_publication_if_enabled,
     finish_publication_failure,
     finish_publication_success,
-    renew_claim,
+    renew_current_claim,
     revise_existing_publication,
     serialize_service_time,
 )
@@ -95,13 +95,13 @@ def test_renew_lease_extends_claim_expiration(tmp_path: Path) -> None:
     claim = claim_next_publication(database_path=database_path, now_utc=NOW)
     assert claim is not None
 
-    assert renew_claim(
+    claim_state = renew_current_claim(
         database_path=database_path,
-        publication_id=claim.id,
-        claim_token=claim.claim_token,
+        publication=claim,
         now_utc=NOW + timedelta(seconds=60),
         lease_seconds=120,
     )
+    assert claim_state.status == "current"
     with database_connection(database_path) as connection:
         expires_at = connection.execute(
             "SELECT claim_expires_at FROM contest_publications WHERE id = ?",

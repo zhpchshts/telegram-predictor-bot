@@ -2,7 +2,6 @@
 
 let telegram = window.Telegram?.WebApp || null;
 let activeBootstrap = null;
-let currentViewMode = "participant";
 let currentViewToken = 0;
 
 const TELEGRAM_INIT_DATA_QUERY_PARAM = "tgWebAppData";
@@ -1037,7 +1036,6 @@ function renderContestCreationState(bootstrap, state) {
 }
 
 function renderContestCreationScreen(bootstrap, state = {}) {
-  currentViewMode = "management";
   setChatSummary();
   const creationState = {
     ...state,
@@ -3707,9 +3705,6 @@ function getTournamentTeams(contest) {
       ? tournamentTeams.teams
       : [],
     is_locked: tournamentTeams?.is_locked === true,
-    lock_reasons: Array.isArray(tournamentTeams?.lock_reasons)
-      ? tournamentTeams.lock_reasons
-      : [],
   };
 }
 
@@ -5057,7 +5052,7 @@ function createSwissStageAdministrationCard(contest, onUpdated) {
   return item;
 }
 
-function createChampionAdministrationCard(contest, state, onUpdated) {
+function createChampionAdministrationCard(contest, onUpdated) {
   const championPrediction = getChampionPrediction(contest);
   const item = createElement("li", {
     className: "match-list-item champion-card champion-admin-card",
@@ -5612,7 +5607,7 @@ function createContestPredictionSettingsCard(contest, state, onUpdated) {
   });
 
   list.append(
-    createChampionAdministrationCard(contest, state, onUpdated),
+    createChampionAdministrationCard(contest, onUpdated),
     createSwissStageAdministrationCard(contest, onUpdated),
   );
   card.append(heading, list);
@@ -6047,7 +6042,6 @@ function renderContestDetailsError(bootstrap, message) {
 }
 
 function renderContestDetailsScreen(bootstrap, contest, state = {}) {
-  currentViewMode = "participant";
   const { user, chat } = bootstrap.context;
   const chatTitle = chat.title || "этого чата";
   const userName = getUserDisplayName(user);
@@ -6168,7 +6162,6 @@ function createContestManagementHeader(contest, bootstrap) {
 }
 
 function renderContestManagementScreen(bootstrap, contest, state = {}) {
-  currentViewMode = "management";
   setChatSummary();
   const matches = Array.isArray(contest.matches) ? contest.matches : [];
   const isActive = contest.is_active !== false;
@@ -6308,7 +6301,6 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
 }
 
 function renderContestManagementError(bootstrap, message) {
-  currentViewMode = "management";
   setChatSummary();
   const card = createInfoCard(
     "Не удалось открыть управление конкурсом",
@@ -7175,7 +7167,6 @@ function createAuditHeaderCard(bootstrap) {
 }
 
 function renderAuditScreen(bootstrap, state) {
-  currentViewMode = "management";
   setChatSummary();
   return replaceAppContent(
     createAuditHeaderCard(bootstrap),
@@ -7325,7 +7316,6 @@ function createSupermoderatorManagementCard() {
   const preview = createElement("div", {
     className: "supermoderator-preview",
   });
-  let resolvedUser = null;
   let activeOperation = null;
 
   input.type = "text";
@@ -7375,7 +7365,6 @@ function createSupermoderatorManagementCard() {
   };
 
   input.addEventListener("input", () => {
-    resolvedUser = null;
     preview.replaceChildren();
     setFormMessage(formMessage, "");
   });
@@ -7395,7 +7384,6 @@ function createSupermoderatorManagementCard() {
       return;
     }
     activeOperation = "resolve";
-    resolvedUser = null;
     preview.replaceChildren();
     input.disabled = true;
     findButton.disabled = true;
@@ -7407,14 +7395,12 @@ function createSupermoderatorManagementCard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target }),
       });
-      resolvedUser = result.user;
       setFormMessage(formMessage, "");
       renderResolvedSupermoderator(
         preview,
         result,
         async (selectedUser) => {
           activeOperation = "assign";
-          resolvedUser = null;
           input.disabled = true;
           findButton.disabled = true;
           findButton.textContent = "Назначаем…";
@@ -7467,7 +7453,6 @@ function createSupermoderatorManagementCard() {
 }
 
 function renderSupermoderatorManagementScreen(bootstrap) {
-  currentViewMode = "management";
   setChatSummary();
   replaceAppContent(
     createAdministrativeHeader(bootstrap, {
@@ -7588,52 +7573,8 @@ function renderResolvedSupermoderator(container, result, assign) {
   container.replaceChildren(panel);
 }
 
-function createRoleManagementUnavailableCard() {
-  return createInfoCard(
-    "Управление супермодераторами временно недоступно",
-    [
-      "Не удалось проверить права администратора Telegram.",
-      "Поэтому управление супермодераторами временно недоступно. "
-        + "Доступ к управлению конкурсами определяется отдельно. "
-        + "Просмотр и прогнозирование продолжают работать.",
-    ],
-    "role-management-unavailable-card",
-  );
-}
-
 function canManageContests(bootstrap) {
-  return bootstrap.can_access_management === true;
-}
-
-function isContestManagementVerificationUnavailable(bootstrap) {
-  return (
-    bootstrap.access?.enforcement_enabled === true
-    && bootstrap.access?.can_manage_contests !== true
-    && bootstrap.access?.verification_status === "unavailable"
-  );
-}
-
-function createContestManagementUnavailableCard() {
-  return createInfoCard(
-    "Управление конкурсами временно недоступно",
-    [
-      "Не удалось проверить права администратора Telegram. "
-        + "Управление конкурсами временно недоступно. "
-        + "Просмотр и прогнозирование продолжают работать.",
-    ],
-    "contest-management-unavailable-card",
-  );
-}
-
-function createContestManagementRestrictedCard() {
-  return createInfoCard(
-    "Управление конкурсами",
-    [
-      "Создавать и настраивать конкурсы могут администраторы чата "
-        + "и супермодераторы.",
-    ],
-    "contest-management-restricted-card",
-  );
+  return bootstrap.access?.can_manage_contests === true;
 }
 
 function getRoleTargetDisplayName(user) {
@@ -8263,7 +8204,6 @@ function renderSharedTournamentManagementScreen(
   contestTemplates,
   state = {},
 ) {
-  currentViewMode = "management";
   setChatSummary();
   replaceAppContent(
     createAdministrativeHeader(bootstrap, {
@@ -8281,7 +8221,6 @@ function renderSharedTournamentManagementScreen(
 
 async function openSharedTournamentManagement(bootstrap, state = {}) {
   activeBootstrap = bootstrap;
-  currentViewMode = "management";
   const viewToken = replaceAppContent(
     createStatusCard("Открываем общие турниры", "Загружаем расписания…"),
   );
@@ -9011,7 +8950,6 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
 }
 
 function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
-  currentViewMode = "management";
   setChatSummary();
   const cards = [
     createAdministrativeHeader(bootstrap, {
@@ -9045,7 +8983,6 @@ function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
 }
 
 async function openSharedTournament(bootstrap, tournamentId, state = {}) {
-  currentViewMode = "management";
   const viewToken = replaceAppContent(
     createStatusCard("Открываем общий турнир", "Загружаем матчи…"),
   );
@@ -9079,7 +9016,6 @@ async function openSharedTournament(bootstrap, tournamentId, state = {}) {
 }
 
 function renderManagementScreen(bootstrap, managementData, state = {}) {
-  currentViewMode = "management";
   setChatSummary();
   const contests = Array.isArray(managementData.contests)
     ? managementData.contests
@@ -9131,7 +9067,6 @@ function handleManagementRequestError(
 
 async function openManagement(bootstrap, state = {}) {
   activeBootstrap = bootstrap;
-  currentViewMode = "management";
   setChatSummary();
   const viewToken = replaceAppContent(
     createStatusCard(
@@ -9152,7 +9087,10 @@ async function openManagement(bootstrap, state = {}) {
     if (error?.status === 403) {
       const nextBootstrap = {
         ...bootstrap,
-        can_access_management: false,
+        access: {
+          ...bootstrap.access,
+          can_manage_contests: false,
+        },
       };
       activeBootstrap = nextBootstrap;
       await openContestList(nextBootstrap, {
@@ -9196,7 +9134,6 @@ async function openContestList(bootstrap, state = {}) {
 }
 
 function renderContestScreen(bootstrap, state = {}) {
-  currentViewMode = "participant";
   const { user, chat } = bootstrap.context;
   const chatTitle = chat.title || "этого чата";
   const userName = getUserDisplayName(user);

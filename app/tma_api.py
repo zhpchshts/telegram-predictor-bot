@@ -12,7 +12,6 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from app.access_control import (
     AccessDecision,
-    AccessRole,
     AccessVerificationStatus,
     TelegramAdministratorsClient,
     TelegramAdministratorsSnapshot,
@@ -440,7 +439,6 @@ async def _authorize_contest_management(
         telegram_chat_id=context.chat.telegram_chat_id,
         telegram_user_id=context.user.telegram_user_id,
         telegram_client=telegram_client,
-        enforcement_enabled=settings.role_enforcement_enabled,
         telegram_timeout_seconds=settings.telegram_admin_check_timeout_seconds,
     )
     if access.can_manage_contests:
@@ -501,7 +499,6 @@ async def _authorize_role_management(
         telegram_chat_id=context.chat.telegram_chat_id,
         telegram_user_id=context.user.telegram_user_id,
         telegram_client=telegram_client,
-        enforcement_enabled=settings.role_enforcement_enabled,
         telegram_timeout_seconds=settings.telegram_admin_check_timeout_seconds,
     )
     if not access.can_manage_roles:
@@ -568,16 +565,11 @@ async def get_tma_bootstrap(
         telegram_chat_id=context.chat.telegram_chat_id,
         telegram_user_id=context.user.telegram_user_id,
         telegram_client=telegram_client,
-        enforcement_enabled=settings.role_enforcement_enabled,
         telegram_timeout_seconds=settings.telegram_admin_check_timeout_seconds,
     )
     return {
         "context": _serialize_context(context),
         "access": _serialize_access(access),
-        "can_access_management": access.can_manage_contests,
-        "can_manage_shared_tournaments": (
-            context.user.telegram_user_id in settings.shared_tournament_admin_ids
-        ),
         "active_contests": [
             _serialize_active_contest(contest) for contest in active_contests
         ],
@@ -603,11 +595,6 @@ async def get_tma_management_contests(
         database_path=settings.database_path,
         telegram_chat_id=management.chat.telegram_chat_id,
     )
-    effective_role = (
-        management.access.role.value
-        if management.access.role is not None
-        else AccessRole.PARTICIPANT.value
-    )
     chat_settings = get_chat_settings(
         database_path=settings.database_path,
         telegram_chat_id=management.chat.telegram_chat_id,
@@ -617,7 +604,6 @@ async def get_tma_management_contests(
             _serialize_management_contest(
                 contest,
                 status_value="active",
-                effective_role=effective_role,
             )
             for contest in active_contests
         ]
@@ -625,7 +611,6 @@ async def get_tma_management_contests(
             _serialize_management_contest(
                 contest,
                 status_value="completed",
-                effective_role=effective_role,
             )
             for contest in completed_contests
         ],
@@ -825,7 +810,6 @@ async def resolve_tma_role_target(
             database_path=settings.database_path,
             telegram_user_id=telegram_user_id,
         )
-        selection_type = "telegram_user_id"
     else:
         try:
             resolved_user = await username_resolver.resolve_username(target)
@@ -882,7 +866,6 @@ async def resolve_tma_role_target(
             first_name=resolved_user.first_name,
             last_name=resolved_user.last_name,
         )
-        selection_type = "username"
     assignment = get_active_supermoderator_assignment(
         database_path=settings.database_path,
         chat_id=management.actor.chat_id,
@@ -890,14 +873,7 @@ async def resolve_tma_role_target(
     )
     return {
         "user": _serialize_user(user),
-        "selection_type": selection_type,
         "has_active_assignment": assignment is not None,
-        "effective_role": _effective_role(
-            user=user,
-            administrators=management.administrators,
-            has_active_assignment=assignment is not None,
-        ),
-        "is_telegram_admin": management.administrators.contains(user.telegram_user_id),
     }
 
 
@@ -2521,7 +2497,6 @@ def _serialize_access(access: AccessDecision) -> dict[str, object]:
         "role": access.role.value if access.role is not None else None,
         "can_manage_contests": access.can_manage_contests,
         "can_manage_roles": access.can_manage_roles,
-        "enforcement_enabled": access.enforcement_enabled,
     }
 
 
@@ -2552,22 +2527,8 @@ def _serialize_active_assignment(
         **_serialize_assignment(item.assignment),
         "user": _serialize_user(item.user),
         "assigned_by": _serialize_user(item.assigned_by),
-        "effective_role": ("telegram_admin" if is_telegram_admin else "supermoderator"),
         "is_telegram_admin": is_telegram_admin,
     }
-
-
-def _effective_role(
-    *,
-    user: LocalUser,
-    administrators: TelegramAdministratorsSnapshot,
-    has_active_assignment: bool,
-) -> str:
-    if administrators.contains(user.telegram_user_id):
-        return "telegram_admin"
-    if has_active_assignment:
-        return "supermoderator"
-    return "participant"
 
 
 def _user_display_name(user: LocalUser) -> str:
@@ -2661,13 +2622,11 @@ def _serialize_management_contest(
     contest,
     *,
     status_value: str,
-    effective_role: str,
 ) -> dict[str, object]:
     return {
         "id": contest.id,
         "name": contest.name,
         "status": status_value,
-        "effective_role": effective_role,
     }
 
 
@@ -2756,7 +2715,6 @@ def _serialize_tournament_teams(tournament_teams) -> dict[str, object]:
     return {
         "teams": [_serialize_team_summary(team) for team in tournament_teams.teams],
         "is_locked": tournament_teams.is_locked,
-        "lock_reasons": list(tournament_teams.lock_reasons),
     }
 
 
@@ -2820,7 +2778,6 @@ def _serialize_leaderboard_entry(entry) -> dict[str, object]:
         "match_predictions_count": entry.match_predictions_count,
         "champion_prediction_count": entry.champion_prediction_count,
         "calculated_predictions_count": entry.calculated_predictions_count,
-        "total_matches_count": entry.total_matches_count,
         "prediction_history": [
             _serialize_match(match) for match in entry.prediction_history
         ],

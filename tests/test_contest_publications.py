@@ -14,7 +14,6 @@ from app import contest_publications
 from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
     ChampionPredictionSettingsLockedError,
-    LeaderboardTiebreakReason,
     complete_contest,
     create_match,
     create_world_cup_2026_contest,
@@ -1311,30 +1310,6 @@ def test_completion_publication_names_exactly_one_winner_for_tied_points(
     assert '<th align="center">Место</th>' in completion_text
     assert '<th colspan="5" align="left">Участник</th>' in completion_text
     assert '<th align="right">Очки</th>' in completion_text
-
-
-@pytest.mark.parametrize(
-    ("reason", "expected_text"),
-    (
-        ("exact_score", "большему количеству точных счетов"),
-        ("goal_difference", "большему количеству угаданных разниц мячей"),
-        ("outcome", "большему количеству угаданных исходов"),
-        (
-            "drawn_advancing_team",
-            "большему количеству правильных прогнозов прошедшей команды",
-        ),
-        ("champion", "правильному прогнозу чемпиона"),
-        ("draw", "Победитель определён жребием"),
-    ),
-)
-def test_final_publication_formats_only_decisive_tiebreak_reason(
-    reason: LeaderboardTiebreakReason,
-    expected_text: str,
-) -> None:
-    explanation = contest_publications._format_tiebreak_explanation("Анна <&>", reason)
-
-    assert expected_text in explanation
-    assert "Анна &lt;&amp;&gt;" in explanation or reason == "draw"
 
 
 def test_final_publication_rejects_nonconsecutive_places() -> None:

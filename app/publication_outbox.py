@@ -1004,32 +1004,6 @@ def prepare_scheduled_reconciliation(
         )
 
 
-def renew_claim(
-    *,
-    database_path: Path,
-    publication_id: int,
-    claim_token: str,
-    now_utc: datetime | None = None,
-    lease_seconds: int = PUBLICATION_CLAIM_SECONDS,
-) -> bool:
-    now = resolve_service_time(now_utc)
-    with database_connection(database_path) as connection:
-        update = connection.execute(
-            """
-            UPDATE contest_publications
-            SET claim_expires_at = ?, updated_at = ?
-            WHERE id = ? AND claim_token = ?
-            """,
-            (
-                serialize_service_time(now + timedelta(seconds=lease_seconds)),
-                serialize_service_time(now),
-                publication_id,
-                claim_token,
-            ),
-        )
-        return update.rowcount == 1
-
-
 def renew_current_claim(
     *,
     database_path: Path,
@@ -1080,26 +1054,6 @@ def inspect_claim_state(
 ) -> PublicationClaimState:
     with database_connection(database_path) as connection:
         return _inspect_claim_state(connection, publication=publication)
-
-
-def get_claimed_publication(
-    *,
-    database_path: Path,
-    publication_id: int,
-    claim_token: str,
-) -> ClaimedPublication | None:
-    with database_connection(database_path) as connection:
-        row = connection.execute(
-            """
-            SELECT *
-            FROM contest_publications
-            WHERE id = ? AND claim_token = ?
-            """,
-            (publication_id, claim_token),
-        ).fetchone()
-    if row is None:
-        return None
-    return _claimed_publication_from_row(row, claim_token=claim_token)
 
 
 def finish_publication_success(
@@ -1245,21 +1199,6 @@ def finish_publication_failure(
             ),
         )
         return update.rowcount == 1
-
-
-def claim_is_owned(
-    *, database_path: Path, publication_id: int, claim_token: str
-) -> bool:
-    with database_connection(database_path) as connection:
-        row = connection.execute(
-            """
-            SELECT 1
-            FROM contest_publications
-            WHERE id = ? AND claim_token = ?
-            """,
-            (publication_id, claim_token),
-        ).fetchone()
-    return row is not None
 
 
 def _inspect_claim_state(

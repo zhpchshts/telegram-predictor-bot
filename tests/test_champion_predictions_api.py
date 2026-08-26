@@ -51,7 +51,6 @@ def configure_test_environment(*, monkeypatch, database_path: Path) -> None:
     monkeypatch.setenv("BOT_TOKEN", BOT_TOKEN)
     monkeypatch.setenv("BOT_USERNAME", "ZhpchshtsPredictorBot")
     monkeypatch.setenv("DATABASE_PATH", str(database_path))
-    monkeypatch.setenv("ROLE_ENFORCEMENT_ENABLED", "false")
     monkeypatch.setattr(
         tma_api,
         "CREATABLE_TEMPLATE_KEYS",
@@ -312,7 +311,6 @@ def test_champion_prediction_api_configures_selects_and_records_champion(
             "match_predictions_count": 0,
             "champion_prediction_count": 1,
             "calculated_predictions_count": 1,
-            "total_matches_count": 1,
             "prediction_history": [],
             "champion_prediction_history": {
                 "prediction": {
