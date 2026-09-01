@@ -15,6 +15,7 @@ from app.contest_service import (
     PredictionUnavailableError,
     SwissStagePredictionSettingsLockedError,
     complete_contest,
+    create_champions_league_2026_27_contest,
     create_world_cup_2026_contest,
     get_contest_details,
     save_swiss_stage_prediction,
@@ -56,6 +57,21 @@ def _create_contest(database_path: Path) -> int:
         username="admin",
         contest_name="Швейцарский этап",
         idempotency_key="create-swiss-contest",
+        audit_actor=AUDIT_ACTOR,
+    ).contest.id
+
+
+def _create_champions_league_contest(database_path: Path) -> int:
+    return create_champions_league_2026_27_contest(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        chat_title="Тестовый чат",
+        telegram_user_id=ADMIN_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        contest_name="Лига чемпионов 2026/27",
+        idempotency_key="create-ucl-contest",
         audit_actor=AUDIT_ACTOR,
     ).contest.id
 
@@ -193,6 +209,172 @@ def test_swiss_stage_defaults_to_three_direct_and_five_playoff_teams(
     assert prediction.is_enabled is False
     assert prediction.direct_qualifier_count == 3
     assert prediction.elimination_qualifier_count == 5
+
+
+def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_twelve(
+    database_path: Path,
+) -> None:
+    contest_id = _create_champions_league_contest(database_path)
+    first_35_teams = [f"Команда {number:02d}" for number in range(1, 36)]
+    save_tournament_teams(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        team_names=first_35_teams,
+        audit_actor=AUDIT_ACTOR,
+    )
+    with pytest.raises(PredictionUnavailableError, match="лиговый этап"):
+        save_swiss_stage_prediction(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=ALICE_ID,
+            first_name="Алиса",
+            last_name=None,
+            username="alice",
+            direct_team_ids=[],
+            elimination_team_ids=[],
+            now_utc=OPEN_TIME,
+        )
+
+    with pytest.raises(ValueError, match="ровно 36 команд"):
+        save_swiss_stage_prediction_settings(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            enabled=True,
+            deadline_at=DEADLINE,
+            direct_qualifier_count=8,
+            elimination_qualifier_count=12,
+            audit_actor=AUDIT_ACTOR,
+            now_utc=OPEN_TIME,
+        )
+
+    save_tournament_teams(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        team_names=[*first_35_teams, "Команда 36"],
+        audit_actor=AUDIT_ACTOR,
+    )
+    with pytest.raises(ValueError, match="8 команд напрямую"):
+        save_swiss_stage_prediction_settings(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            enabled=True,
+            deadline_at=DEADLINE,
+            direct_qualifier_count=7,
+            elimination_qualifier_count=13,
+            audit_actor=AUDIT_ACTOR,
+            now_utc=OPEN_TIME,
+        )
+
+    save_swiss_stage_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        enabled=True,
+        deadline_at=DEADLINE,
+        direct_qualifier_count=8,
+        elimination_qualifier_count=12,
+        audit_actor=AUDIT_ACTOR,
+        now_utc=OPEN_TIME,
+    )
+    with pytest.raises(ValueError, match="ровно 36 команд"):
+        save_tournament_teams(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            team_names=first_35_teams,
+            audit_actor=AUDIT_ACTOR,
+        )
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        now_utc=OPEN_TIME,
+    )
+    candidate_ids = [team.id for team in details.swiss_stage_prediction.candidates]
+    assert len(candidate_ids) == 36
+    saved = save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=candidate_ids[:8],
+        elimination_team_ids=candidate_ids[8:20],
+        now_utc=OPEN_TIME,
+    )
+
+    assert len(saved.direct_teams) == 8
+    assert len(saved.elimination_teams) == 12
+    assert details.matches == ()
+
+    save_swiss_stage_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        direct_team_ids=candidate_ids[:8],
+        elimination_team_ids=candidate_ids[8:20],
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_TIME,
+    )
+    scored = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=CLOSED_TIME,
+    )
+
+    assert scored.swiss_stage_prediction.awarded_points == 40
+    assert scored.leaderboard[0].total_points == 40
+
+    save_swiss_stage_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        direct_team_ids=[*candidate_ids[:6], candidate_ids[8], candidate_ids[20]],
+        elimination_team_ids=[
+            *candidate_ids[9:19],
+            candidate_ids[7],
+            candidate_ids[21],
+        ],
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_TIME,
+    )
+    corrected = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=CLOSED_TIME,
+    )
+    awards_by_team_id = {
+        award.team.id: award for award in corrected.swiss_stage_prediction.awards
+    }
+    history = corrected.leaderboard[0].swiss_stage_prediction_history
+
+    assert corrected.swiss_stage_prediction.awarded_points == 32
+    assert corrected.leaderboard[0].total_points == 32
+    assert awards_by_team_id[candidate_ids[0]].points == 2
+    assert awards_by_team_id[candidate_ids[7]].actual_category == "elimination"
+    assert awards_by_team_id[candidate_ids[7]].points == 0
+    assert awards_by_team_id[candidate_ids[8]].actual_category == "direct"
+    assert awards_by_team_id[candidate_ids[8]].points == 0
+    assert awards_by_team_id[candidate_ids[6]].actual_category is None
+    assert awards_by_team_id[candidate_ids[6]].points == 0
+    assert awards_by_team_id[candidate_ids[19]].actual_category is None
+    assert awards_by_team_id[candidate_ids[19]].points == 0
+    assert history is not None
+    assert history.awarded_points == 32
+    assert {award.team.id: award.points for award in history.awards} == {
+        award.team.id: award.points for award in corrected.swiss_stage_prediction.awards
+    }
 
 
 def test_swiss_stage_settings_create_candidates_without_matches_and_are_audited(

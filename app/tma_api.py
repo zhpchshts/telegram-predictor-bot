@@ -47,6 +47,7 @@ from app.contest_service import (
     TournamentTeamsLockedError,
     SharedTournamentManagedError,
     complete_contest,
+    create_champions_league_2026_27_contest,
     create_match,
     create_the_international_2026_contest,
     create_world_cup_2026_contest,
@@ -145,13 +146,17 @@ CONTEST_TEMPLATE_OPTIONS = (
         "key": "the_international_2026",
         "label": "The International 2026",
     },
+    {
+        "key": "champions_league_2026_27",
+        "label": "Лига чемпионов 2026/27",
+    },
 )
 SUPPORTED_TEMPLATE_KEYS = frozenset(
     option["key"] for option in CONTEST_TEMPLATE_OPTIONS
 )
-# Seasonal templates remain supported for historical data, but neither 2026
-# tournament is available for creating new contests.
-CREATABLE_TEMPLATE_KEYS: frozenset[str] = frozenset()
+# Completed seasonal templates remain supported for historical data. Only the
+# current Champions League season is available for creating new contests.
+CREATABLE_TEMPLATE_KEYS: frozenset[str] = frozenset({"champions_league_2026_27"})
 
 
 def _reject_boolean_integer(value: object) -> object:
@@ -972,6 +977,8 @@ async def create_tma_contest(
             create_contest = create_world_cup_2026_contest
         elif payload.template_key == "the_international_2026":
             create_contest = create_the_international_2026_contest
+        elif payload.template_key == "champions_league_2026_27":
+            create_contest = create_champions_league_2026_27_contest
         else:  # pragma: no cover - guarded by _require_creatable_template
             raise RuntimeError("Unsupported creatable contest template.")
         result = create_contest(

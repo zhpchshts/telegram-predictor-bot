@@ -177,6 +177,18 @@ def test_current_schema_supports_only_known_contest_templates(tmp_path: Path) ->
                 "the_international_2026",
             ),
         ).lastrowid
+        champions_league_contest_id = connection.execute(
+            """
+            INSERT INTO contests (chat_id, name, slug, template_key)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                "Champions League 2026/27",
+                "champions-league-2026-27",
+                "champions_league_2026_27",
+            ),
+        ).lastrowid
 
         templates = connection.execute(
             """
@@ -198,7 +210,47 @@ def test_current_schema_supports_only_known_contest_templates(tmp_path: Path) ->
     assert [(row["id"], row["template_key"]) for row in templates] == [
         (football_contest_id, "world_cup_2026"),
         (dota_contest_id, "the_international_2026"),
+        (champions_league_contest_id, "champions_league_2026_27"),
     ]
+
+
+def test_current_schema_supports_champions_league_shared_tournament_template(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+
+    with create_connection(database_path) as connection:
+        shared_tournament_id = connection.execute(
+            """
+            INSERT INTO shared_tournaments (
+                name,
+                template_key,
+                created_by_telegram_user_id
+            )
+            VALUES (?, ?, ?)
+            """,
+            (
+                "Лига чемпионов 2026/27",
+                "champions_league_2026_27",
+                123,
+            ),
+        ).lastrowid
+
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO shared_tournaments (
+                    name,
+                    template_key,
+                    created_by_telegram_user_id
+                )
+                VALUES (?, ?, ?)
+                """,
+                ("Unknown", "unknown_template", 123),
+            )
+
+    assert shared_tournament_id == 1
 
 
 def test_current_schema_allows_only_supported_best_of_values(tmp_path: Path) -> None:

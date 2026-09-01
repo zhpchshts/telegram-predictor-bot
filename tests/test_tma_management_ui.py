@@ -178,6 +178,24 @@ def test_empty_template_catalog_disables_new_creation() -> None:
     assert "result.contest_templates" in shared_open_source
 
 
+def test_champions_league_template_creation_explains_league_phase_prediction() -> None:
+    form_source = _function_source("createContestFormCard")
+    confirmation_source = _function_source("createContestConfirmationCard")
+
+    assert 'templateInput.value === "champions_league_2026_27"' in form_source
+    assert "8 команд напрямую в 1/8 и 12 вылетевших" in form_source
+    assert "16 участников стыков не выбираются и не оцениваются" in form_source
+    assert 'state.draftTemplateKey === "champions_league_2026_27"' in (
+        confirmation_source
+    )
+    assert (
+        "один прогноз — 8 команд напрямую в 1/8 и 12 вылетевших" in confirmation_source
+    )
+    assert "16 участников стыков не выбираются и не оцениваются" in (
+        confirmation_source
+    )
+
+
 def test_ti_series_controls_and_historical_rules_are_preserved() -> None:
     match_form_source = _function_source("createMatchFormCard")
     prediction_source = _function_source("createMatchPredictionSection")
@@ -212,6 +230,9 @@ def test_contest_rules_follow_the_selected_tournament_template() -> None:
 
     assert "templateKey" in rules_source
     assert 'templateKey === "the_international_2026"' in rules_source
+    assert 'templateKey === "champions_league_2026_27"' in rules_source
+    assert "getSwissStageCopy(templateKey)" in rules_source
+    assert "`${swissStageCopy.stageName} 2/0" in rules_source
     assert 'tiOverviewParts.push("Swiss 2/1")' in rules_source
     assert "tiOverviewParts.push(`чемпион +${championPoints}`)" in rules_source
     assert 'tiOverviewParts.push("Double Elimination 2/1")' in rules_source
@@ -221,7 +242,7 @@ def test_contest_rules_follow_the_selected_tournament_template() -> None:
     assert (
         "Серии Double Elimination играются до двух побед в Bo3 или до трёх побед в Bo5."
     ) in rules_source
-    assert rules_source.index("Швейцарский этап:") < rules_source.index(
+    assert rules_source.index("swissStageCopy.scoringRule") < rules_source.index(
         "Прогноз на чемпиона открыт"
     )
     assert rules_source.index("Прогноз на чемпиона открыт") < rules_source.index(
@@ -371,7 +392,8 @@ def test_prediction_reminders_are_published_as_one_manual_message() -> None:
         "createMatchPredictionPublicationAdministrationCard"
     )
 
-    assert '"Опубликовать предстоящие матчи"' in reminder_source
+    assert '"Опубликовать напоминания"' in reminder_source
+    assert "getSwissStageCopy(contest.template_key)" in reminder_source
     assert "/prediction-reminders/publish`" in reminder_source
     assert '{ method: "POST" }' in reminder_source
     assert "отправит одно сообщение" in reminder_source
@@ -548,6 +570,8 @@ def test_shared_tournament_ui_owns_all_common_deadlines_and_results() -> None:
     assert "Вернуть в активные" in lifecycle_source
     assert "tournament.is_archived === true" in champion_source
     assert "tournament.is_archived === true" in swiss_source
+    assert "getSwissStageCopy(tournament.template_key)" in swiss_source
+    assert "hasFixedChampionsLeagueLimits" in swiss_source
     assert '["Активные"' in list_source
     assert '["Завершённые"' in list_source
 

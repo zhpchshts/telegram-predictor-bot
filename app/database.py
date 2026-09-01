@@ -98,7 +98,11 @@ CREATE TABLE IF NOT EXISTS contests (
   name TEXT NOT NULL,
   slug TEXT NOT NULL UNIQUE,
   template_key TEXT NOT NULL DEFAULT 'world_cup_2026' CHECK (
-    template_key IN ('world_cup_2026', 'the_international_2026')
+    template_key IN (
+      'world_cup_2026',
+      'the_international_2026',
+      'champions_league_2026_27'
+    )
   ),
   is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
   champion_prediction_enabled INTEGER NOT NULL DEFAULT 0
@@ -187,7 +191,11 @@ CREATE TABLE IF NOT EXISTS shared_tournaments (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     template_key TEXT NOT NULL CHECK (
-        template_key IN ('world_cup_2026', 'the_international_2026')
+        template_key IN (
+            'world_cup_2026',
+            'the_international_2026',
+            'champions_league_2026_27'
+        )
     ),
     is_archived INTEGER NOT NULL DEFAULT 0 CHECK (is_archived IN (0, 1)),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),

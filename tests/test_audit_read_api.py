@@ -197,6 +197,51 @@ def test_telegram_admin_reads_current_chat_audit_with_user_identity(
     assert event["metadata"] is None
 
 
+def test_champions_league_audit_exposes_league_phase_context(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "champions-league-audit.db"
+    initialize_database(database_path)
+    actor = _create_actor(database_path)
+    _record_event(
+        database_path,
+        actor=actor,
+        entity_id=42,
+        contest_id=42,
+        after_state={
+            "id": 42,
+            "name": "Лига чемпионов 2026/27",
+            "template_key": "champions_league_2026_27",
+        },
+    )
+    swiss_event_id = _record_event(
+        database_path,
+        actor=actor,
+        event_type=AuditEventType.SWISS_STAGE_SETTINGS_UPDATED,
+        entity_type=AuditEntityType.SWISS_STAGE_PREDICTION,
+        entity_id=42,
+        contest_id=42,
+        after_state={"enabled": True},
+    )
+    _configure_environment(monkeypatch, database_path=database_path)
+
+    response = TestClient(
+        _create_app(MutableTelegramAdministratorsClient([TELEGRAM_USER_ID]))
+    ).get(
+        "/api/tma/audit-events?contest_id=42",
+        headers=_build_headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    swiss_event = next(
+        event for event in payload["events"] if event["id"] == swiss_event_id
+    )
+    assert swiss_event["contest"]["template_key"] == "champions_league_2026_27"
+    assert swiss_event["entity"]["display_name"] == "Итоги лигового этапа"
+
+
 def test_supermoderator_reads_audit_with_fresh_access_check(
     monkeypatch,
     tmp_path: Path,
@@ -513,7 +558,12 @@ def test_deleted_contest_acceptance_flow_is_readable_through_tma_api(
         "contest_created",
     ]
     assert payload["filter_options"]["contests"] == [
-        {"id": contest_id, "name": "Проверка аудита", "is_deleted": True}
+        {
+            "id": contest_id,
+            "name": "Проверка аудита",
+            "is_deleted": True,
+            "template_key": "world_cup_2026",
+        }
     ]
     match_events = [
         event for event in payload["events"] if event["entity_type"] == "match"

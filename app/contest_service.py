@@ -47,6 +47,12 @@ THE_INTERNATIONAL_2026_COMPETITION_NAME = "The International"
 THE_INTERNATIONAL_2026_SEASON = "2026"
 THE_INTERNATIONAL_2026_COMPETITION_TYPE = "the_international"
 
+CHAMPIONS_LEAGUE_2026_27_COMPETITION_NAME = "Лига чемпионов"
+CHAMPIONS_LEAGUE_2026_27_SEASON = "2026/27"
+CHAMPIONS_LEAGUE_2026_27_COMPETITION_TYPE = "champions_league"
+CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT = 8
+CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT = 12
+
 
 @dataclass(frozen=True, slots=True)
 class _ContestTemplate:
@@ -60,6 +66,8 @@ class _ContestTemplate:
     outcome_points: int
     advancing_team_points: int
     champion_prediction_points: int
+    swiss_direct_qualifier_count: int
+    swiss_elimination_qualifier_count: int
 
 
 WORLD_CUP_2026_TEMPLATE = _ContestTemplate(
@@ -73,6 +81,8 @@ WORLD_CUP_2026_TEMPLATE = _ContestTemplate(
     outcome_points=DEFAULT_OUTCOME_POINTS,
     advancing_team_points=DEFAULT_ADVANCING_TEAM_POINTS,
     champion_prediction_points=5,
+    swiss_direct_qualifier_count=3,
+    swiss_elimination_qualifier_count=5,
 )
 
 THE_INTERNATIONAL_2026_TEMPLATE = _ContestTemplate(
@@ -86,6 +96,23 @@ THE_INTERNATIONAL_2026_TEMPLATE = _ContestTemplate(
     outcome_points=1,
     advancing_team_points=0,
     champion_prediction_points=4,
+    swiss_direct_qualifier_count=3,
+    swiss_elimination_qualifier_count=5,
+)
+
+CHAMPIONS_LEAGUE_2026_27_TEMPLATE = _ContestTemplate(
+    key="champions_league_2026_27",
+    slug_prefix="champions-league-2026-27",
+    competition_name=CHAMPIONS_LEAGUE_2026_27_COMPETITION_NAME,
+    competition_season=CHAMPIONS_LEAGUE_2026_27_SEASON,
+    competition_type=CHAMPIONS_LEAGUE_2026_27_COMPETITION_TYPE,
+    exact_score_points=DEFAULT_EXACT_SCORE_POINTS,
+    goal_difference_points=DEFAULT_GOAL_DIFFERENCE_POINTS,
+    outcome_points=DEFAULT_OUTCOME_POINTS,
+    advancing_team_points=DEFAULT_ADVANCING_TEAM_POINTS,
+    champion_prediction_points=5,
+    swiss_direct_qualifier_count=CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT,
+    swiss_elimination_qualifier_count=CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT,
 )
 
 
@@ -625,12 +652,17 @@ def get_contest_details(
                         WHEN swiss_stage_prediction_selections.category =
                             swiss_stage_result_selections.category
                         THEN 2
+                        WHEN contests.template_key =
+                            'champions_league_2026_27'
+                        THEN 0
                         ELSE 1
                     END AS points
                 FROM swiss_stage_prediction_selections
                 JOIN swiss_stage_predictions
                     ON swiss_stage_predictions.id =
                     swiss_stage_prediction_selections.prediction_id
+                JOIN contests
+                    ON contests.id = swiss_stage_predictions.contest_id
                 JOIN swiss_stage_result_selections
                     ON swiss_stage_result_selections.contest_id =
                     swiss_stage_prediction_selections.contest_id
@@ -997,6 +1029,7 @@ def get_contest_details(
                 swiss_stage_prediction_history_by_user=(
                     _leaderboard_swiss_stage_prediction_history_by_user(
                         leaderboard_swiss_stage_prediction_rows,
+                        template_key=str(contest_row["template_key"]),
                     )
                     if not swiss_stage_prediction.is_open
                     else {}
@@ -1078,17 +1111,19 @@ def complete_contest(
             contest_id=contest_id,
         )
         if swiss_stage_row is not None and bool(swiss_stage_row["enabled"]):
+            stage_name, stage_genitive, _stage_prepositional = _swiss_stage_terms(
+                str(contest_row["template_key"])
+            )
             if swiss_stage_row["deadline_at"] is None:
                 raise ContestCompletionUnavailableError(
-                    "Сначала укажите дедлайн прогноза на швейцарский этап."
+                    f"Сначала укажите дедлайн прогноза на {stage_name}."
                 )
             if _is_swiss_stage_prediction_open(
                 str(swiss_stage_row["deadline_at"]),
                 now_utc=resolved_now_utc,
             ):
                 raise ContestCompletionUnavailableError(
-                    "Конкурс можно завершить после закрытия прогнозов "
-                    "на швейцарский этап."
+                    f"Конкурс можно завершить после закрытия прогнозов на {stage_name}."
                 )
             swiss_stage_result = connection.execute(
                 """
@@ -1100,7 +1135,7 @@ def complete_contest(
             ).fetchone()
             if swiss_stage_result is None:
                 raise ContestCompletionUnavailableError(
-                    "Сначала укажите фактические итоги швейцарского этапа."
+                    f"Сначала укажите фактические итоги {stage_genitive}."
                 )
 
         actor_user_id = _upsert_user(
@@ -1235,7 +1270,7 @@ def save_tournament_teams(
 
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
-        _get_active_contest_row(
+        contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
@@ -1254,6 +1289,16 @@ def save_tournament_teams(
             connection,
             contest_id=contest_id,
         )
+        if (
+            contest_row["template_key"] == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key
+            and swiss_configuration is not None
+            and bool(swiss_configuration["enabled"])
+            and len(normalized_team_names) != 36
+        ):
+            raise ValueError(
+                "Для включённого прогноза на лиговый этап Лиги чемпионов "
+                "нужно сохранить ровно 36 команд."
+            )
         if (
             swiss_configuration is not None
             and bool(swiss_configuration["enabled"])
@@ -2745,19 +2790,8 @@ def save_swiss_stage_prediction_settings(
     )
     normalized_elimination_count = _normalize_swiss_stage_limit(
         elimination_qualifier_count,
-        field_name="Количество проходов через элиминейшн-раунд",
+        field_name="Количество команд второй категории",
     )
-    if normalized_enabled:
-        if deadline_at is None:
-            raise ValueError("Укажите, когда прогноз на швейцарский этап закрывается.")
-        normalized_deadline_at = _normalize_swiss_stage_deadline_at(deadline_at)
-    else:
-        normalized_deadline_at = (
-            _normalize_swiss_stage_deadline_at(deadline_at)
-            if deadline_at is not None
-            else None
-        )
-
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
         resolved_now_utc = _resolve_now_utc(now_utc)
@@ -2767,6 +2801,33 @@ def save_swiss_stage_prediction_settings(
             contest_id=contest_id,
         )
         _ensure_contest_is_independent(connection, contest_id=contest_id)
+        stage_name, _stage_genitive, _stage_prepositional = _swiss_stage_terms(
+            str(contest_row["template_key"])
+        )
+        if normalized_enabled:
+            if deadline_at is None:
+                raise ValueError(f"Укажите, когда прогноз на {stage_name} закрывается.")
+            normalized_deadline_at = _normalize_swiss_stage_deadline_at(
+                deadline_at,
+                stage_name=stage_name,
+            )
+        else:
+            normalized_deadline_at = (
+                _normalize_swiss_stage_deadline_at(
+                    deadline_at,
+                    stage_name=stage_name,
+                )
+                if deadline_at is not None
+                else None
+            )
+        if contest_row["template_key"] == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key and (
+            normalized_direct_count != CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT
+            or normalized_elimination_count != CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT
+        ):
+            raise ValueError(
+                "Для Лиги чемпионов выберите 8 команд напрямую в 1/8 "
+                "и 12 команд, которые вылетят после лигового этапа."
+            )
         previous_row = _get_swiss_stage_configuration_row(
             connection,
             contest_id=contest_id,
@@ -2787,10 +2848,11 @@ def save_swiss_stage_prediction_settings(
                 new_deadline_at=normalized_deadline_at,
                 now_utc=resolved_now_utc,
                 locked_error=SwissStagePredictionSettingsLockedError(
-                    "Дедлайн прогноза на швейцарский этап нельзя изменить после его наступления."
+                    f"Дедлайн прогноза на {stage_name} нельзя изменить "
+                    "после его наступления."
                 ),
                 past_deadline_message=(
-                    "Новый дедлайн прогноза на швейцарский этап должен быть в будущем."
+                    f"Новый дедлайн прогноза на {stage_name} должен быть в будущем."
                 ),
             )
 
@@ -2804,7 +2866,7 @@ def save_swiss_stage_prediction_settings(
         )
         if settings_locked and non_deadline_settings_changed:
             raise SwissStagePredictionSettingsLockedError(
-                "Настройки прогноза на швейцарский этап нельзя изменить "
+                f"Настройки прогноза на {stage_name} нельзя изменить "
                 "после сохранения первого прогноза или результата. "
                 "До дедлайна можно изменить только сам дедлайн."
             )
@@ -2816,6 +2878,14 @@ def save_swiss_stage_prediction_settings(
         tournament_team_count = len(existing_tournament_teams)
         if normalized_enabled and tournament_team_count == 0:
             raise ValueError("Сначала добавьте команды турнира.")
+        if (
+            normalized_enabled
+            and contest_row["template_key"] == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key
+            and tournament_team_count != 36
+        ):
+            raise ValueError(
+                "Для лигового этапа Лиги чемпионов добавьте ровно 36 команд."
+            )
         if (
             normalized_enabled
             and tournament_team_count > 0
@@ -2901,7 +2971,7 @@ def save_swiss_stage_prediction(
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
         resolved_now_utc = _resolve_now_utc(now_utc)
-        _get_active_contest_row(
+        contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
@@ -2909,17 +2979,21 @@ def save_swiss_stage_prediction(
         configuration_row = _require_enabled_swiss_stage_configuration(
             connection,
             contest_id=contest_id,
+            template_key=str(contest_row["template_key"]),
+        )
+        stage_name, _stage_genitive, _stage_prepositional = _swiss_stage_terms(
+            str(contest_row["template_key"])
         )
         deadline_at = configuration_row["deadline_at"]
         if deadline_at is None:
             raise PredictionUnavailableError(
-                "Для прогноза на швейцарский этап не задан дедлайн."
+                f"Для прогноза на {stage_name} не задан дедлайн."
             )
         if not _is_swiss_stage_prediction_open(
             str(deadline_at),
             now_utc=resolved_now_utc,
         ):
-            raise PredictionUnavailableError("Прогноз на швейцарский этап уже закрыт.")
+            raise PredictionUnavailableError(f"Прогноз на {stage_name} уже закрыт.")
         _validate_swiss_stage_selection(
             connection,
             contest_id=contest_id,
@@ -2929,6 +3003,7 @@ def save_swiss_stage_prediction(
             elimination_qualifier_count=int(
                 configuration_row["elimination_qualifier_count"]
             ),
+            template_key=str(contest_row["template_key"]),
         )
 
         user_id = _upsert_user(
@@ -2956,7 +3031,7 @@ def save_swiss_stage_prediction(
             (contest_id, user_id),
         ).fetchone()
         if prediction_row is None:
-            raise RuntimeError("Не удалось сохранить прогноз на швейцарский этап.")
+            raise RuntimeError(f"Не удалось сохранить прогноз на {stage_name}.")
         prediction_id = int(prediction_row["id"])
         connection.execute(
             """
@@ -3000,7 +3075,7 @@ def save_swiss_stage_result(
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
         resolved_now_utc = _resolve_now_utc(now_utc)
-        _get_active_contest_row(
+        contest_row = _get_active_contest_row(
             connection,
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
@@ -3010,18 +3085,22 @@ def save_swiss_stage_result(
             connection,
             contest_id=contest_id,
             result_operation=True,
+            template_key=str(contest_row["template_key"]),
+        )
+        stage_name, stage_genitive, _stage_prepositional = _swiss_stage_terms(
+            str(contest_row["template_key"])
         )
         deadline_at = configuration_row["deadline_at"]
         if deadline_at is None:
             raise SwissStageResultUnavailableError(
-                "Для прогноза на швейцарский этап не задан дедлайн."
+                f"Для прогноза на {stage_name} не задан дедлайн."
             )
         if _is_swiss_stage_prediction_open(
             str(deadline_at),
             now_utc=resolved_now_utc,
         ):
             raise SwissStageResultUnavailableError(
-                "Итоги швейцарского этапа можно указать после дедлайна."
+                f"Итоги {stage_genitive} можно указать после дедлайна."
             )
         _validate_swiss_stage_selection(
             connection,
@@ -3032,6 +3111,7 @@ def save_swiss_stage_result(
             elimination_qualifier_count=int(
                 configuration_row["elimination_qualifier_count"]
             ),
+            template_key=str(contest_row["template_key"]),
         )
 
         existing_result = connection.execute(
@@ -3197,6 +3277,36 @@ def create_the_international_2026_contest(
     )
 
 
+def create_champions_league_2026_27_contest(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    chat_title: str | None,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    contest_name: str,
+    idempotency_key: str,
+    audit_actor: AuditActor,
+    shared_tournament_id: int | None = None,
+) -> ContestCreationResult:
+    return _create_contest_from_template(
+        template=CHAMPIONS_LEAGUE_2026_27_TEMPLATE,
+        database_path=database_path,
+        telegram_chat_id=telegram_chat_id,
+        chat_title=chat_title,
+        telegram_user_id=telegram_user_id,
+        first_name=first_name,
+        last_name=last_name,
+        username=username,
+        contest_name=contest_name,
+        idempotency_key=idempotency_key,
+        audit_actor=audit_actor,
+        shared_tournament_id=shared_tournament_id,
+    )
+
+
 def _create_contest_from_template(
     *,
     template: _ContestTemplate,
@@ -3337,6 +3447,26 @@ def _create_contest_from_template(
                 ),
             ).lastrowid
         )
+
+        if (
+            shared_tournament_id is None
+            and template.key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key
+        ):
+            connection.execute(
+                """
+                INSERT INTO swiss_stage_prediction_settings (
+                    contest_id,
+                    direct_qualifier_count,
+                    elimination_qualifier_count
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    contest_id,
+                    template.swiss_direct_qualifier_count,
+                    template.swiss_elimination_qualifier_count,
+                ),
+            )
 
         if shared_tournament_id is not None:
             attach_shared_tournament(
@@ -3975,6 +4105,7 @@ def _get_swiss_stage_prediction_details(
         """
         SELECT
             contests.is_active,
+            contests.template_key,
             COALESCE(swiss_stage_prediction_settings.enabled, 0) AS enabled,
             swiss_stage_prediction_settings.deadline_at,
             COALESCE(
@@ -4047,6 +4178,7 @@ def _get_swiss_stage_prediction_details(
     awards = _swiss_stage_awards_from_rows(
         prediction_rows,
         result_rows=result_rows,
+        template_key=str(configuration_row["template_key"]),
     )
     deadline_at = configuration_row["deadline_at"]
     deadline_at_value = str(deadline_at) if deadline_at is not None else None
@@ -4189,18 +4321,22 @@ def _require_enabled_swiss_stage_configuration(
     *,
     contest_id: int,
     result_operation: bool = False,
+    template_key: str,
 ):
     row = _get_swiss_stage_configuration_row(
         connection,
         contest_id=contest_id,
     )
     if row is None or not bool(row["enabled"]):
+        stage_name, _stage_genitive, _stage_prepositional = _swiss_stage_terms(
+            template_key
+        )
         if result_operation:
             raise SwissStageResultUnavailableError(
-                "Сначала включите прогноз на швейцарский этап."
+                f"Сначала включите прогноз на {stage_name}."
             )
         raise PredictionUnavailableError(
-            "Прогноз на швейцарский этап в этом конкурсе выключен."
+            f"Прогноз на {stage_name} в этом конкурсе выключен."
         )
     return row
 
@@ -4302,15 +4438,27 @@ def _validate_swiss_stage_selection(
     elimination_team_ids: tuple[int, ...],
     direct_qualifier_count: int,
     elimination_qualifier_count: int,
+    template_key: str,
 ) -> None:
+    _stage_name, _stage_genitive, stage_prepositional = _swiss_stage_terms(template_key)
     if len(direct_team_ids) != direct_qualifier_count:
+        direct_category = (
+            "выхода напрямую в 1/8"
+            if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key
+            else "прямого прохода"
+        )
         raise ValueError(
-            f"Выберите ровно {direct_qualifier_count} команд для прямого прохода."
+            f"Выберите ровно {direct_qualifier_count} команд для {direct_category}."
         )
     if len(elimination_team_ids) != elimination_qualifier_count:
+        elimination_category = (
+            "вылета после лигового этапа"
+            if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key
+            else "элиминейшн-раунда"
+        )
         raise ValueError(
             "Выберите ровно "
-            f"{elimination_qualifier_count} команд для элиминейшн-раунда."
+            f"{elimination_qualifier_count} команд для {elimination_category}."
         )
     selected_ids = (*direct_team_ids, *elimination_team_ids)
     placeholders = ", ".join("?" for _ in selected_ids)
@@ -4325,7 +4473,7 @@ def _validate_swiss_stage_selection(
     ).fetchone()[0]
     if int(candidate_count) != len(selected_ids):
         raise ValueError(
-            "Все выбранные команды должны участвовать в швейцарском этапе."
+            f"Все выбранные команды должны участвовать в {stage_prepositional}."
         )
 
 
@@ -4423,6 +4571,7 @@ def _swiss_stage_awards_from_rows(
     prediction_rows,
     *,
     result_rows,
+    template_key: str,
 ) -> tuple[SwissStageTeamAward, ...]:
     actual_categories = {int(row["id"]): str(row["category"]) for row in result_rows}
     has_result = bool(result_rows)
@@ -4436,6 +4585,8 @@ def _swiss_stage_awards_from_rows(
                 points = 0
             elif actual_category == predicted_category:
                 points = 2
+            elif template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key:
+                points = 0
             else:
                 points = 1
         awards.append(
@@ -4612,7 +4763,7 @@ def _normalize_swiss_stage_team_id_sets(
     )
     elimination_ids = _normalize_swiss_stage_team_ids(
         elimination_team_ids,
-        field_name="Команды элиминейшн-раунда",
+        field_name="Команды второй категории",
     )
     if set(direct_ids) & set(elimination_ids):
         raise ValueError("Одна команда не может находиться в обеих категориях.")
@@ -4638,19 +4789,29 @@ def _normalize_swiss_stage_team_ids(
     return tuple(normalized_ids)
 
 
-def _normalize_swiss_stage_deadline_at(value: str) -> str:
+def _swiss_stage_terms(template_key: str) -> tuple[str, str, str]:
+    if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key:
+        return "лиговый этап", "лигового этапа", "лиговом этапе"
+    return "швейцарский этап", "швейцарского этапа", "швейцарском этапе"
+
+
+def _normalize_swiss_stage_deadline_at(
+    value: str,
+    *,
+    stage_name: str = "швейцарский этап",
+) -> str:
     normalized_value = value.strip()
     if not normalized_value:
-        raise ValueError("Укажите, когда прогноз на швейцарский этап закрывается.")
+        raise ValueError(f"Укажите, когда прогноз на {stage_name} закрывается.")
     try:
         parsed_value = datetime.fromisoformat(normalized_value.replace("Z", "+00:00"))
     except ValueError as error:
         raise ValueError(
-            "Некорректная дата и время закрытия прогноза на швейцарский этап."
+            f"Некорректная дата и время закрытия прогноза на {stage_name}."
         ) from error
     if parsed_value.tzinfo is None or parsed_value.utcoffset() is None:
         raise ValueError(
-            "Дата и время закрытия прогноза на швейцарский этап должны "
+            f"Дата и время закрытия прогноза на {stage_name} должны "
             "содержать часовой пояс."
         )
     return (
@@ -5154,6 +5315,8 @@ def _get_swiss_stage_prediction_history_rows(
 
 def _leaderboard_swiss_stage_prediction_history_by_user(
     rows,
+    *,
+    template_key: str,
 ) -> dict[int, SwissStagePredictionHistory]:
     prediction_rows, result_rows = rows
     rows_by_user: dict[int, list[object]] = {}
@@ -5168,6 +5331,7 @@ def _leaderboard_swiss_stage_prediction_history_by_user(
         awards = _swiss_stage_awards_from_rows(
             user_rows,
             result_rows=result_rows,
+            template_key=template_key,
         )
         history_by_user[user_id] = SwissStagePredictionHistory(
             prediction=prediction,

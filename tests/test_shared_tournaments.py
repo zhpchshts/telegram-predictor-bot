@@ -12,6 +12,7 @@ from app import shared_tournament_service
 from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
     SharedTournamentManagedError,
+    create_champions_league_2026_27_contest,
     create_world_cup_2026_contest,
     save_champion_prediction,
     save_match_prediction,
@@ -26,6 +27,7 @@ from app.shared_tournament_service import (
     SharedTournamentCompletionUnavailableError,
     SharedTournamentConflictError,
     SharedTournamentLockedError,
+    SharedTournamentResultUnavailableError,
     archive_shared_tournament,
     create_shared_match,
     create_shared_tournament,
@@ -106,6 +108,171 @@ def _local_match_ids(database_path: Path, shared_match_id: int) -> dict[int, int
                 (shared_match_id,),
             )
         }
+
+
+def test_champions_league_shared_defaults_to_eight_direct_plus_twelve_eliminated(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "champions-league.db"
+    initialize_database(database_path)
+    shared = create_shared_tournament(
+        database_path=database_path,
+        name="Лига чемпионов 2026/27",
+        template_key="champions_league_2026_27",
+        actor_telegram_user_id=OWNER_ID,
+    )
+
+    assert shared.matches == ()
+    assert shared.swiss_stage_prediction.is_enabled is False
+    assert shared.swiss_stage_prediction.direct_qualifier_count == 8
+    assert shared.swiss_stage_prediction.elimination_qualifier_count == 12
+
+    first_35_teams = [f"Команда {number:02d}" for number in range(1, 36)]
+    shared = save_shared_tournament_teams(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        team_names=first_35_teams,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+    )
+    with pytest.raises(
+        SharedTournamentResultUnavailableError,
+        match="лиговый этап",
+    ):
+        save_shared_swiss_result(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            direct_team_ids=[],
+            elimination_team_ids=[],
+            expected_version=shared.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+            actor_first_name="Eugene",
+            actor_last_name="Sabir",
+            actor_username="evsab",
+            now_utc=_time("2030-08-01T00:00:00Z"),
+        )
+    with pytest.raises(ValueError, match="ровно 36 команд"):
+        save_shared_swiss_settings(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            enabled=True,
+            deadline_at="2030-09-01T12:00:00Z",
+            direct_qualifier_count=8,
+            elimination_qualifier_count=12,
+            expected_version=shared.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+            actor_first_name="Eugene",
+            actor_last_name="Sabir",
+            actor_username="evsab",
+            now_utc=_time("2030-08-01T00:00:00Z"),
+        )
+
+    shared = save_shared_tournament_teams(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        team_names=[*first_35_teams, "Команда 36"],
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+    )
+    with pytest.raises(ValueError, match="8 команд напрямую"):
+        save_shared_swiss_settings(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            enabled=True,
+            deadline_at="2030-09-01T12:00:00Z",
+            direct_qualifier_count=7,
+            elimination_qualifier_count=12,
+            expected_version=shared.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+            actor_first_name="Eugene",
+            actor_last_name="Sabir",
+            actor_username="evsab",
+            now_utc=_time("2030-08-01T00:00:00Z"),
+        )
+
+    shared = save_shared_swiss_settings(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        enabled=True,
+        deadline_at="2030-09-01T12:00:00Z",
+        direct_qualifier_count=8,
+        elimination_qualifier_count=12,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-08-01T00:00:00Z"),
+    )
+    with pytest.raises(ValueError, match="ровно 36 команд"):
+        save_shared_tournament_teams(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            team_names=first_35_teams,
+            expected_version=shared.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+        )
+    shared = get_shared_tournament_details(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+    )
+    assert len(shared.teams) == 36
+    contest = create_champions_league_2026_27_contest(
+        database_path=database_path,
+        telegram_chat_id=-1001,
+        chat_title="Чат ЛЧ",
+        telegram_user_id=OWNER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        contest_name="Прогнозы ЛЧ",
+        idempotency_key="ucl-shared-contest",
+        audit_actor=AuditActor(
+            telegram_chat_id=-1001,
+            telegram_user_id=OWNER_ID,
+            role=AuditActorRole.TELEGRAM_ADMIN,
+        ),
+        shared_tournament_id=shared.tournament.id,
+    ).contest
+    second_contest = create_champions_league_2026_27_contest(
+        database_path=database_path,
+        telegram_chat_id=-1002,
+        chat_title="Второй чат ЛЧ",
+        telegram_user_id=OWNER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        contest_name="Прогнозы ЛЧ — второй чат",
+        idempotency_key="ucl-shared-contest-2",
+        audit_actor=AuditActor(
+            telegram_chat_id=-1002,
+            telegram_user_id=OWNER_ID,
+            role=AuditActorRole.TELEGRAM_ADMIN,
+        ),
+        shared_tournament_id=shared.tournament.id,
+    ).contest
+
+    with create_connection(database_path) as connection:
+        settings = connection.execute(
+            """
+            SELECT
+                contest_id,
+                enabled,
+                direct_qualifier_count,
+                elimination_qualifier_count
+            FROM swiss_stage_prediction_settings
+            WHERE contest_id IN (?, ?)
+            ORDER BY contest_id
+            """,
+            (contest.id, second_contest.id),
+        ).fetchall()
+        match_count = connection.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+
+    assert [tuple(row) for row in settings] == [
+        (contest.id, 1, 8, 12),
+        (second_contest.id, 1, 8, 12),
+    ]
+    assert match_count == 0
 
 
 def test_shared_versioned_writes_accept_only_exact_single_step_retries(

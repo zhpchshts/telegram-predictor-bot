@@ -20,6 +20,7 @@ from app.contest_service import (
     MatchResultUnavailableError,
     MatchUpdateUnavailableError,
     PredictionUnavailableError,
+    create_champions_league_2026_27_contest,
     create_match,
     create_the_international_2026_contest,
     delete_match,
@@ -79,6 +80,26 @@ def create_ti_contest(
         database_path=database_path,
         telegram_chat_id=TELEGRAM_CHAT_ID,
         chat_title="Dota 2 predictions",
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        contest_name=contest_name,
+        idempotency_key=idempotency_key,
+        audit_actor=AUDIT_ACTOR,
+    )
+
+
+def create_champions_league_contest(
+    *,
+    database_path: Path,
+    contest_name: str = "Лига чемпионов 2026/27",
+    idempotency_key: str = "create-champions-league-contest-1",
+):
+    return create_champions_league_2026_27_contest(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        chat_title="Футбольные прогнозы",
         telegram_user_id=TELEGRAM_USER_ID,
         first_name="Eugene",
         last_name="Sabir",
@@ -513,6 +534,88 @@ def test_create_the_international_2026_contest_uses_ti_template_and_rules(
         "outcome_points": 1,
         "advancing_team_points": 0,
     }
+
+
+def test_create_ucl_contest_defaults_to_eight_direct_plus_twelve_eliminated(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+
+    result = create_champions_league_contest(database_path=database_path)
+
+    assert result.was_created is True
+    assert result.contest.slug.startswith("champions-league-2026-27-")
+
+    with create_connection(database_path) as connection:
+        contest = connection.execute(
+            """
+            SELECT template_key, champion_prediction_points
+            FROM contests
+            WHERE id = ?
+            """,
+            (result.contest.id,),
+        ).fetchone()
+        competition = connection.execute(
+            """
+            SELECT name, season, competition_type
+            FROM competitions
+            WHERE contest_id = ?
+            """,
+            (result.contest.id,),
+        ).fetchone()
+        scoring_rule_set = connection.execute(
+            """
+            SELECT
+                exact_score_points,
+                goal_difference_points,
+                outcome_points,
+                advancing_team_points
+            FROM scoring_rule_sets
+            WHERE competition_id = (
+                SELECT id
+                FROM competitions
+                WHERE contest_id = ?
+            )
+            """,
+            (result.contest.id,),
+        ).fetchone()
+        swiss_settings = connection.execute(
+            """
+            SELECT
+                enabled,
+                deadline_at,
+                direct_qualifier_count,
+                elimination_qualifier_count
+            FROM swiss_stage_prediction_settings
+            WHERE contest_id = ?
+            """,
+            (result.contest.id,),
+        ).fetchone()
+        match_count = connection.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+
+    assert dict(contest) == {
+        "template_key": "champions_league_2026_27",
+        "champion_prediction_points": 5,
+    }
+    assert dict(competition) == {
+        "name": "Лига чемпионов",
+        "season": "2026/27",
+        "competition_type": "champions_league",
+    }
+    assert dict(scoring_rule_set) == {
+        "exact_score_points": 3,
+        "goal_difference_points": 2,
+        "outcome_points": 1,
+        "advancing_team_points": 1,
+    }
+    assert dict(swiss_settings) == {
+        "enabled": 0,
+        "deadline_at": None,
+        "direct_qualifier_count": 8,
+        "elimination_qualifier_count": 12,
+    }
+    assert match_count == 0
 
 
 def test_contest_creation_idempotency_distinguishes_templates(tmp_path: Path) -> None:

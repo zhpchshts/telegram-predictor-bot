@@ -10,6 +10,7 @@ from aiogram.types import InputRichMessage
 from app.audit_service import AuditActor, AuditActorRole
 from app.contest_publications import render_publication_messages
 from app.contest_service import (
+    create_champions_league_2026_27_contest,
     create_world_cup_2026_contest,
     get_contest_details,
     save_match_prediction_publication_settings,
@@ -217,6 +218,112 @@ def test_swiss_result_publication_uses_route_scoring_and_is_revised(
     assert "Прямой проход: Альфа, Гамма" in corrected_text
     assert "Через стыки: Бета, Эпсилон" in corrected_text
     assert "Средняя точность: 50%" in corrected_text
+
+
+def test_champions_league_publications_use_league_phase_categories(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "champions-league.db"
+    initialize_database(database_path)
+    contest = create_champions_league_2026_27_contest(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        chat_title="Тестовый чат",
+        telegram_user_id=ADMIN_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        contest_name="Лига чемпионов 2026/27",
+        idempotency_key="ucl-publications-contest",
+        audit_actor=AUDIT_ACTOR,
+    ).contest
+    save_tournament_teams(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        team_names=[f"Команда {number:02d}" for number in range(1, 37)],
+        audit_actor=AUDIT_ACTOR,
+    )
+    save_swiss_stage_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        enabled=True,
+        deadline_at=DEADLINE,
+        direct_qualifier_count=8,
+        elimination_qualifier_count=12,
+        audit_actor=AUDIT_ACTOR,
+        now_utc=OPEN_TIME,
+    )
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        now_utc=OPEN_TIME,
+    )
+    team_ids = [team.id for team in details.swiss_stage_prediction.candidates]
+    save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=202,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=team_ids[:8],
+        elimination_team_ids=team_ids[8:20],
+        now_utc=OPEN_TIME,
+    )
+    save_swiss_stage_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        direct_team_ids=[*team_ids[:6], team_ids[8], team_ids[20]],
+        elimination_team_ids=[
+            *team_ids[9:19],
+            team_ids[7],
+            team_ids[21],
+        ],
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_TIME,
+    )
+
+    predictions_text = "".join(
+        render_publication_messages(
+            database_path=database_path,
+            publication=_publication(
+                publication_id=1,
+                contest_id=contest.id,
+                publication_type="swiss_predictions",
+            ),
+            now_utc=CLOSED_TIME,
+        )
+    )
+    result_text = "".join(
+        render_publication_messages(
+            database_path=database_path,
+            publication=_publication(
+                publication_id=2,
+                contest_id=contest.id,
+                publication_type="swiss_result",
+            ),
+            now_utc=CLOSED_TIME,
+        )
+    )
+
+    assert "Прогнозы на лиговый этап" in predictions_text
+    assert "<b>Напрямую в 1/8</b>" in predictions_text
+    assert "1. Команда 01 — 100%" in predictions_text
+    assert "<b>Вылетят после лигового этапа</b>" in predictions_text
+    assert "1. Команда 09 — 100%" in predictions_text
+    assert "Команда 21" not in predictions_text
+    assert "Итоги лигового этапа" in result_text
+    assert "Напрямую в 1/8: Команда 01" in result_text
+    assert "Вылетели после лигового этапа: Команда 08" in result_text
+    assert "Средняя точность: 80%" in result_text
+    assert "проход" not in result_text.lower()
+    assert "прошедш" not in result_text.lower()
+    assert "швейцарский этап" not in (predictions_text + result_text).lower()
 
 
 def test_swiss_publications_are_not_created_while_master_switch_is_disabled(

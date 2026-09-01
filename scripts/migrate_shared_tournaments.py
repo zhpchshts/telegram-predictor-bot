@@ -18,6 +18,7 @@ from app.scoring_service import (
 TOURNAMENT_NAMES = {
     "world_cup_2026": "Чемпионат мира 2026",
     "the_international_2026": "The International 2026",
+    "champions_league_2026_27": "Лига чемпионов 2026/27",
 }
 
 
@@ -559,9 +560,7 @@ def _analyze_tournament_consistency(
         if len({item["swiss_direct_qualifier_count"] for item in snapshots}) > 1:
             conflicts.append(f"{template_key}: лимиты прямого прохода различаются.")
         if len({item["swiss_elimination_qualifier_count"] for item in snapshots}) > 1:
-            conflicts.append(
-                f"{template_key}: лимиты прохода через стыковой раунд различаются."
-            )
+            conflicts.append(f"{template_key}: лимиты второй категории различаются.")
         swiss_results = {
             item["swiss_stage_result_selections"]
             for item in snapshots

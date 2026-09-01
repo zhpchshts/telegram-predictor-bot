@@ -1009,6 +1009,10 @@ def test_management_contest_list_is_minimal_and_scoped_to_launch_chat(
             "key": "the_international_2026",
             "label": "The International 2026",
         },
+        {
+            "key": "champions_league_2026_27",
+            "label": "Лига чемпионов 2026/27",
+        },
     ]
     assert response_data["chat_settings"] == {"app_button_text": "Открыть Клевер"}
     contests = response_data["contests"]
@@ -2473,7 +2477,7 @@ def test_create_contest_requires_idempotency_key(
     }
 
 
-def test_template_catalog_is_empty_after_2026_seasons(
+def test_template_catalog_can_be_empty_between_seasons(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -2500,6 +2504,45 @@ def test_template_catalog_is_empty_after_2026_seasons(
     assert management_response.json()["contest_templates"] == []
     assert shared_response.status_code == 200
     assert shared_response.json()["contest_templates"] == []
+
+
+def test_production_template_catalog_contains_only_current_champions_league(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    monkeypatch.setattr(
+        tma_api,
+        "CREATABLE_TEMPLATE_KEYS",
+        frozenset({"champions_league_2026_27"}),
+    )
+    monkeypatch.setenv("SHARED_TOURNAMENT_ADMIN_IDS", "123")
+    client = TestClient(create_app())
+
+    management_response = client.get(
+        "/api/tma/management/contests",
+        headers=build_tma_headers(),
+    )
+    shared_response = client.get(
+        "/api/tma/shared-tournaments",
+        headers=build_tma_headers(),
+    )
+
+    expected = [
+        {
+            "key": "champions_league_2026_27",
+            "label": "Лига чемпионов 2026/27",
+        }
+    ]
+    assert management_response.status_code == 200
+    assert management_response.json()["contest_templates"] == expected
+    assert shared_response.status_code == 200
+    assert shared_response.json()["contest_templates"] == expected
 
 
 @pytest.mark.parametrize(
@@ -2718,6 +2761,52 @@ def test_create_contest_creates_the_international_2026_when_template_is_enabled(
         ).fetchone()
 
     assert contest["template_key"] == "the_international_2026"
+
+
+def test_create_contest_creates_ucl_with_eight_direct_plus_twelve_eliminated(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="create-ucl-contest-1"),
+        json={
+            "name": "Лига чемпионов 2026/27",
+            "template_key": "champions_league_2026_27",
+        },
+    )
+
+    assert response.status_code == 201
+    contest_data = response.json()["contest"]
+    assert contest_data["template_key"] == "champions_league_2026_27"
+    details_response = client.get(
+        f"/api/tma/contests/{contest_data['id']}",
+        headers=build_tma_headers(),
+    )
+    assert details_response.status_code == 200
+    details = details_response.json()["contest"]
+    assert details["matches"] == []
+    assert details["swiss_stage_prediction"] == {
+        "is_enabled": False,
+        "deadline_at": None,
+        "direct_qualifier_count": 8,
+        "elimination_qualifier_count": 12,
+        "candidates": [],
+        "prediction": None,
+        "actual_result": None,
+        "is_open": False,
+        "settings_locked": False,
+        "awarded_points": None,
+        "awards": [],
+    }
 
 
 def test_create_contest_reuses_result_for_same_idempotency_key(

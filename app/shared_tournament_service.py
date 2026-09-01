@@ -22,7 +22,16 @@ from app.scoring_service import (
 )
 
 
-SUPPORTED_TEMPLATE_KEYS = frozenset({"world_cup_2026", "the_international_2026"})
+CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY = "champions_league_2026_27"
+CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT = 8
+CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT = 12
+SUPPORTED_TEMPLATE_KEYS = frozenset(
+    {
+        "world_cup_2026",
+        "the_international_2026",
+        CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY,
+    }
+)
 
 
 class SharedTournamentNotFoundError(ValueError):
@@ -212,16 +221,24 @@ def create_shared_tournament(
                 ),
             ).lastrowid
         )
+        champion_points, swiss_direct_count, swiss_elimination_count = (
+            _shared_template_defaults(normalized_template_key)
+        )
         connection.execute(
             """
             INSERT INTO shared_tournament_settings (
-                shared_tournament_id, champion_prediction_points
+                shared_tournament_id,
+                champion_prediction_points,
+                swiss_direct_qualifier_count,
+                swiss_elimination_qualifier_count
             )
-            VALUES (?, ?)
+            VALUES (?, ?, ?, ?)
             """,
             (
                 tournament_id,
-                4 if normalized_template_key == "the_international_2026" else 5,
+                champion_points,
+                swiss_direct_count,
+                swiss_elimination_count,
             ),
         )
         _record_event(
@@ -299,15 +316,18 @@ def archive_shared_tournament(
                 )
 
         if bool(settings["swiss_stage_prediction_enabled"]):
+            stage_name, stage_genitive = _shared_stage_terms(
+                str(tournament_row["template_key"])
+            )
             swiss_deadline = settings["swiss_stage_prediction_deadline_at"]
             if swiss_deadline is None:
                 raise SharedTournamentCompletionUnavailableError(
-                    "Сначала укажите дедлайн прогноза на швейцарский этап."
+                    f"Сначала укажите дедлайн прогноза на {stage_name}."
                 )
             if _parse_datetime(str(swiss_deadline)) > resolved_now:
                 raise SharedTournamentCompletionUnavailableError(
                     "Общий турнир можно завершить после закрытия прогноза "
-                    "на швейцарский этап."
+                    f"на {stage_name}."
                 )
             direct_ids, elimination_ids = _get_shared_swiss_result_ids(
                 connection, shared_tournament_id=shared_tournament_id
@@ -316,7 +336,7 @@ def archive_shared_tournament(
                 elimination_ids
             ) != int(settings["swiss_elimination_qualifier_count"]):
                 raise SharedTournamentCompletionUnavailableError(
-                    "Сначала укажите фактические итоги швейцарского этапа."
+                    f"Сначала укажите фактические итоги {stage_genitive}."
                 )
 
         updated = connection.execute(
@@ -503,6 +523,15 @@ def save_shared_tournament_teams(
         settings_row = _get_shared_settings_row(
             connection, shared_tournament_id=shared_tournament_id
         )
+        if (
+            tournament_row["template_key"] == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY
+            and bool(settings_row["swiss_stage_prediction_enabled"])
+            and len(normalized_names) != 36
+        ):
+            raise ValueError(
+                "Для включённого прогноза на лиговый этап Лиги чемпионов "
+                "нужно сохранить ровно 36 команд."
+            )
         if bool(settings_row["swiss_stage_prediction_enabled"]) and (
             int(settings_row["swiss_direct_qualifier_count"])
             + int(settings_row["swiss_elimination_qualifier_count"])
@@ -1429,10 +1458,7 @@ def save_shared_swiss_settings(
     )
     elimination_count = _normalize_positive_integer(
         elimination_qualifier_count,
-        field_name="Количество проходов через элиминейшн-раунд",
-    )
-    normalized_deadline = _normalize_optional_deadline(
-        deadline_at, enabled=enabled, field_name="прогноза на швейцарский этап"
+        field_name="Количество команд второй категории",
     )
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -1440,6 +1466,22 @@ def save_shared_swiss_settings(
         tournament_row = _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
         )
+        stage_name, stage_genitive = _shared_stage_terms(
+            str(tournament_row["template_key"])
+        )
+        normalized_deadline = _normalize_optional_deadline(
+            deadline_at,
+            enabled=enabled,
+            field_name=f"прогноза на {stage_name}",
+        )
+        if tournament_row["template_key"] == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY and (
+            direct_count != CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT
+            or elimination_count != CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT
+        ):
+            raise ValueError(
+                "Для Лиги чемпионов выберите 8 команд напрямую в 1/8 "
+                "и 12 команд, которые вылетят после лигового этапа."
+            )
         settings = _get_shared_settings_row(
             connection, shared_tournament_id=shared_tournament_id
         )
@@ -1448,16 +1490,24 @@ def save_shared_swiss_settings(
         )
         if enabled and team_count == 0:
             raise ValueError("Сначала добавьте команды турнира.")
+        if (
+            enabled
+            and tournament_row["template_key"] == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY
+            and team_count != 36
+        ):
+            raise ValueError(
+                "Для лигового этапа Лиги чемпионов добавьте ровно 36 команд."
+            )
         if enabled and direct_count + elimination_count > team_count:
             raise ValueError(
-                "Сумма лимитов швейцарского этапа не может превышать "
+                f"Сумма лимитов {stage_genitive} не может превышать "
                 "количество команд турнира."
             )
         _validate_deadline_change(
             previous_deadline=settings["swiss_stage_prediction_deadline_at"],
             new_deadline=normalized_deadline,
             now_utc=resolved_now,
-            field_name="прогноза на швейцарский этап",
+            field_name=f"прогноза на {stage_name}",
         )
         non_deadline_changed = any(
             (
@@ -1470,7 +1520,7 @@ def save_shared_swiss_settings(
             connection, shared_tournament_id=shared_tournament_id
         ):
             raise SharedTournamentSettingsLockedError(
-                "Настройки швейцарского этапа нельзя изменить после первого "
+                f"Настройки {stage_genitive} нельзя изменить после первого "
                 "прогноза или результата; до дедлайна можно менять только дедлайн."
             )
         if (
@@ -1604,17 +1654,20 @@ def save_shared_swiss_result(
         tournament_row = _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
         )
+        stage_name, _stage_genitive = _shared_stage_terms(
+            str(tournament_row["template_key"])
+        )
         settings = _get_shared_settings_row(
             connection, shared_tournament_id=shared_tournament_id
         )
         if not bool(settings["swiss_stage_prediction_enabled"]):
             raise SharedTournamentResultUnavailableError(
-                "Сначала включите прогноз на швейцарский этап."
+                f"Сначала включите прогноз на {stage_name}."
             )
         _require_deadline_passed(
             settings["swiss_stage_prediction_deadline_at"],
             now_utc=resolved_now,
-            field_name="прогноза на швейцарский этап",
+            field_name=f"прогноза на {stage_name}",
         )
         _validate_shared_selection(
             connection,
@@ -2520,15 +2573,23 @@ def _get_shared_settings_row(
     ).fetchone()
     if tournament is None:
         raise SharedTournamentNotFoundError("Общий турнир не найден.")
+    champion_points, swiss_direct_count, swiss_elimination_count = (
+        _shared_template_defaults(str(tournament["template_key"]))
+    )
     connection.execute(
         """
         INSERT INTO shared_tournament_settings (
-            shared_tournament_id, champion_prediction_points
-        ) VALUES (?, ?)
+            shared_tournament_id,
+            champion_prediction_points,
+            swiss_direct_qualifier_count,
+            swiss_elimination_qualifier_count
+        ) VALUES (?, ?, ?, ?)
         """,
         (
             shared_tournament_id,
-            4 if str(tournament["template_key"]) == "the_international_2026" else 5,
+            champion_points,
+            swiss_direct_count,
+            swiss_elimination_count,
         ),
     )
     row = connection.execute(
@@ -2901,6 +2962,23 @@ def _normalize_template_key(value: str) -> str:
     if value not in SUPPORTED_TEMPLATE_KEYS:
         raise ValueError("Неизвестный шаблон общего турнира.")
     return value
+
+
+def _shared_template_defaults(template_key: str) -> tuple[int, int, int]:
+    champion_points = 4 if template_key == "the_international_2026" else 5
+    if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
+        return (
+            champion_points,
+            CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT,
+            CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT,
+        )
+    return champion_points, 3, 5
+
+
+def _shared_stage_terms(template_key: str) -> tuple[str, str]:
+    if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
+        return "лиговый этап", "лигового этапа"
+    return "швейцарский этап", "швейцарского этапа"
 
 
 def _normalize_team_names(values: list[str]) -> tuple[str, ...]:

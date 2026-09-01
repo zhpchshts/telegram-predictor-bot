@@ -199,6 +199,7 @@ def _load_contest_options(
         SELECT
             contest_ids.contest_id,
             contests.name AS current_name,
+            contests.template_key AS current_template_key,
             ranked_snapshots.event_type AS latest_event_type,
             ranked_snapshots.audit_event_id,
             ranked_snapshots.before_state,
@@ -247,17 +248,23 @@ def _load_contest_options(
             _state_value(after_state, "name"),
             _state_value(before_state, "name"),
         )
+        template_key = _first_non_empty_string(
+            row["current_template_key"],
+            _state_value(after_state, "template_key"),
+            _state_value(before_state, "template_key"),
+        )
         is_deleted = (
             row["current_name"] is None
             and row["latest_event_type"] == AuditEventType.CONTEST_DELETED.value
         )
-        options.append(
-            {
-                "id": contest_id,
-                "name": name or f"Конкурс #{contest_id}",
-                "is_deleted": is_deleted,
-            }
-        )
+        option: dict[str, object] = {
+            "id": contest_id,
+            "name": name or f"Конкурс #{contest_id}",
+            "is_deleted": is_deleted,
+        }
+        if template_key is not None:
+            option["template_key"] = template_key
+        options.append(option)
     return options
 
 
@@ -508,10 +515,18 @@ def _build_entity(
             "is_deleted": event["event_type"] == AuditEventType.MATCH_DELETED.value,
         }
     if entity_type == AuditEntityType.SWISS_STAGE_PREDICTION.value:
+        is_champions_league = (
+            contest is not None
+            and contest.get("template_key") == "champions_league_2026_27"
+        )
         return {
             "id": entity_id,
             "type": entity_type,
-            "display_name": "Итоги швейцарского этапа",
+            "display_name": (
+                "Итоги лигового этапа"
+                if is_champions_league
+                else "Итоги швейцарского этапа"
+            ),
             "is_deleted": False,
         }
     target_display = _user_display_name(target_user, target_user_id)

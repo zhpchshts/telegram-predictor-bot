@@ -34,6 +34,9 @@ class PredictionReminderMessageTooLongError(RuntimeError):
     pass
 
 
+CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY = "champions_league_2026_27"
+
+
 @dataclass(frozen=True, slots=True)
 class PredictionReminderMessage:
     telegram_chat_id: int
@@ -80,6 +83,7 @@ def build_prediction_reminder_message(
             """
             SELECT
                 contests.name,
+                contests.template_key,
                 contests.is_active,
                 contests.champion_prediction_enabled,
                 contests.champion_prediction_deadline_at,
@@ -139,8 +143,13 @@ def build_prediction_reminder_message(
 
     tournament_lines: list[str] = []
     if swiss_deadline is not None:
+        swiss_stage_name = (
+            "лиговый этап"
+            if contest["template_key"] == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY
+            else "швейцарский этап"
+        )
         tournament_lines.append(
-            "<p>🔮 <b>Прогноз на швейцарский этап</b><br>"
+            f"<p>🔮 <b>Прогноз на {swiss_stage_name}</b><br>"
             f"Дедлайн: {_format_datetime(swiss_deadline)}</p>"
         )
         reminder_count += 1

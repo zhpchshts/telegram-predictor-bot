@@ -10,10 +10,12 @@ import pytest
 
 from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
+    create_champions_league_2026_27_contest,
     create_match,
     create_world_cup_2026_contest,
     save_champion_prediction_settings,
     save_swiss_stage_prediction_settings,
+    save_tournament_teams,
 )
 from app.database import database_connection, initialize_database
 from app.prediction_reminders import (
@@ -127,6 +129,55 @@ def test_publish_sends_exactly_one_prebuilt_rich_message(tmp_path: Path) -> None
     assert rich_message.html == message.html
     assert rich_message.skip_entity_detection is True
     assert bot.sent[0]["reply_markup"] is reply_markup
+
+
+def test_champions_league_reminder_calls_swiss_prediction_league_phase(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "champions-league.db"
+    initialize_database(database_path)
+    contest = create_champions_league_2026_27_contest(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        chat_title="Тестовый чат",
+        telegram_user_id=USER_ID,
+        first_name="Анна",
+        last_name=None,
+        username="anna",
+        contest_name="Лига чемпионов 2026/27",
+        idempotency_key="ucl-reminder-contest",
+        audit_actor=AUDIT_ACTOR,
+    ).contest
+    save_tournament_teams(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        team_names=[f"Команда {number:02d}" for number in range(1, 37)],
+        audit_actor=AUDIT_ACTOR,
+    )
+    save_swiss_stage_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        enabled=True,
+        deadline_at="2030-01-02T12:00:00Z",
+        direct_qualifier_count=8,
+        elimination_qualifier_count=12,
+        audit_actor=AUDIT_ACTOR,
+        now_utc=NOW,
+    )
+
+    message = build_prediction_reminder_message(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        now_utc=NOW,
+    )
+
+    assert message.reminder_count == 1
+    assert message.match_count == 0
+    assert "Прогноз на лиговый этап" in message.html
+    assert "швейцарский этап" not in message.html.lower()
 
 
 def test_closed_predictions_and_started_matches_are_not_published(
