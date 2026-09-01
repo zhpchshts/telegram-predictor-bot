@@ -23,6 +23,25 @@ _CONTEST_COLUMNS = (
     "match_prediction_publication_enabled_at",
     "created_at",
 )
+_CONTEST_COLUMNS_TEMPLATE_LAST = (
+    "id",
+    "chat_id",
+    "name",
+    "slug",
+    "is_active",
+    "champion_prediction_enabled",
+    "champion_prediction_deadline_at",
+    "champion_prediction_points",
+    "champion_team_id",
+    "match_prediction_publication_enabled",
+    "match_prediction_publication_enabled_at",
+    "created_at",
+    "template_key",
+)
+_CONTEST_COLUMN_LAYOUTS = (
+    _CONTEST_COLUMNS,
+    _CONTEST_COLUMNS_TEMPLATE_LAST,
+)
 _SHARED_TOURNAMENT_COLUMNS = (
     "id",
     "name",
@@ -71,16 +90,18 @@ def migrate_database(database_path: Path) -> None:
         connection.execute("PRAGMA foreign_keys = OFF")
         connection.execute("BEGIN IMMEDIATE")
         try:
-            _require_supported_schema(connection)
+            contest_columns, shared_tournament_columns = _require_supported_schema(
+                connection
+            )
             _expand_template_check(
                 connection,
                 table_name="contests",
-                expected_columns=_CONTEST_COLUMNS,
+                expected_columns=contest_columns,
             )
             _expand_template_check(
                 connection,
                 table_name="shared_tournaments",
-                expected_columns=_SHARED_TOURNAMENT_COLUMNS,
+                expected_columns=shared_tournament_columns,
             )
             _normalize_legacy_ucl_swiss_limits(connection)
             _require_expected_schema(connection)
@@ -98,22 +119,25 @@ def migrate_database(database_path: Path) -> None:
         connection.close()
 
 
-def _require_supported_schema(connection: sqlite3.Connection) -> None:
-    _require_expected_columns(
+def _require_supported_schema(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    contest_columns = _require_supported_columns(
         connection,
         table_name="contests",
-        expected_columns=_CONTEST_COLUMNS,
+        supported_layouts=_CONTEST_COLUMN_LAYOUTS,
     )
-    _require_expected_columns(
+    shared_tournament_columns = _require_supported_columns(
         connection,
         table_name="shared_tournaments",
-        expected_columns=_SHARED_TOURNAMENT_COLUMNS,
+        supported_layouts=(_SHARED_TOURNAMENT_COLUMNS,),
     )
     _template_check_state(_table_sql(connection, "contests"), table_name="contests")
     _template_check_state(
         _table_sql(connection, "shared_tournaments"),
         table_name="shared_tournaments",
     )
+    return contest_columns, shared_tournament_columns
 
 
 def _expand_template_check(
@@ -526,18 +550,19 @@ def _require_consistent_ucl_linked_limits(connection: sqlite3.Connection) -> Non
         )
 
 
-def _require_expected_columns(
+def _require_supported_columns(
     connection: sqlite3.Connection,
     *,
     table_name: str,
-    expected_columns: tuple[str, ...],
-) -> None:
+    supported_layouts: tuple[tuple[str, ...], ...],
+) -> tuple[str, ...]:
     actual_columns = _column_names(connection, table_name)
-    if actual_columns != expected_columns:
+    if actual_columns not in supported_layouts:
         raise RuntimeError(
             f"Unexpected {table_name} schema; refusing to rebuild the table. "
-            f"Expected columns {expected_columns!r}, found {actual_columns!r}."
+            f"Expected one of {supported_layouts!r}, found {actual_columns!r}."
         )
+    return actual_columns
 
 
 def _column_names(

@@ -29,9 +29,6 @@ CREATE TABLE contests (
     chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
-    template_key TEXT NOT NULL DEFAULT 'world_cup_2026' CHECK (
-        template_key IN ('world_cup_2026', 'the_international_2026')
-    ),
     is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
     champion_prediction_enabled INTEGER NOT NULL DEFAULT 0
         CHECK (champion_prediction_enabled IN (0, 1)),
@@ -42,7 +39,10 @@ CREATE TABLE contests (
     match_prediction_publication_enabled INTEGER NOT NULL DEFAULT 0
         CHECK (match_prediction_publication_enabled IN (0, 1)),
     match_prediction_publication_enabled_at TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    template_key TEXT NOT NULL DEFAULT 'world_cup_2026' CHECK (
+        template_key IN ('world_cup_2026', 'the_international_2026')
+    )
 );
 
 CREATE INDEX idx_contests_active_name
