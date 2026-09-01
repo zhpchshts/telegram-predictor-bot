@@ -1544,6 +1544,111 @@ def test_save_match_result_creates_corrects_recalculates_scores_and_writes_event
     ]
 
 
+def test_single_football_match_scores_only_the_90_minute_result(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    contest = create_champions_league_contest(database_path=database_path).contest
+    match = create_test_match(
+        database_path=database_path,
+        contest_id=contest.id,
+        home_team_name="Реал Мадрид",
+        away_team_name="Ливерпуль",
+    ).match
+
+    # Both participants pick the eventual winner, but only the first predicts
+    # the 1:1 score after 90 minutes.  The second score resembles a possible
+    # 2:1 result after extra time and must not receive football score points.
+    save_match_prediction(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        match_id=match.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        predicted_home_score=1,
+        predicted_away_score=1,
+        predicted_advancing_team_id=match.home_team_id,
+        now_utc=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+    )
+    save_match_prediction(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        match_id=match.id,
+        telegram_user_id=456,
+        first_name="Second",
+        last_name=None,
+        username="second",
+        predicted_home_score=2,
+        predicted_away_score=1,
+        predicted_advancing_team_id=match.home_team_id,
+        now_utc=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+    )
+
+    saved = save_match_result(
+        database_path=database_path,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+        contest_id=contest.id,
+        match_id=match.id,
+        telegram_user_id=TELEGRAM_USER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        home_score=1,
+        away_score=1,
+        advancing_team_id=match.home_team_id,
+        audit_actor=AUDIT_ACTOR,
+        now_utc=datetime(2026, 6, 11, 18, 0, tzinfo=timezone.utc),
+    )
+
+    with create_connection(database_path) as connection:
+        match_awards = connection.execute(
+            """
+            SELECT
+                users.telegram_user_id,
+                match_prediction_scores.score_type,
+                match_prediction_scores.points
+            FROM match_prediction_scores
+            JOIN match_predictions
+                ON match_predictions.id =
+                    match_prediction_scores.match_prediction_id
+            JOIN users ON users.id = match_predictions.user_id
+            ORDER BY users.telegram_user_id
+            """
+        ).fetchall()
+        advancing_awards = connection.execute(
+            """
+            SELECT users.telegram_user_id, tie_prediction_scores.points
+            FROM tie_prediction_scores
+            JOIN tie_predictions
+                ON tie_predictions.id = tie_prediction_scores.tie_prediction_id
+            JOIN users ON users.id = tie_predictions.user_id
+            WHERE tie_predictions.tie_id = ?
+            ORDER BY users.telegram_user_id
+            """,
+            (match.tie_id,),
+        ).fetchall()
+
+    assert saved.result.home_score == 1
+    assert saved.result.away_score == 1
+    assert saved.result.advancing_team_id == match.home_team_id
+    assert [dict(row) for row in match_awards] == [
+        {
+            "telegram_user_id": TELEGRAM_USER_ID,
+            "score_type": "exact_score",
+            "points": 3,
+        }
+    ]
+    assert [dict(row) for row in advancing_awards] == [
+        {"telegram_user_id": TELEGRAM_USER_ID, "points": 1},
+        {"telegram_user_id": 456, "points": 1},
+    ]
+
+
 def test_save_match_result_exact_retry_is_a_side_effect_free_noop(
     tmp_path: Path,
 ) -> None:

@@ -222,6 +222,13 @@ def calculate_match_score_award(
     goal_difference_points: int,
     outcome_points: int,
 ) -> MatchScoreAward | None:
+    """Calculate football score points from the two 90-minute scores.
+
+    Whether the team later advances after extra time or penalties is scored
+    independently by ``recalculate_tie_prediction_scores`` and must not alter
+    either score passed here.
+    """
+
     if (
         predicted_home_score == actual_home_score
         and predicted_away_score == actual_away_score

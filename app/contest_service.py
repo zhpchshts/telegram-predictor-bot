@@ -56,6 +56,20 @@ CHAMPIONS_LEAGUE_2026_27_SEASON = "2026/27"
 CHAMPIONS_LEAGUE_2026_27_COMPETITION_TYPE = "champions_league"
 CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT = 8
 CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT = 12
+CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS: dict[str, tuple[str, int, str]] = {
+    "playoff": ("Стыковые матчи", 10, "knockout"),
+    "round_of_16": ("1/8 финала", 20, "knockout"),
+    "quarterfinal": ("1/4 финала", 30, "knockout"),
+    "semifinal": ("1/2 финала", 40, "knockout"),
+    "final": ("Финал", 50, "final"),
+}
+CHAMPIONS_LEAGUE_KNOCKOUT_ROUND_CAPACITIES: dict[str, int] = {
+    "playoff": 8,
+    "round_of_16": 8,
+    "quarterfinal": 4,
+    "semifinal": 2,
+    "final": 1,
+}
 SwissStageSelectionMode = Literal["exact", "up_to_limits"]
 
 
@@ -230,6 +244,16 @@ class ContestCreationResult:
 
 @dataclass(frozen=True, slots=True)
 class MatchPrediction:
+    """A saved prediction.
+
+    For football templates, ``home_score`` and ``away_score`` always mean the
+    score after 90 minutes.  The team that advances or wins is stored
+    separately, including when extra time or penalties are needed after a
+    90-minute draw.  The field names are retained for API and database
+    compatibility.  The International templates use the same fields for map
+    wins in a series.
+    """
+
     home_score: int
     away_score: int
     advancing_team_id: int | None
@@ -237,6 +261,12 @@ class MatchPrediction:
 
 @dataclass(frozen=True, slots=True)
 class MatchResult:
+    """A saved result with football scores fixed to the 90-minute score.
+
+    ``advancing_team_id`` is the separate outcome of the knockout tie.  The
+    score fields represent map wins instead for The International templates.
+    """
+
     home_score: int
     away_score: int
     advancing_team_id: int | None
@@ -433,6 +463,10 @@ class MatchSummary:
     away_team_name: str
     starts_at_utc: str
     status: str
+    round_key: str | None
+    round_name: str | None
+    round_position: int | None
+    bracket_position: int | None
     result: MatchResult | None
     prediction: MatchPrediction | None
     prediction_score: MatchPredictionScore | None
@@ -450,6 +484,10 @@ class TwoLeggedTieSummary:
     second_leg_match_id: int
     prediction_deadline_at: str
     is_prediction_open: bool
+    round_key: str | None
+    round_name: str | None
+    round_position: int | None
+    bracket_position: int | None
     result: TwoLeggedTieResult | None
     prediction: TwoLeggedTiePrediction | None
     awarded_points: int | None
@@ -606,6 +644,10 @@ def get_contest_details(
                 away_team.name AS away_team_name,
                 matches.starts_at_utc,
                 matches.status,
+                stages.stage_key AS round_key,
+                stages.name AS round_name,
+                stages.position AS round_position,
+                ties.position AS bracket_position,
                 matches.home_score_final,
                 matches.away_score_final,
                 ties.advancing_team_id,
@@ -657,6 +699,10 @@ def get_contest_details(
             SELECT
                 ties.id,
                 ties.name,
+                stages.stage_key AS round_key,
+                stages.name AS round_name,
+                stages.position AS round_position,
+                ties.position AS bracket_position,
                 ties.first_team_id,
                 first_team.name AS first_team_name,
                 ties.second_team_id,
@@ -1147,6 +1193,10 @@ def get_contest_details(
                 away_team.name AS away_team_name,
                 matches.starts_at_utc,
                 matches.status,
+                stages.stage_key AS round_key,
+                stages.name AS round_name,
+                stages.position AS round_position,
+                ties.position AS bracket_position,
                 matches.home_score_final,
                 matches.away_score_final,
                 ties.advancing_team_id,
@@ -1624,6 +1674,7 @@ def create_match(
     idempotency_key: str,
     audit_actor: AuditActor,
     best_of: int | None = None,
+    round_key: str | None = None,
 ) -> MatchCreationResult:
     normalized_home_team_id = _normalize_team_id(
         home_team_id,
@@ -1647,6 +1698,11 @@ def create_match(
             contest_id=contest_id,
         )
         _ensure_contest_is_independent(connection, contest_id=contest_id)
+        normalized_round_key = _normalize_knockout_round_key(
+            template_key=str(contest_row["template_key"]),
+            round_key=round_key,
+            is_two_legged=False,
+        )
         if contest_row["template_key"] == "the_international_2026":
             if isinstance(best_of, bool) or best_of not in (3, 5):
                 raise ValueError("Для серии The International выберите Bo3 или Bo5.")
@@ -1688,6 +1744,7 @@ def create_match(
             away_team_id=resolved_away_team_id,
             starts_at_utc=normalized_starts_at_utc,
             best_of=normalized_best_of,
+            round_key=normalized_round_key,
         )
         existing_request = connection.execute(
             """
@@ -1738,14 +1795,17 @@ def create_match(
         if competition_row is None:
             raise RuntimeError("Не удалось найти активные правила конкурса.")
 
-        stage_id, stage_name, stage_type = _get_or_create_first_stage(
+        stage_id, stage_name, stage_type = _get_or_create_stage(
             connection,
             competition_id=int(competition_row["competition_id"]),
+            round_key=normalized_round_key,
         )
         scoring_rule_set_id = int(competition_row["scoring_rule_set_id"])
         tie_position = _get_next_tie_position(
             connection,
             stage_id=stage_id,
+            round_key=normalized_round_key,
+            conflict_error_type=MatchCreationConflictError,
         )
         tie_name = f"{resolved_home_team_name} — {resolved_away_team_name}"
 
@@ -1818,6 +1878,11 @@ def create_match(
                     "position": tie_position,
                 },
                 "starts_at_utc": normalized_starts_at_utc,
+                **(
+                    {"round_key": normalized_round_key}
+                    if normalized_round_key is not None
+                    else {}
+                ),
                 **(
                     {"best_of": normalized_best_of}
                     if normalized_best_of is not None
@@ -1912,6 +1977,7 @@ def create_two_legged_tie(
     idempotency_key: str,
     audit_actor: AuditActor,
     now_utc: datetime | None = None,
+    round_key: str | None = None,
 ) -> TwoLeggedTieCreationResult:
     normalized_first_team_id = _normalize_team_id(
         first_team_id,
@@ -1931,13 +1997,6 @@ def create_two_legged_tie(
     ):
         raise ValueError("Ответный матч должен начинаться позже первого.")
     normalized_idempotency_key = _normalize_match_idempotency_key(idempotency_key)
-    request_fingerprint = _build_two_legged_tie_request_fingerprint(
-        first_team_id=normalized_first_team_id,
-        second_team_id=normalized_second_team_id,
-        first_leg_starts_at_utc=normalized_first_start,
-        second_leg_starts_at_utc=normalized_second_start,
-    )
-
     with database_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
         contest_row = _get_active_contest_row(
@@ -1951,6 +2010,18 @@ def create_two_legged_tie(
                 "Двухматчевые футбольные противостояния недоступны для "
                 "The International."
             )
+        normalized_round_key = _normalize_knockout_round_key(
+            template_key=str(contest_row["template_key"]),
+            round_key=round_key,
+            is_two_legged=True,
+        )
+        request_fingerprint = _build_two_legged_tie_request_fingerprint(
+            first_team_id=normalized_first_team_id,
+            second_team_id=normalized_second_team_id,
+            first_leg_starts_at_utc=normalized_first_start,
+            second_leg_starts_at_utc=normalized_second_start,
+            round_key=normalized_round_key,
+        )
 
         actor_user_id = _upsert_user(
             connection,
@@ -2034,12 +2105,18 @@ def create_two_legged_tie(
         ).fetchone()
         if competition_row is None:
             raise RuntimeError("Не удалось найти активные правила конкурса.")
-        stage_id, _, _ = _get_or_create_first_stage(
+        stage_id, _, _ = _get_or_create_stage(
             connection,
             competition_id=int(competition_row["competition_id"]),
+            round_key=normalized_round_key,
         )
         scoring_rule_set_id = int(competition_row["scoring_rule_set_id"])
-        tie_position = _get_next_tie_position(connection, stage_id=stage_id)
+        tie_position = _get_next_tie_position(
+            connection,
+            stage_id=stage_id,
+            round_key=normalized_round_key,
+            conflict_error_type=TwoLeggedTieCreationConflictError,
+        )
         tie_name = f"{first_team_row['name']} — {second_team_row['name']}"
         tie_id = int(
             connection.execute(
@@ -2122,6 +2199,11 @@ def create_two_legged_tie(
                 "second_leg_match_id": second_leg_match_id,
                 "second_leg_starts_at_utc": normalized_second_start,
                 "second_team_id": normalized_second_team_id,
+                **(
+                    {"round_key": normalized_round_key}
+                    if normalized_round_key is not None
+                    else {}
+                ),
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -2584,6 +2666,13 @@ def save_match_prediction(
     predicted_advancing_team_id: int | None,
     now_utc: datetime | None = None,
 ) -> MatchPredictionSaveResult:
+    """Save a match prediction.
+
+    Football score arguments are strictly the score after 90 minutes.  A
+    knockout winner or advancing team is resolved and persisted independently
+    through ``predicted_advancing_team_id``.
+    """
+
     normalized_home_score = _normalize_prediction_score(
         predicted_home_score,
         field_name="Прогноз первой команды",
@@ -2818,6 +2907,13 @@ def save_match_result(
     audit_actor: AuditActor,
     now_utc: datetime | None = None,
 ) -> MatchResultSaveResult:
+    """Save a match result.
+
+    For football templates, ``home_score`` and ``away_score`` are strictly the
+    score after 90 minutes; extra-time goals and shootout goals do not belong
+    in these values.  The eventual winner is stored separately on the tie.
+    """
+
     normalized_home_score = _normalize_match_result_score(
         home_score,
         field_name="Результат первой команды",
@@ -4919,6 +5015,10 @@ def _get_match_row(
             away_team.name AS away_team_name,
             matches.starts_at_utc,
             matches.status,
+            stages.stage_key AS round_key,
+            stages.name AS round_name,
+            stages.position AS round_position,
+            ties.position AS bracket_position,
             matches.home_score_final,
             matches.away_score_final,
             ties.first_team_id,
@@ -4961,6 +5061,10 @@ def _get_two_legged_tie_row(
         SELECT
             ties.id,
             ties.name,
+            stages.stage_key AS round_key,
+            stages.name AS round_name,
+            stages.position AS round_position,
+            ties.position AS bracket_position,
             ties.first_team_id,
             first_team.name AS first_team_name,
             ties.second_team_id,
@@ -6289,11 +6393,98 @@ def _get_or_create_first_stage(
     return stage_id, "Плей-офф", "knockout"
 
 
+def _get_or_create_stage(
+    connection,
+    *,
+    competition_id: int,
+    round_key: str | None,
+) -> tuple[int, str, str]:
+    if round_key is None:
+        return _get_or_create_first_stage(
+            connection,
+            competition_id=competition_id,
+        )
+
+    round_definition = CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS.get(round_key)
+    if round_definition is None:  # pragma: no cover - normalized by the caller
+        raise ValueError("Неизвестный раунд плей-офф Лиги чемпионов.")
+    round_name, round_position, stage_type = round_definition
+    row = connection.execute(
+        """
+        SELECT id, name, stage_type
+        FROM stages
+        WHERE competition_id = ? AND stage_key = ?
+        """,
+        (competition_id, round_key),
+    ).fetchone()
+    if row is not None:
+        return int(row["id"]), str(row["name"]), str(row["stage_type"])
+
+    stage_id = int(
+        connection.execute(
+            """
+            INSERT INTO stages (
+                competition_id, name, position, stage_type, stage_key
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                competition_id,
+                round_name,
+                round_position,
+                stage_type,
+                round_key,
+            ),
+        ).lastrowid
+    )
+    return stage_id, round_name, stage_type
+
+
+def _normalize_knockout_round_key(
+    *,
+    template_key: str,
+    round_key: str | None,
+    is_two_legged: bool,
+) -> str | None:
+    if template_key != CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key:
+        if round_key is not None:
+            raise ValueError(
+                "Названия раундов доступны только для Лиги чемпионов 2026/27."
+            )
+        return None
+
+    normalized = round_key.strip() if isinstance(round_key, str) else ""
+    if not normalized:
+        normalized = "playoff" if is_two_legged else "final"
+    if normalized not in CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS:
+        raise ValueError("Неизвестный раунд плей-офф Лиги чемпионов.")
+    if is_two_legged and normalized == "final":
+        raise ValueError("Финал Лиги чемпионов состоит из одного матча.")
+    if not is_two_legged and normalized != "final":
+        raise ValueError("Стыки, 1/8, 1/4 и 1/2 финала создаются двухматчевыми парами.")
+    return normalized
+
+
 def _get_next_tie_position(
     connection,
     *,
     stage_id: int,
+    round_key: str | None = None,
+    conflict_error_type: type[MatchCreationConflictError] = MatchCreationConflictError,
 ) -> int:
+    capacity = CHAMPIONS_LEAGUE_KNOCKOUT_ROUND_CAPACITIES.get(round_key or "")
+    if capacity is not None:
+        occupied_rows = connection.execute(
+            "SELECT position FROM ties WHERE stage_id = ?",
+            (stage_id,),
+        ).fetchall()
+        occupied_positions = {int(row["position"]) for row in occupied_rows}
+        for position in range(1, capacity + 1):
+            if position not in occupied_positions:
+                return position
+        round_name = CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS[round_key][0]
+        raise conflict_error_type(f"В раунде «{round_name}» уже заполнены все позиции.")
+
     row = connection.execute(
         """
         SELECT COALESCE(MAX(position), 0) + 1 AS next_position
@@ -6415,6 +6606,7 @@ def _build_match_request_fingerprint(
     away_team_id: int,
     starts_at_utc: str,
     best_of: int | None,
+    round_key: str | None,
 ) -> str:
     payload = json.dumps(
         {
@@ -6422,6 +6614,7 @@ def _build_match_request_fingerprint(
             "best_of": best_of,
             "home_team_id": home_team_id,
             "starts_at_utc": starts_at_utc,
+            "round_key": round_key,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -6436,6 +6629,7 @@ def _build_two_legged_tie_request_fingerprint(
     second_team_id: int,
     first_leg_starts_at_utc: str,
     second_leg_starts_at_utc: str,
+    round_key: str | None,
 ) -> str:
     payload = json.dumps(
         {
@@ -6444,6 +6638,7 @@ def _build_two_legged_tie_request_fingerprint(
             "first_team_id": first_team_id,
             "second_leg_starts_at_utc": second_leg_starts_at_utc,
             "second_team_id": second_team_id,
+            "round_key": round_key,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -6486,6 +6681,10 @@ def _two_legged_tie_summary_from_row(
             row,
             now_utc=now_utc,
         ),
+        round_key=_optional_row_string(row, "round_key"),
+        round_name=_optional_row_string(row, "round_name"),
+        round_position=_optional_row_integer(row, "round_position"),
+        bracket_position=_optional_row_integer(row, "bracket_position"),
         result=result,
         prediction=prediction,
         awarded_points=awarded_points,
@@ -6758,10 +6957,22 @@ def _match_summary_from_row(row) -> MatchSummary:
         away_team_name=str(row["away_team_name"]),
         starts_at_utc=str(row["starts_at_utc"]),
         status=str(row["status"]),
+        round_key=_optional_row_string(row, "round_key"),
+        round_name=_optional_row_string(row, "round_name"),
+        round_position=_optional_row_integer(row, "round_position"),
+        bracket_position=_optional_row_integer(row, "bracket_position"),
         result=result,
         prediction=prediction,
         prediction_score=prediction_score,
     )
+
+
+def _optional_row_string(row, key: str) -> str | None:
+    return str(row[key]) if key in row.keys() and row[key] is not None else None
+
+
+def _optional_row_integer(row, key: str) -> int | None:
+    return int(row[key]) if key in row.keys() and row[key] is not None else None
 
 
 def _match_prediction_score_from_row(
@@ -7160,6 +7371,13 @@ def _resolve_advancing_team_for_score(
     away_score: int,
     field_name: str,
 ) -> int:
+    """Validate the separate series/tie winner against its score.
+
+    For football, ``home_score`` and ``away_score`` are the 90-minute score.
+    A draw therefore leaves either participating team eligible to advance;
+    otherwise the selected team must be the 90-minute winner.
+    """
+
     home_team_id = int(match_row["home_team_id"])
     away_team_id = int(match_row["away_team_id"])
 

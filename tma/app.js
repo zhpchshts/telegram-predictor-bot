@@ -11,6 +11,46 @@ const PREDICTION_FLUSH_EVENT = "tma:prediction-flush";
 const PREDICTION_SAVE_WAIT_TIMEOUT_MS = 15_000;
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
 const CONTEST_NAME_MAX_LENGTH = 80;
+const CHAMPIONS_LEAGUE_PLAYOFF_ROUNDS = Object.freeze([
+  Object.freeze({
+    key: "playoff",
+    name: "Стыковые матчи",
+    position: 10,
+    format: "two_legged",
+    nodeCount: 8,
+  }),
+  Object.freeze({
+    key: "round_of_16",
+    name: "1/8 финала",
+    position: 20,
+    format: "two_legged",
+    nodeCount: 8,
+  }),
+  Object.freeze({
+    key: "quarterfinal",
+    name: "1/4 финала",
+    position: 30,
+    format: "two_legged",
+    nodeCount: 4,
+  }),
+  Object.freeze({
+    key: "semifinal",
+    name: "1/2 финала",
+    position: 40,
+    format: "two_legged",
+    nodeCount: 2,
+  }),
+  Object.freeze({
+    key: "final",
+    name: "Финал",
+    position: 50,
+    format: "single",
+    nodeCount: 1,
+  }),
+]);
+const CHAMPIONS_LEAGUE_PLAYOFF_ROUNDS_BY_KEY = new Map(
+  CHAMPIONS_LEAGUE_PLAYOFF_ROUNDS.map((round) => [round.key, round]),
+);
 const CONTEST_TABS = [
   { id: "matches", label: "Матчи" },
   { id: "tournament", label: "Турнир" },
@@ -817,7 +857,7 @@ function createContestFormCard(bootstrap, state) {
     if (isTi) {
       hint.textContent = "Серии плей-офф: 2 балла за точный счёт, 1 — за правильного победителя.";
     } else if (isWorldCup) {
-      hint.textContent = "3 очка за точный счёт, 2 — за разницу голов, 1 — за исход.";
+      hint.textContent = "Счёт строго после 90 минут: 3 очка за точный счёт, 2 — за разницу голов, 1 — за исход.";
     } else if (isChampionsLeague) {
       hint.textContent = "Общий этап без матчей: выберите 8 команд напрямую в 1/8 и 12 команд на вылет. Остальные неявно относятся к стыкам. За прямой выход начисляется 2 балла, за вылет — 1; максимум — 28 баллов.";
     } else {
@@ -1826,7 +1866,7 @@ function formatLeaderboardMatchScore(match, score) {
     score?.advancing_team_id,
   );
   return advancingTeamName
-    ? `${scoreText} · проходит ${advancingTeamName}`
+    ? `${scoreText} · ${isFinalRoundEntity(match) ? "победитель" : "проходит"} ${advancingTeamName}`
     : scoreText;
 }
 
@@ -2113,7 +2153,10 @@ function createContestRulesCard(
   } else {
     body.append(
       createElement("p", {
-        text: "Счёт учитывается после 90 или 120 минут. Голы серии пенальти в него не входят.",
+        text: (
+          "Счёт учитывается строго после 90 минут. Голы дополнительного "
+          + "времени и серии пенальти в него не входят."
+        ),
       }),
       createElement("p", {
         text: "Прогноз на матч можно изменить до начала матча.",
@@ -2123,9 +2166,9 @@ function createContestRulesCard(
       body.append(
         createElement("p", {
           text: (
-            "Для матчей двухматчевой пары действует отдельное правило: "
-            + "учитывается только счёт после 90 минут. Дополнительное время "
-            + "и пенальти определяют только команду, которая прошла дальше."
+            "В двухматчевой паре дополнительное время и пенальти ответной "
+            + "игры не меняют счёт этого матча и используются только для "
+            + "определения команды, которая прошла дальше."
           ),
         }),
       );
@@ -2219,6 +2262,321 @@ function getTwoLeggedTies(container) {
   return Array.isArray(container?.two_legged_ties)
     ? container.two_legged_ties
     : [];
+}
+
+function getPlayoffRoundDefinition(roundKey) {
+  return CHAMPIONS_LEAGUE_PLAYOFF_ROUNDS_BY_KEY.get(roundKey) || null;
+}
+
+function getPlayoffRoundName(round) {
+  if (typeof round?.name === "string" && round.name.trim()) {
+    return round.name.trim();
+  }
+  return getPlayoffRoundDefinition(round?.key)?.name || "Плей-офф";
+}
+
+function getPlayoffRoundPosition(round) {
+  if (Number.isSafeInteger(round?.position)) {
+    return round.position;
+  }
+  return getPlayoffRoundDefinition(round?.key)?.position
+    ?? Number.MAX_SAFE_INTEGER;
+}
+
+function getPlayoffRoundFormat(round) {
+  if (round?.format === "single" || round?.format === "two_legged") {
+    return round.format;
+  }
+  return getPlayoffRoundDefinition(round?.key)?.format || "two_legged";
+}
+
+function createPlayoffRoundSelect({
+  id,
+  name,
+  selectedRoundKey = null,
+  includeFinal = true,
+}) {
+  const select = document.createElement("select");
+  select.className = "text-input";
+  select.id = id;
+  select.name = name;
+  for (const round of CHAMPIONS_LEAGUE_PLAYOFF_ROUNDS) {
+    if (!includeFinal && round.key === "final") {
+      continue;
+    }
+    const option = document.createElement("option");
+    option.value = round.key;
+    option.textContent = round.name;
+    select.append(option);
+  }
+  const defaultRoundKey = includeFinal ? "final" : "playoff";
+  select.value = getPlayoffRoundDefinition(selectedRoundKey)
+    && (includeFinal || selectedRoundKey !== "final")
+    ? selectedRoundKey
+    : defaultRoundKey;
+  return select;
+}
+
+function createPlayoffBracketPositionSelect(container, roundSelect) {
+  const select = document.createElement("select");
+  select.className = "text-input";
+  select.required = true;
+
+  function refresh() {
+    const roundDefinition = getPlayoffRoundDefinition(roundSelect.value);
+    const bracket = getPlayoffBracket(container);
+    const round = bracket?.rounds?.find(
+      (candidate) => candidate?.key === roundSelect.value,
+    );
+    const occupied = new Set(
+      (round?.nodes || [])
+        .filter((node) => getBracketNodeEntityId(node) !== null)
+        .map((node) => node.position),
+    );
+    const previousValue = Number(select.value);
+    select.replaceChildren();
+    for (let position = 1; position <= (roundDefinition?.nodeCount || 0); position += 1) {
+      const option = document.createElement("option");
+      option.value = String(position);
+      option.textContent = occupied.has(position)
+        ? `Позиция ${position} · занята`
+        : `Позиция ${position}`;
+      option.disabled = occupied.has(position);
+      select.append(option);
+    }
+    const freePositions = Array.from(select.options).filter(
+      (option) => !option.disabled,
+    );
+    if (freePositions.length === 0) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "Свободных позиций нет";
+      select.append(option);
+      select.value = "";
+      select.disabled = true;
+      return;
+    }
+    select.disabled = false;
+    const previousOption = freePositions.find(
+      (option) => Number(option.value) === previousValue,
+    );
+    select.value = (previousOption || freePositions[0]).value;
+  }
+
+  roundSelect.addEventListener("change", refresh);
+  refresh();
+  return { select, refresh };
+}
+
+function getEntityRoundKey(entity) {
+  return typeof entity?.round_key === "string" && entity.round_key
+    ? entity.round_key
+    : null;
+}
+
+function isFinalRoundEntity(entity) {
+  return getEntityRoundKey(entity) === "final";
+}
+
+function getEntityRoundName(entity) {
+  if (typeof entity?.round_name === "string" && entity.round_name.trim()) {
+    return entity.round_name.trim();
+  }
+  return getPlayoffRoundDefinition(getEntityRoundKey(entity))?.name || null;
+}
+
+function getEntityRoundPosition(entity) {
+  if (Number.isSafeInteger(entity?.round_position)) {
+    return entity.round_position;
+  }
+  return getPlayoffRoundDefinition(getEntityRoundKey(entity))?.position
+    ?? Number.MAX_SAFE_INTEGER;
+}
+
+function getBracketNodeEntityType(node) {
+  const entityType = typeof node?.entity?.type === "string"
+    ? node.entity.type.replaceAll("-", "_")
+    : "";
+  if ([
+    "tie",
+    "two_legged",
+    "two_legged_tie",
+    "shared_two_legged_tie",
+  ].includes(entityType)) {
+    return "two_legged_tie";
+  }
+  return ["match", "single_match"].includes(entityType) ? "match" : null;
+}
+
+function getBracketNodeEntityId(node) {
+  return Number.isSafeInteger(node?.entity?.id) ? node.entity.id : null;
+}
+
+function getBracketSlotTeam(slot) {
+  const team = slot?.team;
+  if (!Number.isSafeInteger(team?.id)) {
+    return null;
+  }
+  return {
+    id: team.id,
+    name: typeof team.name === "string" && team.name.trim()
+      ? team.name.trim()
+      : `Команда #${team.id}`,
+  };
+}
+
+function getBracketSlotLabel(slot) {
+  const team = getBracketSlotTeam(slot);
+  if (team) {
+    return team.name;
+  }
+  if (typeof slot?.label === "string" && slot.label.trim()) {
+    return slot.label.trim();
+  }
+  if (slot?.source_node_id !== null && slot?.source_node_id !== undefined) {
+    return "Победитель предыдущей пары";
+  }
+  return "Участник ещё не определён";
+}
+
+function getBracketNodeStateLabel(state) {
+  const labels = {
+    awaiting_teams: "Ждём команды",
+    awaiting_schedule: "Ждём расписание",
+    pending: "Ожидается",
+    ready: "Готово к созданию",
+    materialized: "Создано",
+    scheduled: "Запланировано",
+    in_progress: "Идёт",
+    finished: "Завершено",
+    conflict: "Нужна проверка",
+    needs_attention: "Нужна проверка",
+    cancelled: "Отменено",
+  };
+  return labels[state] || "Ожидается";
+}
+
+function buildPlayoffBracketFromRoundMetadata(container) {
+  if (container?.template_key !== "champions_league_2026_27") {
+    return null;
+  }
+  const rounds = new Map();
+  const ensureRound = (entity) => {
+    const key = getEntityRoundKey(entity);
+    if (!key) {
+      return null;
+    }
+    if (!rounds.has(key)) {
+      const definition = getPlayoffRoundDefinition(key);
+      rounds.set(key, {
+        key,
+        name: getEntityRoundName(entity) || definition?.name || "Плей-офф",
+        position: getEntityRoundPosition(entity),
+        format: definition?.format || "two_legged",
+        nodes: [],
+      });
+    }
+    return rounds.get(key);
+  };
+  const referencedMatchIds = new Set();
+  for (const tie of getTwoLeggedTies(container)) {
+    const round = ensureRound(tie);
+    if (!round) {
+      continue;
+    }
+    const tieId = getTwoLeggedTieId(tie);
+    const [firstTeam, secondTeam] = getTwoLeggedTieTeams(container, tie);
+    const { firstLeg, secondLeg } = getTwoLeggedTieMatches(container, tie);
+    if (Number.isSafeInteger(firstLeg?.id)) referencedMatchIds.add(firstLeg.id);
+    if (Number.isSafeInteger(secondLeg?.id)) referencedMatchIds.add(secondLeg.id);
+    round.nodes.push({
+      id: `derived-tie-${tieId}`,
+      position: Number.isSafeInteger(tie?.bracket_position)
+        ? tie.bracket_position
+        : round.nodes.length + 1,
+      first_slot: { team: firstTeam },
+      second_slot: { team: secondTeam },
+      entity: { type: "two_legged_tie", id: tieId },
+      state: getTwoLeggedTieResult(tie)
+        ? "finished"
+        : (isTwoLeggedTiePredictionOpen(container, tie)
+          ? "scheduled"
+          : "in_progress"),
+    });
+  }
+  for (const match of container?.matches || []) {
+    if (referencedMatchIds.has(match.id) || isTwoLeggedMatch(match)) {
+      continue;
+    }
+    const round = ensureRound(match);
+    if (!round) {
+      continue;
+    }
+    round.nodes.push({
+      id: `derived-match-${match.id}`,
+      position: Number.isSafeInteger(match?.bracket_position)
+        ? match.bracket_position
+        : round.nodes.length + 1,
+      first_slot: { team: getMatchTeamSummary(match, "home") },
+      second_slot: { team: getMatchTeamSummary(match, "away") },
+      entity: { type: "match", id: match.id },
+      state: match.status === "started" ? "in_progress" : match.status,
+    });
+  }
+  if (rounds.size === 0) {
+    return null;
+  }
+  return {
+    state: "ready",
+    rounds: Array.from(rounds.values()),
+  };
+}
+
+function getPlayoffBracket(container) {
+  const explicitBracket = container?.playoff_bracket;
+  const bracket = explicitBracket && Array.isArray(explicitBracket.rounds)
+    ? explicitBracket
+    : buildPlayoffBracketFromRoundMetadata(container);
+  if (!bracket) {
+    return null;
+  }
+  const rounds = bracket.rounds
+    .filter((round) => round && Array.isArray(round.nodes))
+    .map((round) => ({
+      ...round,
+      name: getPlayoffRoundName(round),
+      position: getPlayoffRoundPosition(round),
+      format: getPlayoffRoundFormat(round),
+      nodes: [...round.nodes].sort((left, right) => (
+        (Number.isSafeInteger(left?.position) ? left.position : 0)
+        - (Number.isSafeInteger(right?.position) ? right.position : 0)
+      )),
+    }))
+    .sort((left, right) => left.position - right.position);
+  return rounds.length > 0 ? { ...bracket, rounds } : null;
+}
+
+function getPlayoffBracketReferences(container, bracket) {
+  const matchIds = new Set();
+  const tieIds = new Set();
+  for (const round of bracket?.rounds || []) {
+    for (const node of round.nodes || []) {
+      const entityType = getBracketNodeEntityType(node);
+      const entityId = getBracketNodeEntityId(node);
+      if (entityType === "match" && entityId !== null) {
+        matchIds.add(entityId);
+      } else if (entityType === "two_legged_tie" && entityId !== null) {
+        tieIds.add(entityId);
+        const tie = getTwoLeggedTies(container).find(
+          (candidate) => getTwoLeggedTieId(candidate) === entityId,
+        );
+        const { firstLeg, secondLeg } = getTwoLeggedTieMatches(container, tie);
+        if (Number.isSafeInteger(firstLeg?.id)) matchIds.add(firstLeg.id);
+        if (Number.isSafeInteger(secondLeg?.id)) matchIds.add(secondLeg.id);
+      }
+    }
+  }
+  return { matchIds, tieIds };
 }
 
 function getTwoLeggedTieId(tie) {
@@ -2505,17 +2863,18 @@ function createAdvancingTeamField(
     awayScoreInput,
     selectedAdvancingTeamId = null,
     missingDrawSelectionMessage =
-      "При ничьей выберите команду, победившую в серии пенальти.",
+      "При ничьей после 90 минут выберите команду, победившую в дополнительное время или серии пенальти.",
     selectedDrawSelectionMessage = null,
     highlightMissingDrawSelection = false,
   },
 ) {
+  const isFinal = isFinalRoundEntity(match);
   const field = createElement("fieldset", {
     className: "advancing-team-field",
   });
   const legend = createElement("legend", {
     className: "form-field-label",
-    text: "Победитель противостояния",
+    text: isFinal ? "Кто победит?" : "Победитель противостояния",
   });
   const hint = createElement("p", {
     className: "form-hint",
@@ -2581,7 +2940,7 @@ function createAdvancingTeamField(
       field.disabled = true;
       field.classList.remove("is-required");
       field.removeAttribute("aria-invalid");
-      hint.textContent = "Сначала укажите итоговый счёт матча.";
+      hint.textContent = "Сначала укажите счёт после 90 минут.";
     } else if (scoreState.isDraw) {
       field.disabled = false;
 
@@ -2615,7 +2974,9 @@ function createAdvancingTeamField(
       field.classList.remove("is-required");
       field.removeAttribute("aria-invalid");
       hint.textContent =
-        "Победитель противостояния определён итоговым счётом.";
+        isFinal
+          ? "Победитель определён счётом после 90 минут."
+          : "Победитель противостояния определён счётом после 90 минут.";
     }
 
     previousScoreState = scoreState;
@@ -2840,6 +3201,7 @@ function createMatchResultSection(
   const result = match.result;
   const isSeries = Number.isSafeInteger(match.best_of);
   const isTwoLegged = isTwoLeggedMatch(match);
+  const isFinal = isFinalRoundEntity(match);
   const section = createElement("div", {
     className: "match-result-section",
   });
@@ -2858,8 +3220,8 @@ function createMatchResultSection(
             : isTwoLegged
               ? `Счёт после 90 минут: ${result.home_score} : ${result.away_score}.`
               : (
-              `Итоговый счёт: ${result.home_score} : ${result.away_score}. `
-              + `Победитель противостояния: `
+              `Счёт после 90 минут: ${result.home_score} : ${result.away_score}. `
+              + `${isFinal ? "Победитель" : "Победитель противостояния"}: `
               + `${getTeamNameById(match, result.advancing_team_id)}.`
               )
         )
@@ -2897,7 +3259,11 @@ function createMatchResultSection(
   const summaryTitle = createElement("span", {
     className: "match-result-summary-title",
     text: result
-      ? `Результат: ${result.home_score} : ${result.away_score}`
+      ? (
+        isSeries
+          ? `Результат серии: ${result.home_score} : ${result.away_score}`
+          : `Счёт после 90 минут: ${result.home_score} : ${result.away_score}`
+      )
       : "Внести результат",
   });
   const summaryAction = createElement("span", {
@@ -2914,8 +3280,8 @@ function createMatchResultSection(
           + "пенальти учитываются отдельно в результате всей пары."
         )
         : (
-        "Укажите итоговый счёт после 90 или 120 минут. " +
-        "Голы серии пенальти в него не входят. Результат можно исправить."
+        "Укажите счёт после 90 минут. Голы дополнительного времени и серии "
+        + "пенальти в него не входят. Результат можно исправить."
         ),
   });
   const form = createElement("form", {
@@ -2925,7 +3291,7 @@ function createMatchResultSection(
     className: "form-field-label",
     text: isSeries
       ? "Итоговый счёт серии"
-      : (isTwoLegged ? "Счёт после 90 минут" : "Итоговый счёт матча"),
+      : "Счёт после 90 минут",
   });
   const scoreGrid = createElement("div", {
     className: "match-score-grid",
@@ -3111,7 +3477,9 @@ function createMatchResultSection(
         if (advancingTeamId === null) {
           setFormMessage(
             message,
-            "При ничейном счёте выберите победителя противостояния.",
+            isFinal
+              ? "При ничейном счёте после 90 минут выберите победителя."
+              : "При ничейном счёте после 90 минут выберите победителя противостояния.",
             "error",
           );
           advancingTeamField.focus();
@@ -3188,6 +3556,7 @@ function createMatchPredictionSection(contest, match) {
   const prediction = match.prediction;
   const isSeries = Number.isSafeInteger(match.best_of);
   const isTwoLegged = isTwoLeggedMatch(match);
+  const isFinal = isFinalRoundEntity(match);
   const section = createElement("div", {
     className: "match-prediction-section",
   });
@@ -3209,8 +3578,9 @@ function createMatchPredictionSection(contest, match) {
                 + `${prediction.away_score}.`
               )
               : (
-              `Ваш прогноз: ${prediction.home_score} : ` +
-              `${prediction.away_score}. Победитель противостояния: ` +
+              `Ваш прогноз на счёт после 90 минут: ${prediction.home_score} : ` +
+              `${prediction.away_score}. `
+              + `${isFinal ? "Победитель" : "Победитель противостояния"}: ` +
               `${getTeamNameById(match, prediction.advancing_team_id)}.`
               )
         )
@@ -3243,9 +3613,12 @@ function createMatchPredictionSection(contest, match) {
           + "Прогноз можно изменить до начала матча."
         )
         : (
-        "Прогноз сохраняется автоматически. Счёт указывайте после 90 или " +
-        "120 минут; при ничьей выберите победителя серии пенальти. " +
-        "Прогноз можно изменить до начала матча."
+        "Прогноз сохраняется автоматически. Укажите счёт после 90 минут. "
+        + "Голы дополнительного времени и серии пенальти на баллы за счёт "
+        + `не влияют. При ничьей после 90 минут выберите ${isFinal
+          ? "победителя"
+          : "победителя противостояния"}. `
+        + "Прогноз можно изменить до начала матча."
         ),
   });
   const form = createElement("form", {
@@ -3255,7 +3628,7 @@ function createMatchPredictionSection(contest, match) {
     className: "form-field-label",
     text: isSeries
       ? "Итоговый счёт серии"
-      : (isTwoLegged ? "Счёт после 90 минут" : "Итоговый счёт матча"),
+      : "Счёт после 90 минут",
   });
   const scoreGrid = createElement("div", {
     className: "match-score-grid",
@@ -3348,8 +3721,12 @@ function createMatchPredictionSection(contest, match) {
       awayScoreInput,
       selectedAdvancingTeamId: prediction ? prediction.advancing_team_id : null,
       missingDrawSelectionMessage:
-        "Выберите победителя противостояния, чтобы сохранить прогноз.",
-      selectedDrawSelectionMessage: "Победитель противостояния выбран.",
+        isFinal
+          ? "При ничьей после 90 минут выберите победителя, чтобы сохранить прогноз."
+          : "При ничьей после 90 минут выберите победителя противостояния, чтобы сохранить прогноз.",
+      selectedDrawSelectionMessage: isFinal
+        ? "Победитель выбран."
+        : "Победитель противостояния выбран.",
       highlightMissingDrawSelection: true,
     });
 
@@ -3406,8 +3783,9 @@ function createMatchPredictionSection(contest, match) {
     if (advancingTeamId === null) {
       return {
         isReady: false,
-        message:
-          "Выберите победителя противостояния, чтобы сохранить прогноз.",
+        message: isFinal
+          ? "При ничьей после 90 минут выберите победителя, чтобы сохранить прогноз."
+          : "При ничьей после 90 минут выберите победителя противостояния, чтобы сохранить прогноз.",
       };
     }
 
@@ -3707,6 +4085,13 @@ function createTwoLeggedTiePredictionListItem(contest, tie) {
   });
 
   header.append(teams, status);
+  const roundName = getEntityRoundName(tie);
+  if (roundName) {
+    meta.append(createElement("p", {
+      className: "match-meta playoff-round-name",
+      text: roundName,
+    }));
+  }
   meta.append(
     createElement("p", {
       className: "match-meta",
@@ -6680,6 +7065,13 @@ function createMatchListItem(
   const sections = [header, meta];
 
   header.append(teams, status);
+  const roundName = getEntityRoundName(match);
+  if (roundName) {
+    meta.append(createElement("p", {
+      className: "match-meta playoff-round-name",
+      text: roundName,
+    }));
+  }
   if (isTwoLeggedMatch(match)) {
     meta.append(
       createElement("p", {
@@ -6752,16 +7144,25 @@ function createMatchListItem(
   return item;
 }
 
-function createMatchPredictionListItems(contest, matches) {
-  const items = matches.map((match) => ({
-    kind: "match",
-    match,
-    isOpen: isMatchPredictionOpen(match),
-    sortTime: getPredictionSortTime(match.starts_at_utc),
-    sortKey: `match-${String(match.id).padStart(12, "0")}`,
-  }));
+function createMatchPredictionListItems(
+  contest,
+  matches,
+  { excludeMatchIds = new Set(), excludeTieIds = new Set() } = {},
+) {
+  const items = matches
+    .filter((match) => !excludeMatchIds.has(match.id))
+    .map((match) => ({
+      kind: "match",
+      match,
+      isOpen: isMatchPredictionOpen(match),
+      sortTime: getPredictionSortTime(match.starts_at_utc),
+      sortKey: `match-${String(match.id).padStart(12, "0")}`,
+    }));
   for (const tie of getTwoLeggedTies(contest)) {
     const tieId = getTwoLeggedTieId(tie);
+    if (excludeTieIds.has(tieId)) {
+      continue;
+    }
     items.push({
       kind: "two-legged-tie",
       tie,
@@ -6789,6 +7190,257 @@ function createMatchPredictionListItems(contest, matches) {
           },
         )
     ));
+}
+
+function findBracketTie(container, node) {
+  const entityId = getBracketNodeEntityId(node);
+  if (getBracketNodeEntityType(node) !== "two_legged_tie" || entityId === null) {
+    return null;
+  }
+  return getTwoLeggedTies(container).find(
+    (tie) => getTwoLeggedTieId(tie) === entityId,
+  ) || null;
+}
+
+function findBracketMatch(container, node) {
+  const entityId = getBracketNodeEntityId(node);
+  if (getBracketNodeEntityType(node) !== "match" || entityId === null) {
+    return null;
+  }
+  return (container?.matches || []).find((match) => match?.id === entityId) || null;
+}
+
+function createBracketFixtureSummary(match, legLabel = null) {
+  const homeTeam = getMatchTeamSummary(match, "home");
+  const awayTeam = getMatchTeamSummary(match, "away");
+  const result = match?.result;
+  const resultText = result
+    ? ` · ${result.home_score} : ${result.away_score}`
+    : "";
+  return createElement("li", {
+    className: "playoff-bracket-fixture",
+    text: (
+      `${legLabel ? `${legLabel}: ` : ""}${homeTeam.name || "Команда"} — `
+      + `${awayTeam.name || "Команда"}${resultText} · `
+      + `${formatMatchStartsAt(match?.starts_at_utc)}`
+    ),
+  });
+}
+
+function createPlayoffBracketNode(container, node, { mode, bracketMode }) {
+  const item = createElement("li", {
+    className: "playoff-bracket-node",
+  });
+  const firstSlotLabel = getBracketSlotLabel(node?.first_slot);
+  const secondSlotLabel = getBracketSlotLabel(node?.second_slot);
+  const header = createElement("div", {
+    className: "playoff-bracket-node-header",
+  });
+  const teams = createElement("strong", {
+    className: "playoff-bracket-node-teams",
+    text: `${firstSlotLabel} — ${secondSlotLabel}`,
+  });
+  const normalizedState = [
+    "awaiting_teams",
+    "awaiting_schedule",
+    "pending",
+    "ready",
+    "materialized",
+    "scheduled",
+    "in_progress",
+    "finished",
+    "conflict",
+    "needs_attention",
+    "cancelled",
+  ].includes(node?.state)
+    ? node.state
+    : "awaiting_teams";
+  const status = createElement("span", {
+    className: `playoff-bracket-node-status playoff-bracket-node-status--${normalizedState}`,
+    text: getBracketNodeStateLabel(normalizedState),
+  });
+  header.append(teams, status);
+  item.append(header);
+
+  const entityType = getBracketNodeEntityType(node);
+  if (entityType === null || getBracketNodeEntityId(node) === null) {
+    item.classList.add("is-placeholder");
+    item.append(
+      createElement("p", {
+        className: "playoff-bracket-placeholder",
+        text: (
+          bracketMode === "manual"
+            ? "Позиция пока не заполнена. Добавьте противостояние в управлении конкурсом."
+            : normalizedState === "awaiting_schedule"
+            ? "Команды определены. Ждём официальные даты матчей."
+            : "Пара появится автоматически после определения участников."
+        ),
+      }),
+    );
+    return item;
+  }
+
+  if (entityType === "two_legged_tie") {
+    const tie = findBracketTie(container, node);
+    if (!tie) {
+      item.classList.add("is-placeholder");
+      item.append(createElement("p", {
+        className: "playoff-bracket-placeholder",
+        text: "Данные пары ещё синхронизируются.",
+      }));
+      return item;
+    }
+    const { firstLeg, secondLeg } = getTwoLeggedTieMatches(container, tie);
+    if (mode === "participant") {
+      const predictions = createElement("ol", {
+        className: "playoff-bracket-node-predictions",
+      });
+      predictions.append(createTwoLeggedTiePredictionListItem(container, tie));
+      for (const match of [firstLeg, secondLeg].filter(Boolean)) {
+        predictions.append(
+          createMatchListItem(container, match, {}, null, null, {
+            showPredictions: true,
+            showResults: false,
+            canManageResults: false,
+          }),
+        );
+      }
+      item.append(predictions);
+    } else {
+      const fixtures = createElement("ol", {
+        className: "playoff-bracket-fixtures",
+      });
+      if (firstLeg) fixtures.append(createBracketFixtureSummary(firstLeg, "Первый матч"));
+      if (secondLeg) fixtures.append(createBracketFixtureSummary(secondLeg, "Ответный матч"));
+      item.append(fixtures);
+    }
+  } else {
+    const match = findBracketMatch(container, node);
+    if (!match) {
+      item.classList.add("is-placeholder");
+      item.append(createElement("p", {
+        className: "playoff-bracket-placeholder",
+        text: "Данные матча ещё синхронизируются.",
+      }));
+      return item;
+    }
+    if (mode === "participant") {
+      const predictions = createElement("ol", {
+        className: "playoff-bracket-node-predictions",
+      });
+      predictions.append(
+        createMatchListItem(container, match, {}, null, null, {
+          showPredictions: true,
+          showResults: false,
+          canManageResults: false,
+        }),
+      );
+      item.append(predictions);
+    } else {
+      const fixtures = createElement("ol", {
+        className: "playoff-bracket-fixtures",
+      });
+      fixtures.append(createBracketFixtureSummary(match));
+      item.append(fixtures);
+    }
+  }
+
+  if (mode !== "participant" && node?.sync_error) {
+    item.append(createElement("p", {
+      className: "form-message is-error playoff-bracket-sync-error",
+      text: String(node.sync_error),
+    }));
+  }
+  return item;
+}
+
+function createPlayoffBracketCard(container, { mode = "participant" } = {}) {
+  const bracket = getPlayoffBracket(container);
+  if (!bracket) {
+    return null;
+  }
+  const card = createElement("section", {
+    className: "info-card playoff-bracket-card",
+  });
+  const heading = createElement("h2", { text: "Сетка плей-офф" });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: mode === "participant"
+      ? "Выберите раунд. В двухматчевой паре отдельно прогнозируются проход и счёт каждой игры."
+      : bracket.mode === "manual"
+        ? "Заполняйте свободные позиции вручную: двухматчевыми парами до финала и одним матчем в финале."
+        : "Пары и переходы победителей обновляются автоматически из официального расписания.",
+  });
+  const roundSelector = createElement("div", {
+    className: "playoff-round-selector",
+  });
+  roundSelector.setAttribute("role", "tablist");
+  roundSelector.setAttribute("aria-label", "Раунды плей-офф");
+  const track = createElement("div", {
+    className: "playoff-bracket-track",
+  });
+  const buttons = [];
+  const columns = [];
+
+  for (const [roundIndex, round] of bracket.rounds.entries()) {
+    const columnId = `playoff-round-${container.id}-${mode}-${roundIndex}`;
+    const button = createActionButton(round.name, "playoff-round-button");
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", columnId);
+    const column = createElement("section", {
+      className: "playoff-round-column",
+    });
+    column.id = columnId;
+    column.setAttribute("role", "tabpanel");
+    column.setAttribute("aria-label", round.name);
+    const roundHeading = createElement("h3", {
+      className: "playoff-round-heading",
+      text: round.name,
+    });
+    const format = createElement("p", {
+      className: "playoff-round-format",
+      text: round.format === "single"
+        ? "Один матч"
+        : "Два матча в каждом противостоянии",
+    });
+    const nodes = createElement("ol", {
+      className: "playoff-round-nodes",
+    });
+    for (const node of round.nodes) {
+      nodes.append(createPlayoffBracketNode(container, node, {
+        mode,
+        bracketMode: bracket.mode,
+      }));
+    }
+    if (round.nodes.length === 0) {
+      nodes.append(createElement("li", {
+        className: "playoff-bracket-node is-placeholder",
+        text: "Ждём официальную жеребьёвку.",
+      }));
+    }
+    column.append(roundHeading, format, nodes);
+    roundSelector.append(button);
+    track.append(column);
+    buttons.push(button);
+    columns.push(column);
+  }
+
+  function selectRound(selectedIndex) {
+    for (const [index, button] of buttons.entries()) {
+      const isSelected = index === selectedIndex;
+      button.classList.toggle("is-active", isSelected);
+      button.setAttribute("aria-selected", isSelected ? "true" : "false");
+      button.tabIndex = isSelected ? 0 : -1;
+      columns[index].classList.toggle("is-mobile-selected", isSelected);
+    }
+  }
+  for (const [index, button] of buttons.entries()) {
+    button.addEventListener("click", () => selectRound(index));
+  }
+  selectRound(0);
+  card.append(heading, description, roundSelector, track);
+  return card;
 }
 
 function createTournamentPredictionListItems(contest) {
@@ -6953,6 +7605,9 @@ function createMatchesCard(
 function createMatchFormCard(bootstrap, contest, state) {
   const draft = state.matchDraft || {};
   const isSeriesContest = contest.template_key === "the_international_2026";
+  const isChampionsLeague = (
+    contest.template_key === "champions_league_2026_27"
+  );
   const tournamentTeams = getTournamentTeams(contest).teams;
   const card = createElement("section", {
     className: "info-card contest-form-card match-form-card",
@@ -7015,6 +7670,19 @@ function createMatchFormCard(bootstrap, contest, state) {
   const startsAtInput = createElement("input", {
     className: "text-input",
   });
+  const roundInput = isChampionsLeague
+    ? createPlayoffRoundSelect({
+      id: "match-round-key",
+      name: "match-round-key",
+      selectedRoundKey: draft.roundKey || "final",
+    })
+    : null;
+  if (roundInput) {
+    for (const option of roundInput.options) {
+      option.disabled = option.value !== "final";
+    }
+    roundInput.value = "final";
+  }
   const bestOfField = createElement("label", {
     className: "form-field",
   });
@@ -7093,6 +7761,7 @@ function createMatchFormCard(bootstrap, contest, state) {
     homeTeamField,
     awayTeamField,
     ...(isSeriesContest ? [bestOfField] : []),
+    ...(roundInput ? [createLabeledField("Раунд", roundInput)] : []),
     startsAtField,
     hint,
     message,
@@ -7119,6 +7788,7 @@ function createMatchFormCard(bootstrap, contest, state) {
     const startsAtLocal = startsAtInput.value;
     const startsAt = new Date(startsAtLocal);
     const bestOf = isSeriesContest ? Number(bestOfInput.value) : null;
+    const roundKey = roundInput ? roundInput.value : null;
 
     if (!Number.isSafeInteger(homeTeamId) || homeTeamId <= 0) {
       homeTeamInput.setAttribute("aria-invalid", "true");
@@ -7171,6 +7841,7 @@ function createMatchFormCard(bootstrap, contest, state) {
       awayTeamId,
       startsAtLocal,
       bestOf,
+      roundKey,
     };
     const idempotencyKey =
       state.matchIdempotencyKey || createIdempotencyKey("match");
@@ -7192,6 +7863,7 @@ function createMatchFormCard(bootstrap, contest, state) {
             away_team_id: awayTeamId,
             starts_at_utc: startsAt.toISOString(),
             ...(isSeriesContest ? { best_of: bestOf } : {}),
+            ...(roundKey ? { round_key: roundKey } : {}),
           }),
         },
       );
@@ -7257,9 +7929,13 @@ function createTwoLeggedTieFormCard(
     endpoint,
     onCreated,
     title = "Добавить двухматчевую пару",
+    includeBracketPosition = false,
   },
 ) {
   const teams = getTwoLeggedTieCreationTeams(container);
+  const isChampionsLeague = (
+    container?.template_key === "champions_league_2026_27"
+  );
   const card = createElement("section", {
     className: "info-card contest-form-card two-legged-tie-form-card",
   });
@@ -7294,6 +7970,19 @@ function createTwoLeggedTieFormCard(
   });
   const firstLegInput = createElement("input", { className: "text-input" });
   const secondLegInput = createElement("input", { className: "text-input" });
+  const roundInput = isChampionsLeague
+    ? createPlayoffRoundSelect({
+      id: `two-legged-tie-${container.id}-round-key`,
+      name: "two-legged-tie-round-key",
+      selectedRoundKey: "playoff",
+      includeFinal: false,
+    })
+    : null;
+  const bracketPositionControl = (
+    roundInput && includeBracketPosition
+      ? createPlayoffBracketPositionSelect(container, roundInput)
+      : null
+  );
   const message = createElement("p", { className: "form-message" });
   const submitButton = createActionButton(
     "Добавить пару",
@@ -7334,6 +8023,10 @@ function createTwoLeggedTieFormCard(
     );
   }
   form.append(
+    ...(roundInput ? [createLabeledField("Раунд", roundInput)] : []),
+    ...(bracketPositionControl
+      ? [createLabeledField("Позиция в раунде", bracketPositionControl.select)]
+      : []),
     createLabeledField("Первая команда пары", firstTeamInput),
     createLabeledField("Вторая команда пары", secondTeamInput),
     createLabeledField("Первый матч и дедлайн прогноза", firstLegInput),
@@ -7361,6 +8054,9 @@ function createTwoLeggedTieFormCard(
     event.preventDefault();
     const firstTeamId = Number(firstTeamInput.value);
     const secondTeamId = Number(secondTeamInput.value);
+    const bracketPosition = bracketPositionControl
+      ? Number(bracketPositionControl.select.value)
+      : null;
     const firstLegStartsAt = new Date(firstLegInput.value);
     const secondLegStartsAt = new Date(secondLegInput.value);
     if (!Number.isSafeInteger(firstTeamId) || firstTeamId <= 0) {
@@ -7376,6 +8072,18 @@ function createTwoLeggedTieFormCard(
     if (firstTeamId === secondTeamId) {
       setFormMessage(message, "В паре должны быть две разные команды.", "error");
       secondTeamInput.focus();
+      return;
+    }
+    if (
+      bracketPositionControl
+      && (!Number.isSafeInteger(bracketPosition) || bracketPosition <= 0)
+    ) {
+      setFormMessage(
+        message,
+        "В выбранном раунде нет свободной позиции.",
+        "error",
+      );
+      bracketPositionControl.select.focus();
       return;
     }
     if (
@@ -7409,6 +8117,8 @@ function createTwoLeggedTieFormCard(
           second_team_id: secondTeamId,
           first_leg_starts_at_utc: firstLegStartsAt.toISOString(),
           second_leg_starts_at_utc: secondLegStartsAt.toISOString(),
+          ...(roundInput ? { round_key: roundInput.value } : {}),
+          ...(bracketPositionControl ? { bracket_position: bracketPosition } : {}),
         }),
       });
       const savedTie = response?.two_legged_tie
@@ -7501,6 +8211,13 @@ function createTwoLeggedTieAdministrationItem(
   });
   const meta = createElement("div", { className: "match-card-meta" });
   header.append(teams, status);
+  const roundName = getEntityRoundName(tie);
+  if (roundName) {
+    meta.append(createElement("p", {
+      className: "match-meta playoff-round-name",
+      text: roundName,
+    }));
+  }
   meta.append(
     createElement("p", {
       className: "match-meta",
@@ -7811,6 +8528,32 @@ function createTwoLeggedTiesAdministrationCard(container, options) {
   return card;
 }
 
+function createManualCorrectionCard(cards, { open = false } = {}) {
+  const card = createElement("section", {
+    className: "info-card manual-correction-card",
+  });
+  const disclosure = document.createElement("details");
+  const summary = document.createElement("summary");
+  const content = createElement("div", {
+    className: "manual-correction-content",
+  });
+  disclosure.open = open;
+  summary.textContent = "Ручная коррекция";
+  content.append(
+    createElement("p", {
+      className: "subtitle",
+      text: (
+        "Используйте ручное добавление, только если официальное расписание "
+        + "ещё не синхронизировалось или требует исправления."
+      ),
+    }),
+    ...cards.filter(Boolean),
+  );
+  disclosure.append(summary, content);
+  card.append(disclosure);
+  return card;
+}
+
 function renderContestDetailsLoading(bootstrap) {
   const { user, chat } = bootstrap.context;
   const chatTitle = chat.title || "этого чата";
@@ -7906,28 +8649,43 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
       ),
     );
   } else {
-    cards.push(
-      createMatchesCard(
-        contest,
-        matches,
-        state,
-        null,
-        null,
-        {
-          title: "Матчи",
-          emptyMessages: isActive
-            ? [
-              "Матчей пока нет.",
-              "Когда кто-то добавит матч, здесь можно будет сохранить прогноз.",
-            ]
-            : ["Матчей нет."],
-          showPredictions: true,
-          showResults: false,
-          canManageResults: false,
-          listItems: createMatchPredictionListItems(contest, matches),
-        },
-      ),
-    );
+    const bracket = getPlayoffBracket(contest);
+    const bracketCard = createPlayoffBracketCard(contest);
+    if (bracketCard) {
+      cards.push(bracketCard);
+    }
+    const references = getPlayoffBracketReferences(contest, bracket);
+    const otherMatchItems = bracket
+      ? createMatchPredictionListItems(contest, matches, {
+        excludeMatchIds: references.matchIds,
+        excludeTieIds: references.tieIds,
+      })
+      : createMatchPredictionListItems(contest, matches);
+    if (!bracket || otherMatchItems.length > 0) {
+      cards.push(
+        createMatchesCard(
+          contest,
+          matches,
+          state,
+          null,
+          null,
+          {
+            title: "Матчи",
+            ...(bracket ? { title: "Другие матчи" } : {}),
+            emptyMessages: isActive
+              ? [
+                "Матчей пока нет.",
+                "Когда кто-то добавит матч, здесь можно будет сохранить прогноз.",
+              ]
+              : ["Матчей нет."],
+            showPredictions: true,
+            showResults: false,
+            canManageResults: false,
+            listItems: otherMatchItems,
+          },
+        ),
+      );
+    }
   }
 
   setChatSummary(`Привет, ${userName}. Чат «${chatTitle}».`);
@@ -8062,9 +8820,11 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
     }
   } else {
     if (isActive && !isSharedTournament) {
-      cards.push(createMatchFormCard(bootstrap, contest, managementState));
+      const manualCards = [
+        createMatchFormCard(bootstrap, contest, managementState),
+      ];
       if (contest.template_key !== "the_international_2026") {
-        cards.push(
+        manualCards.push(
           createTwoLeggedTieFormCard(
             contest,
             managementState,
@@ -8081,6 +8841,15 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
           ),
         );
       }
+      cards.push(
+        createManualCorrectionCard(manualCards, {
+          open: Boolean(
+            managementState.matchFormMessage
+            || managementState.matchDraft
+            || managementState.twoLeggedTieMessage
+          ),
+        }),
+      );
     }
     if (isActive && isSharedTournament) {
       cards.push(
@@ -8091,6 +8860,12 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
           ],
         ),
       );
+    }
+    const bracketCard = createPlayoffBracketCard(contest, {
+      mode: "management",
+    });
+    if (bracketCard) {
+      cards.push(bracketCard);
     }
     cards.push(
       createMatchesCard(
@@ -10664,9 +11439,289 @@ function createSharedSwissStageCard(bootstrap, tournament) {
   return card;
 }
 
+function getFixtureSyncStateLabel(state) {
+  const labels = {
+    disabled: "Выключена",
+    idle: "Готова",
+    ok: "Работает",
+    syncing: "Обновляется",
+    stale: "Давно не обновлялась",
+    error: "Ошибка",
+    needs_attention: "Нужна проверка",
+  };
+  return labels[state] || "Не настроена";
+}
+
+function createFixtureSyncAdministrationCard(bootstrap, tournament) {
+  if (tournament.template_key !== "champions_league_2026_27") {
+    return null;
+  }
+  const sync = tournament.fixture_sync || {};
+  const reportedState = typeof sync.state === "string" ? sync.state : "";
+  const state = [
+    "disabled",
+    "idle",
+    "ok",
+    "syncing",
+    "stale",
+    "error",
+    "needs_attention",
+  ].includes(reportedState)
+    ? reportedState
+    : (sync.enabled === true ? "idle" : "disabled");
+  const card = createElement("section", {
+    className: "info-card fixture-sync-card",
+  });
+  const header = createElement("div", {
+    className: "fixture-sync-header",
+  });
+  const heading = createElement("h2", { text: "Автоматическое обновление" });
+  const status = createElement("span", {
+    className: `fixture-sync-status fixture-sync-status--${state}`,
+    text: getFixtureSyncStateLabel(state),
+  });
+  const attribution = createElement("p", {
+    className: "fixture-sync-attribution",
+  });
+  const attributionLink = document.createElement("a");
+  attributionLink.href = "https://www.football-data.org/";
+  attributionLink.target = "_blank";
+  attributionLink.rel = "noreferrer noopener";
+  attributionLink.textContent = "football-data.org";
+  attribution.append("Данные предоставлены ", attributionLink, ".");
+  header.append(heading, status);
+  card.append(header, attribution);
+
+  const details = createElement("dl", {
+    className: "fixture-sync-details",
+  });
+  const detailRows = [
+    ["Источник", sync.source || "football-data.org"],
+    [
+      "Последняя попытка",
+      sync.last_attempt_at
+        ? formatMatchStartsAt(sync.last_attempt_at)
+        : "ещё не запускалась",
+    ],
+    [
+      "Последнее успешное обновление",
+      sync.last_success_at
+        ? formatMatchStartsAt(sync.last_success_at)
+        : "ещё не было",
+    ],
+    [
+      "Следующая попытка",
+      sync.next_attempt_at
+        ? formatMatchStartsAt(sync.next_attempt_at)
+        : "не запланирована",
+    ],
+  ];
+  for (const [label, value] of detailRows) {
+    details.append(
+      createElement("dt", { text: label }),
+      createElement("dd", { text: value }),
+    );
+  }
+  card.append(details);
+
+  const statsLabels = {
+    fixtures_seen: "Получено матчей",
+    matches_created: "Добавлено матчей",
+    matches_updated: "Обновлено матчей",
+    ties_created: "Добавлено пар",
+    results_saved: "Сохранено результатов",
+    conflicts: "Конфликтов",
+  };
+  const stats = Object.entries(sync.stats || {}).filter(
+    ([key, value]) => statsLabels[key] && Number.isSafeInteger(value),
+  );
+  if (stats.length > 0) {
+    const statsList = createElement("ul", {
+      className: "fixture-sync-stats",
+    });
+    for (const [key, value] of stats) {
+      statsList.append(createElement("li", {
+        text: `${statsLabels[key]}: ${value}`,
+      }));
+    }
+    card.append(statsList);
+  }
+  if (sync.last_error) {
+    card.append(createElement("p", {
+      className: "form-message is-error fixture-sync-error",
+      text: String(sync.last_error),
+    }));
+  }
+  const conflictDetails = Array.isArray(sync.conflict_details)
+    ? sync.conflict_details
+    : [];
+  if (conflictDetails.length > 0) {
+    const conflictHeading = createElement("h3", {
+      className: "fixture-sync-conflict-heading",
+      text: "Что требует проверки",
+    });
+    const conflictList = createElement("ul", {
+      className: "fixture-sync-conflict-list",
+    });
+    for (const detail of conflictDetails) {
+      const roundName = getPlayoffRoundDefinition(detail?.round_key)?.name
+        || "Плей-офф";
+      const parts = [
+        `${roundName}, позиция ${detail?.position || "?"}`,
+      ];
+      if (detail?.fixture_id) {
+        parts.push(`фикстура ${String(detail.fixture_id)}`);
+      }
+      if (Number.isSafeInteger(detail?.leg_number)) {
+        parts.push(`матч ${detail.leg_number}`);
+      }
+      parts.push(String(detail?.message || "Требуется ручная проверка."));
+      conflictList.append(createElement("li", { text: parts.join(" · ") }));
+    }
+    card.append(conflictHeading, conflictList);
+    if (
+      Number.isSafeInteger(sync.conflict_detail_count)
+      && sync.conflict_detail_count > conflictDetails.length
+    ) {
+      card.append(createElement("p", {
+        className: "form-hint fixture-sync-conflict-more",
+        text: (
+          `Показано ${conflictDetails.length} из `
+          + `${sync.conflict_detail_count} конфликтов.`
+        ),
+      }));
+    }
+  }
+  if (sync.token_configured !== true) {
+    card.append(createElement("p", {
+      className: "form-message is-error fixture-sync-token-warning",
+      text: (
+        "На сервере не настроен токен football-data.org. "
+        + "Добавьте его в окружение приложения; в Mini App токен не отображается."
+      ),
+    }));
+  }
+  if (tournament.is_archived === true) {
+    return card;
+  }
+
+  const form = createElement("form", {
+    className: "fixture-sync-controls",
+  });
+  const enabled = document.createElement("input");
+  enabled.type = "checkbox";
+  enabled.checked = sync.enabled === true;
+  const enabledField = createLabeledField(
+    "Автоматически загружать расписание и результаты",
+    enabled,
+  );
+  enabledField.classList.add("fixture-sync-enabled-field");
+  const disableHint = createElement("p", {
+    className: "form-hint fixture-sync-disable-hint",
+    text: (
+      "Если выключить синхронизацию во время работы, текущая пара или финал "
+      + "загрузится целиком. Следующая пара или финал уже не начнёт загружаться."
+    ),
+  });
+  disableHint.id = `fixture-sync-${tournament.id}-disable-hint`;
+  enabled.setAttribute("aria-describedby", disableHint.id);
+  const saveButton = createActionButton(
+    "Сохранить режим",
+    "secondary-action-button",
+    "submit",
+  );
+  const runButton = createActionButton(
+    state === "syncing" ? "Синхронизация идёт…" : "Синхронизировать сейчас",
+    "primary-action-button",
+  );
+  runButton.type = "button";
+  runButton.disabled = (
+    sync.enabled !== true
+    || sync.token_configured !== true
+    || state === "syncing"
+  );
+  const message = createElement("p", { className: "form-message" });
+  const actions = createElement("div", { className: "form-actions" });
+  actions.append(saveButton, runButton);
+  form.append(enabledField, disableHint, actions, message);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    saveButton.disabled = true;
+    runButton.disabled = true;
+    try {
+      await apiRequestForCurrentView(
+        `/api/tma/shared-tournaments/${tournament.id}/fixture-sync`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: enabled.checked,
+            expected_version: tournament.version,
+          }),
+        },
+      );
+      void openSharedTournament(bootstrap, tournament.id, {
+        message: enabled.checked
+          ? "Автоматическое обновление включено."
+          : "Автоматическое обновление выключено.",
+        messageType: "success",
+      });
+    } catch (error) {
+      setFormMessage(
+        message,
+        error instanceof Error ? error.message : "Не удалось изменить режим.",
+        "error",
+      );
+      saveButton.disabled = false;
+      runButton.disabled = (
+        !enabled.checked || sync.token_configured !== true
+      );
+    }
+  });
+  runButton.addEventListener("click", async () => {
+    saveButton.disabled = true;
+    runButton.disabled = true;
+    runButton.textContent = "Запускаем…";
+    try {
+      const syncResponse = await apiRequestForCurrentView(
+        `/api/tma/shared-tournaments/${tournament.id}/fixture-sync/run`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_version: tournament.version }),
+        },
+      );
+      const conflictCount = Number.isSafeInteger(syncResponse?.sync_result?.conflicts)
+        ? syncResponse.sync_result.conflicts
+        : 0;
+      void openSharedTournament(bootstrap, tournament.id, {
+        message: conflictCount > 0
+          ? `Синхронизация завершена: нужна проверка (${conflictCount}).`
+          : "Синхронизация завершена. Расписание и результаты обновлены.",
+        messageType: conflictCount > 0 ? "error" : "success",
+      });
+    } catch (error) {
+      setFormMessage(
+        message,
+        error instanceof Error ? error.message : "Не удалось запустить синхронизацию.",
+        "error",
+      );
+      saveButton.disabled = false;
+      runButton.disabled = false;
+      runButton.textContent = "Синхронизировать сейчас";
+    }
+  });
+  card.append(form);
+  return card;
+}
+
 function createSharedMatchCreationCard(bootstrap, tournament, state = {}) {
   const card = createElement("section", { className: "info-card" });
   const heading = createElement("h2", { text: "Добавить матч" });
+  const isChampionsLeague = (
+    tournament.template_key === "champions_league_2026_27"
+  );
   if (!Array.isArray(tournament.teams) || tournament.teams.length < 2) {
     card.append(
       heading,
@@ -10699,6 +11754,33 @@ function createSharedMatchCreationCard(bootstrap, tournament, state = {}) {
     createLabeledField("Вторая команда", awaySelect),
     createLabeledField("Начало и дедлайн", startInput),
   ];
+  const roundSelect = isChampionsLeague
+    ? createPlayoffRoundSelect({
+      id: `shared-match-${tournament.id}-round-key`,
+      name: "shared-match-round-key",
+      selectedRoundKey: "final",
+    })
+    : null;
+  if (roundSelect) {
+    for (const option of roundSelect.options) {
+      option.disabled = option.value !== "final";
+    }
+    roundSelect.value = "final";
+  }
+  const bracketPositionControl = roundSelect
+    ? createPlayoffBracketPositionSelect(tournament, roundSelect)
+    : null;
+  if (roundSelect) {
+    fields.splice(2, 0, createLabeledField("Раунд", roundSelect));
+    fields.splice(
+      3,
+      0,
+      createLabeledField(
+        "Позиция в раунде",
+        bracketPositionControl.select,
+      ),
+    );
+  }
   let bestOfSelect = null;
   if (tournament.template_key === "the_international_2026") {
     bestOfSelect = document.createElement("select");
@@ -10727,6 +11809,21 @@ function createSharedMatchCreationCard(bootstrap, tournament, state = {}) {
       setFormMessage(message, "Укажите дату и время начала.", "error");
       return;
     }
+    const bracketPosition = bracketPositionControl
+      ? Number(bracketPositionControl.select.value)
+      : null;
+    if (
+      bracketPositionControl
+      && (!Number.isSafeInteger(bracketPosition) || bracketPosition <= 0)
+    ) {
+      setFormMessage(
+        message,
+        "В финале уже нет свободной позиции.",
+        "error",
+      );
+      bracketPositionControl.select.focus();
+      return;
+    }
     submitButton.disabled = true;
     try {
       await apiRequestForCurrentView(`/api/tma/shared-tournaments/${tournament.id}/matches`, {
@@ -10737,6 +11834,8 @@ function createSharedMatchCreationCard(bootstrap, tournament, state = {}) {
           away_team_id: Number(awaySelect.value),
           starts_at_utc: startsAt.toISOString(),
           best_of: bestOfSelect ? Number(bestOfSelect.value) : null,
+          ...(roundSelect ? { round_key: roundSelect.value } : {}),
+          ...(bracketPositionControl ? { bracket_position: bracketPosition } : {}),
         }),
       });
       void openSharedTournament(bootstrap, tournament.id, {
@@ -10766,6 +11865,9 @@ function createLabeledField(labelText, input) {
 
 function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
   const isTwoLegged = isTwoLeggedMatch(match);
+  const isSeries = Number.isSafeInteger(match.best_of);
+  const isFinal = isFinalRoundEntity(match);
+  const roundName = getEntityRoundName(match);
   const card = createElement("section", { className: "info-card" });
   const heading = createElement("h2", {
     text: `${match.home_team.name} — ${match.away_team.name}`,
@@ -10773,7 +11875,8 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
   const impact = createElement("p", {
     className: "subtitle",
     text: (
-      `${isTwoLegged ? (match.leg_number === 1 ? "Первый матч" : "Ответный матч") + " · " : ""}`
+      `${roundName ? `${roundName} · ` : ""}`
+      + `${isTwoLegged ? (match.leg_number === 1 ? "Первый матч" : "Ответный матч") + " · " : ""}`
       + `${formatMatchStartsAt(match.starts_at_utc)} · `
       + `${match.linked_contest_count} ${getRussianPlural(match.linked_contest_count, "конкурс", "конкурса", "конкурсов")} · `
       + `${match.prediction_count} ${getRussianPlural(match.prediction_count, "прогноз", "прогноза", "прогнозов")}`
@@ -10788,9 +11891,10 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
     );
     const resultText = match.result
       ? (
-          `Итог: ${match.result.home_score}:${match.result.away_score}`
+          `${isSeries ? "Итоговый счёт серии" : "Счёт после 90 минут"}: `
+          + `${match.result.home_score}:${match.result.away_score}`
           + (!isTwoLegged && advancingTeam
-            ? ` · прошла дальше ${advancingTeam.name}`
+            ? ` · ${isFinal ? "победитель" : "прошла дальше"} ${advancingTeam.name}`
             : "")
         )
       : `Статус: ${match.status}`;
@@ -10869,14 +11973,20 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
     );
     resultForm.append(
       createLabeledField(
-        isTwoLegged ? `${match.home_team.name} · после 90 минут` : match.home_team.name,
+        isSeries
+          ? match.home_team.name
+          : `${match.home_team.name} · после 90 минут`,
         homeScore,
       ),
       createLabeledField(
-        isTwoLegged ? `${match.away_team.name} · после 90 минут` : match.away_team.name,
+        isSeries
+          ? match.away_team.name
+          : `${match.away_team.name} · после 90 минут`,
         awayScore,
       ),
-      ...(advancing ? [createLabeledField("Прошла дальше", advancing)] : []),
+      ...(advancing
+        ? [createLabeledField(isFinal ? "Победитель" : "Прошла дальше", advancing)]
+        : []),
       saveResultButton,
     );
     resultForm.addEventListener("submit", async (event) => {
@@ -10977,10 +12087,25 @@ function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
     createSharedChampionCard(bootstrap, tournament),
     createSharedSwissStageCard(bootstrap, tournament),
   );
+  const fixtureSyncCard = createFixtureSyncAdministrationCard(
+    bootstrap,
+    tournament,
+  );
+  if (fixtureSyncCard) {
+    cards.push(fixtureSyncCard);
+  }
+  const bracketCard = createPlayoffBracketCard(tournament, {
+    mode: "management",
+  });
+  if (bracketCard) {
+    cards.push(bracketCard);
+  }
   if (tournament.is_archived !== true) {
-    cards.push(createSharedMatchCreationCard(bootstrap, tournament, state));
+    const manualCards = [
+      createSharedMatchCreationCard(bootstrap, tournament, state),
+    ];
     if (tournament.template_key !== "the_international_2026") {
-      cards.push(
+      manualCards.push(
         createTwoLeggedTieFormCard(
           tournament,
           state,
@@ -10988,6 +12113,7 @@ function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
             endpoint: (
               `/api/tma/shared-tournaments/${tournament.id}/two-legged-ties`
             ),
+            includeBracketPosition: true,
             onCreated: () => {
               void openSharedTournament(bootstrap, tournament.id, {
                 message: "Двухматчевая пара добавлена во все связанные конкурсы.",
@@ -10998,6 +12124,15 @@ function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
         ),
       );
     }
+    cards.push(
+      createManualCorrectionCard(manualCards, {
+        open: Boolean(
+          state.matchMessage
+          || state.matchMessageType
+          || state.twoLeggedTieMessage
+        ),
+      }),
+    );
   }
   for (const match of tournament.matches || []) {
     cards.push(createSharedMatchAdministrationCard(bootstrap, tournament, match));

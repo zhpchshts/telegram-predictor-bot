@@ -13,9 +13,11 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.bot import create_dispatcher
+from app.champions_league_sync import run_champions_league_sync_worker
 from app.config import load_settings
 from app.database import database_connection, initialize_database
 from app.healthcheck_notifications import send_healthcheck_notification
+from app.football_data_provider import FootballDataClient
 from app.match_prediction_publications import (
     run_match_prediction_publication_worker,
 )
@@ -36,6 +38,7 @@ EXPECTED_BACKGROUND_TASK_NAMES = (
     "match-prediction-publications",
     "contest-publications",
     "match-lifecycle",
+    "champions-league-sync",
 )
 
 
@@ -234,6 +237,40 @@ def create_app() -> FastAPI:
                 name="match-lifecycle",
             )
             background_tasks[match_lifecycle_task.get_name()] = match_lifecycle_task
+            football_data_token = getattr(
+                settings,
+                "football_data_api_token",
+                None,
+            )
+            champions_league_sync_season = getattr(
+                settings,
+                "champions_league_sync_season",
+                2026,
+            )
+            football_data_client = (
+                FootballDataClient(
+                    token=football_data_token,
+                    season_start_year=champions_league_sync_season,
+                )
+                if football_data_token is not None
+                else None
+            )
+            champions_league_sync_task = asyncio.create_task(
+                run_champions_league_sync_worker(
+                    database_path=settings.database_path,
+                    client=football_data_client,
+                    season_start_year=champions_league_sync_season,
+                    interval_minutes=getattr(
+                        settings,
+                        "champions_league_sync_interval_minutes",
+                        10,
+                    ),
+                ),
+                name="champions-league-sync",
+            )
+            background_tasks[champions_league_sync_task.get_name()] = (
+                champions_league_sync_task
+            )
             if settings.healthcheck_chat_id is not None:
                 startup_notification_task = asyncio.create_task(
                     _send_startup_healthcheck_notification(

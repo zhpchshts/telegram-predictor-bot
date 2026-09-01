@@ -222,6 +222,39 @@ def test_ti_series_controls_and_historical_rules_are_preserved() -> None:
     assert "if (isSeries)" in result_source
 
 
+def test_football_matches_use_only_the_score_after_ninety_minutes() -> None:
+    source = _source()
+    rules_source = _function_source("createContestRulesCard")
+    advancing_source = _function_source("createAdvancingTeamField")
+    prediction_source = _function_source("createMatchPredictionSection")
+    result_source = _function_source("createMatchResultSection")
+    shared_result_source = _function_source("createSharedMatchAdministrationCard")
+
+    assert "Счёт учитывается строго после 90 минут" in rules_source
+    assert "Голы дополнительного " in rules_source
+    assert "времени и серии пенальти" in rules_source
+    assert "90 или 120 минут" not in source
+    assert "Итоговый счёт матча" not in source
+
+    for function_source in (prediction_source, result_source):
+        assert '? "Итоговый счёт серии"' in function_source
+        assert ': "Счёт после 90 минут"' in function_source
+        assert "Голы дополнительного времени и серии " in function_source
+        assert "пенальти" in function_source
+
+    assert "Сначала укажите счёт после 90 минут" in advancing_source
+    assert "При ничьей после 90 минут" in advancing_source
+    assert "определён счётом после 90 минут" in advancing_source
+
+    assert "const isSeries = Number.isSafeInteger(match.best_of)" in (
+        shared_result_source
+    )
+    assert 'isSeries ? "Итоговый счёт серии" : "Счёт после 90 минут"' in (
+        shared_result_source
+    )
+    assert shared_result_source.count("· после 90 минут") == 2
+
+
 def test_contest_rules_follow_the_selected_tournament_template() -> None:
     rules_source = _function_source("createContestRulesCard")
     details_source = _function_source("renderContestDetailsScreen")

@@ -60,7 +60,8 @@ def test_two_legged_matches_save_only_the_score_after_ninety_minutes() -> None:
 
     for function_source in (prediction_source, result_source):
         assert "const isTwoLegged = isTwoLeggedMatch(match)" in function_source
-        assert 'isTwoLegged ? "Счёт после 90 минут"' in function_source
+        assert '? "Итоговый счёт серии"' in function_source
+        assert ': "Счёт после 90 минут"' in function_source
         assert "isSeries || isTwoLegged" in function_source
 
     assert "if (isTwoLegged)" in prediction_source

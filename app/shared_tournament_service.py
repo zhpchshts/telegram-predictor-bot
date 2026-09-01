@@ -34,6 +34,20 @@ CHAMPIONS_LEAGUE_2026_27_SWISS_SELECTION_MODE = "up_to_limits"
 CHAMPIONS_LEAGUE_2026_27_DIRECT_CORRECT_POINTS = 2
 CHAMPIONS_LEAGUE_2026_27_ELIMINATION_CORRECT_POINTS = 1
 CHAMPIONS_LEAGUE_2026_27_CROSS_CATEGORY_POINTS = 0
+CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS: dict[str, tuple[str, int, str]] = {
+    "playoff": ("Стыковые матчи", 10, "knockout"),
+    "round_of_16": ("1/8 финала", 20, "knockout"),
+    "quarterfinal": ("1/4 финала", 30, "knockout"),
+    "semifinal": ("1/2 финала", 40, "knockout"),
+    "final": ("Финал", 50, "final"),
+}
+CHAMPIONS_LEAGUE_KNOCKOUT_ROUND_CAPACITIES: dict[str, int] = {
+    "playoff": 8,
+    "round_of_16": 8,
+    "quarterfinal": 4,
+    "semifinal": 2,
+    "final": 1,
+}
 SUPPORTED_TEMPLATE_KEYS = frozenset(
     {
         "world_cup_2026",
@@ -111,6 +125,10 @@ class SharedMatch:
     starts_at_utc: str
     best_of: int | None
     status: str
+    round_key: str | None
+    round_name: str | None
+    round_position: int | None
+    bracket_position: int | None
     home_score: int | None
     away_score: int | None
     advancing_team_id: int | None
@@ -124,6 +142,10 @@ class SharedTwoLeggedTie:
     id: int
     first_team: SharedTeam
     second_team: SharedTeam
+    round_key: str | None
+    round_name: str | None
+    round_position: int | None
+    bracket_position: int | None
     first_leg: SharedMatch
     second_leg: SharedMatch
     aggregate_first_team_score: int | None
@@ -709,6 +731,8 @@ def create_shared_match(
     actor_telegram_user_id: int,
     now_utc: datetime | None = None,
     allow_duplicate_pair: bool = False,
+    round_key: str | None = None,
+    bracket_position: int | None = None,
 ) -> SharedMatch:
     normalized_start = _normalize_datetime(starts_at_utc)
     with database_connection(database_path) as connection:
@@ -730,6 +754,8 @@ def create_shared_match(
             actor_telegram_user_id=actor_telegram_user_id,
             resolved_now=resolved_now,
             allow_duplicate_pair=allow_duplicate_pair,
+            round_key=round_key,
+            bracket_position=bracket_position,
         )
 
 
@@ -743,6 +769,8 @@ def create_shared_two_legged_tie(
     second_leg_starts_at_utc: str,
     actor_telegram_user_id: int,
     now_utc: datetime | None = None,
+    round_key: str | None = None,
+    bracket_position: int | None = None,
 ) -> SharedTwoLeggedTie:
     normalized_first_start = _normalize_datetime(first_leg_starts_at_utc)
     normalized_second_start = _normalize_datetime(second_leg_starts_at_utc)
@@ -760,6 +788,18 @@ def create_shared_two_legged_tie(
         )
         if str(tournament_row["template_key"]) == "the_international_2026":
             raise ValueError("Двухматчевые противостояния доступны только для футбола.")
+        normalized_round_key = _normalize_shared_round_key(
+            template_key=str(tournament_row["template_key"]),
+            round_key=round_key,
+            is_two_legged=True,
+        )
+        normalized_bracket_position = _resolve_shared_bracket_position(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            round_key=normalized_round_key,
+            requested_position=bracket_position,
+            entity="tie",
+        )
         first_team = _get_shared_team_row(
             connection,
             shared_tournament_id=shared_tournament_id,
@@ -779,6 +819,7 @@ def create_shared_two_legged_tie(
             SELECT 1
             FROM shared_matches
             WHERE shared_tournament_id = ?
+              AND (? IS NULL OR round_key = ?)
               AND (
                     (home_team_id = ? AND away_team_id = ?)
                  OR (home_team_id = ? AND away_team_id = ?)
@@ -787,6 +828,8 @@ def create_shared_two_legged_tie(
             """,
             (
                 shared_tournament_id,
+                normalized_round_key,
+                normalized_round_key,
                 first_team_id,
                 second_team_id,
                 second_team_id,
@@ -802,11 +845,18 @@ def create_shared_two_legged_tie(
             connection.execute(
                 """
                 INSERT INTO shared_two_legged_ties (
-                    shared_tournament_id, first_team_id, second_team_id
+                    shared_tournament_id, first_team_id, second_team_id,
+                    round_key, bracket_position
                 )
-                VALUES (?, ?, ?)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (shared_tournament_id, first_team_id, second_team_id),
+                (
+                    shared_tournament_id,
+                    first_team_id,
+                    second_team_id,
+                    normalized_round_key,
+                    normalized_bracket_position,
+                ),
             ).lastrowid
         )
         first_leg_id = _insert_shared_tie_leg(
@@ -817,6 +867,8 @@ def create_shared_two_legged_tie(
             home_team_id=first_team_id,
             away_team_id=second_team_id,
             starts_at_utc=normalized_first_start,
+            round_key=normalized_round_key,
+            bracket_position=normalized_bracket_position,
         )
         second_leg_id = _insert_shared_tie_leg(
             connection,
@@ -826,6 +878,8 @@ def create_shared_two_legged_tie(
             home_team_id=second_team_id,
             away_team_id=first_team_id,
             starts_at_utc=normalized_second_start,
+            round_key=normalized_round_key,
+            bracket_position=normalized_bracket_position,
         )
         contest_rows = connection.execute(
             """
@@ -1223,6 +1277,14 @@ def save_shared_match_result(
     now_utc: datetime | None = None,
     trusted_result_source: str | None = None,
 ) -> SharedMatch:
+    """Save and fan out a shared match result.
+
+    In football tournaments the score is strictly the score after 90 minutes;
+    the team that advances or wins is stored separately.  Existing column and
+    API names are retained for compatibility.  The International uses these
+    score fields for map wins instead.
+    """
+
     normalized_home_score = _normalize_score(home_score)
     normalized_away_score = _normalize_score(away_score)
     with database_connection(database_path) as connection:
@@ -2744,11 +2806,25 @@ def _create_shared_match_in_connection(
     actor_telegram_user_id: int,
     resolved_now: datetime,
     allow_duplicate_pair: bool,
+    round_key: str | None = None,
+    bracket_position: int | None = None,
 ) -> SharedMatch:
     if _parse_datetime(normalized_start) <= resolved_now:
         raise ValueError("Время начала нового матча должно быть в будущем.")
     normalized_best_of = _normalize_best_of(
         best_of, template_key=str(tournament_row["template_key"])
+    )
+    normalized_round_key = _normalize_shared_round_key(
+        template_key=str(tournament_row["template_key"]),
+        round_key=round_key,
+        is_two_legged=False,
+    )
+    normalized_bracket_position = _resolve_shared_bracket_position(
+        connection,
+        shared_tournament_id=shared_tournament_id,
+        round_key=normalized_round_key,
+        requested_position=bracket_position,
+        entity="match",
     )
     home_team = _get_shared_team_row(
         connection,
@@ -2769,6 +2845,7 @@ def _create_shared_match_in_connection(
         SELECT 1
         FROM shared_matches
         WHERE shared_tournament_id = ?
+          AND (? IS NULL OR round_key = ?)
           AND (
                 (home_team_id = ? AND away_team_id = ?)
              OR (home_team_id = ? AND away_team_id = ?)
@@ -2776,6 +2853,8 @@ def _create_shared_match_in_connection(
         """,
         (
             shared_tournament_id,
+            normalized_round_key,
+            normalized_round_key,
             home_team_id,
             away_team_id,
             away_team_id,
@@ -2794,9 +2873,11 @@ def _create_shared_match_in_connection(
                 home_team_id,
                 away_team_id,
                 starts_at_utc,
-                best_of
+                best_of,
+                round_key,
+                bracket_position
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 shared_tournament_id,
@@ -2804,6 +2885,8 @@ def _create_shared_match_in_connection(
                 away_team_id,
                 normalized_start,
                 normalized_best_of,
+                normalized_round_key,
+                normalized_bracket_position,
             ),
         ).lastrowid
     )
@@ -2857,15 +2940,18 @@ def _insert_shared_tie_leg(
     home_team_id: int,
     away_team_id: int,
     starts_at_utc: str,
+    round_key: str | None,
+    bracket_position: int | None,
 ) -> int:
     return int(
         connection.execute(
             """
             INSERT INTO shared_matches (
                 shared_tournament_id, shared_tie_id, leg_number,
-                home_team_id, away_team_id, starts_at_utc
+                home_team_id, away_team_id, starts_at_utc,
+                round_key, bracket_position
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 shared_tournament_id,
@@ -2874,6 +2960,8 @@ def _insert_shared_tie_leg(
                 home_team_id,
                 away_team_id,
                 starts_at_utc,
+                round_key,
+                bracket_position,
             ),
         ).lastrowid
     )
@@ -2904,6 +2992,88 @@ def _insert_shared_match_external_link(
             external_match_id,
         ),
     )
+
+
+def _get_or_create_local_round_stage(
+    connection: sqlite3.Connection,
+    *,
+    competition_id: int,
+    round_key: str | None,
+) -> int:
+    if round_key is None:
+        row = connection.execute(
+            """
+            SELECT id FROM stages
+            WHERE competition_id = ?
+            ORDER BY position, id
+            LIMIT 1
+            """,
+            (competition_id,),
+        ).fetchone()
+        if row is not None:
+            return int(row["id"])
+        return int(
+            connection.execute(
+                """
+                INSERT INTO stages (competition_id, name, position, stage_type)
+                VALUES (?, 'Плей-офф', 1, 'knockout')
+                """,
+                (competition_id,),
+            ).lastrowid
+        )
+
+    definition = CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS.get(round_key)
+    if definition is None:
+        raise RuntimeError("Общий матч содержит неизвестный раунд.")
+    round_name, round_position, stage_type = definition
+    row = connection.execute(
+        """
+        SELECT id FROM stages
+        WHERE competition_id = ? AND stage_key = ?
+        """,
+        (competition_id, round_key),
+    ).fetchone()
+    if row is not None:
+        return int(row["id"])
+    return int(
+        connection.execute(
+            """
+            INSERT INTO stages (
+                competition_id, name, position, stage_type, stage_key
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                competition_id,
+                round_name,
+                round_position,
+                stage_type,
+                round_key,
+            ),
+        ).lastrowid
+    )
+
+
+def _resolve_local_tie_position(
+    connection: sqlite3.Connection,
+    *,
+    stage_id: int,
+    requested_position: int | None,
+) -> int:
+    if requested_position is not None:
+        occupied = connection.execute(
+            "SELECT 1 FROM ties WHERE stage_id = ? AND position = ?",
+            (stage_id, requested_position),
+        ).fetchone()
+        if occupied is None:
+            return requested_position
+    row = connection.execute(
+        "SELECT COALESCE(MAX(position), 0) + 1 AS value FROM ties WHERE stage_id = ?",
+        (stage_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Не удалось определить позицию противостояния.")
+    return int(row["value"])
 
 
 def _create_local_two_legged_tie(
@@ -2941,32 +3111,27 @@ def _create_local_two_legged_tie(
     if competition_row is None:
         raise RuntimeError("Не найдены правила связанного конкурса.")
     competition_id = int(competition_row["competition_id"])
-    stage_row = connection.execute(
-        """
-        SELECT id FROM stages
-        WHERE competition_id = ?
-        ORDER BY position, id
-        LIMIT 1
-        """,
-        (competition_id,),
-    ).fetchone()
-    if stage_row is None:
-        stage_id = int(
-            connection.execute(
-                """
-                INSERT INTO stages (competition_id, name, position, stage_type)
-                VALUES (?, 'Плей-офф', 1, 'knockout')
-                """,
-                (competition_id,),
-            ).lastrowid
-        )
-    else:
-        stage_id = int(stage_row["id"])
-    position = int(
-        connection.execute(
-            "SELECT COALESCE(MAX(position), 0) + 1 FROM ties WHERE stage_id = ?",
-            (stage_id,),
-        ).fetchone()[0]
+    round_key = (
+        str(shared_tie_row["round_key"])
+        if "round_key" in shared_tie_row.keys()
+        and shared_tie_row["round_key"] is not None
+        else None
+    )
+    stage_id = _get_or_create_local_round_stage(
+        connection,
+        competition_id=competition_id,
+        round_key=round_key,
+    )
+    requested_position = (
+        int(shared_tie_row["bracket_position"])
+        if "bracket_position" in shared_tie_row.keys()
+        and shared_tie_row["bracket_position"] is not None
+        else None
+    )
+    position = _resolve_local_tie_position(
+        connection,
+        stage_id=stage_id,
+        requested_position=requested_position,
     )
     team_names = connection.execute(
         """
@@ -3120,32 +3285,28 @@ def _create_local_match(
     if competition_row is None:
         raise RuntimeError("Не найдены правила связанного конкурса.")
     competition_id = int(competition_row["competition_id"])
-    stage_row = connection.execute(
-        """
-        SELECT id FROM stages
-        WHERE competition_id = ?
-        ORDER BY position, id
-        LIMIT 1
-        """,
-        (competition_id,),
-    ).fetchone()
-    if stage_row is None:
-        stage_id = int(
-            connection.execute(
-                """
-                INSERT INTO stages (competition_id, name, position, stage_type)
-                VALUES (?, 'Плей-офф', 1, 'knockout')
-                """,
-                (competition_id,),
-            ).lastrowid
-        )
-    else:
-        stage_id = int(stage_row["id"])
-    position_row = connection.execute(
-        "SELECT COALESCE(MAX(position), 0) + 1 AS value FROM ties WHERE stage_id = ?",
-        (stage_id,),
-    ).fetchone()
-    position = int(position_row["value"])
+    round_key = (
+        str(shared_match_row["round_key"])
+        if "round_key" in shared_match_row.keys()
+        and shared_match_row["round_key"] is not None
+        else None
+    )
+    stage_id = _get_or_create_local_round_stage(
+        connection,
+        competition_id=competition_id,
+        round_key=round_key,
+    )
+    requested_position = (
+        int(shared_match_row["bracket_position"])
+        if "bracket_position" in shared_match_row.keys()
+        and shared_match_row["bracket_position"] is not None
+        else None
+    )
+    position = _resolve_local_tie_position(
+        connection,
+        stage_id=stage_id,
+        requested_position=requested_position,
+    )
     team_names = connection.execute(
         """
         SELECT home.name AS home_name, away.name AS away_name
@@ -3450,6 +3611,10 @@ def _get_shared_two_legged_tie_details(
         second_team=SharedTeam(
             id=int(team_row["second_id"]), name=str(team_row["second_name"])
         ),
+        round_key=_shared_row_round_key(tie_row),
+        round_name=_shared_round_name(_shared_row_round_key(tie_row)),
+        round_position=_shared_round_position(_shared_row_round_key(tie_row)),
+        bracket_position=_shared_optional_integer(tie_row, "bracket_position"),
         first_leg=_shared_match_from_row(leg_rows[0]),
         second_leg=_shared_match_from_row(leg_rows[1]),
         aggregate_first_team_score=aggregate_first,
@@ -3595,6 +3760,7 @@ def _shared_tournament_summary_from_row(row: sqlite3.Row) -> SharedTournamentSum
 
 
 def _shared_match_from_row(row: sqlite3.Row) -> SharedMatch:
+    round_key = _shared_row_round_key(row)
     return SharedMatch(
         id=int(row["id"]),
         shared_tie_id=(
@@ -3610,6 +3776,10 @@ def _shared_match_from_row(row: sqlite3.Row) -> SharedMatch:
         starts_at_utc=str(row["starts_at_utc"]),
         best_of=int(row["best_of"]) if row["best_of"] is not None else None,
         status=str(row["status"]),
+        round_key=round_key,
+        round_name=_shared_round_name(round_key),
+        round_position=_shared_round_position(round_key),
+        bracket_position=_shared_optional_integer(row, "bracket_position"),
         home_score=(
             int(row["home_score_final"])
             if row["home_score_final"] is not None
@@ -3631,8 +3801,30 @@ def _shared_match_from_row(row: sqlite3.Row) -> SharedMatch:
     )
 
 
+def _shared_row_round_key(row: sqlite3.Row) -> str | None:
+    return (
+        str(row["round_key"])
+        if "round_key" in row.keys() and row["round_key"] is not None
+        else None
+    )
+
+
+def _shared_round_name(round_key: str | None) -> str | None:
+    definition = CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS.get(round_key or "")
+    return definition[0] if definition is not None else None
+
+
+def _shared_round_position(round_key: str | None) -> int | None:
+    definition = CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS.get(round_key or "")
+    return definition[1] if definition is not None else None
+
+
+def _shared_optional_integer(row: sqlite3.Row, key: str) -> int | None:
+    return int(row[key]) if key in row.keys() and row[key] is not None else None
+
+
 def _shared_match_snapshot(row: sqlite3.Row) -> dict[str, object]:
-    return {
+    snapshot = {
         "id": int(row["id"]),
         "shared_tie_id": (
             int(row["shared_tie_id"]) if row["shared_tie_id"] is not None else None
@@ -3662,10 +3854,14 @@ def _shared_match_snapshot(row: sqlite3.Row) -> dict[str, object]:
         ),
         "version": int(row["version"]),
     }
+    if _shared_row_round_key(row) is not None:
+        snapshot["round_key"] = _shared_row_round_key(row)
+        snapshot["bracket_position"] = _shared_optional_integer(row, "bracket_position")
+    return snapshot
 
 
 def _shared_two_legged_tie_snapshot(row: sqlite3.Row) -> dict[str, object]:
-    return {
+    snapshot = {
         "id": int(row["id"]),
         "first_team_id": int(row["first_team_id"]),
         "second_team_id": int(row["second_team_id"]),
@@ -3685,6 +3881,10 @@ def _shared_two_legged_tie_snapshot(row: sqlite3.Row) -> dict[str, object]:
         "second_leg_away_penalty_score": row["second_leg_away_penalty_score"],
         "version": int(row["version"]),
     }
+    if _shared_row_round_key(row) is not None:
+        snapshot["round_key"] = _shared_row_round_key(row)
+        snapshot["bracket_position"] = _shared_optional_integer(row, "bracket_position")
+    return snapshot
 
 
 def _shared_two_legged_tie_result_state(
@@ -4393,6 +4593,104 @@ def _normalize_external_identity(value: str, *, field_name: str) -> str:
     return normalized
 
 
+def _normalize_shared_round_key(
+    *,
+    template_key: str,
+    round_key: str | None,
+    is_two_legged: bool,
+) -> str | None:
+    if template_key != CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
+        if round_key is not None:
+            raise ValueError(
+                "Названия раундов доступны только для Лиги чемпионов 2026/27."
+            )
+        return None
+
+    normalized = round_key.strip() if isinstance(round_key, str) else ""
+    if not normalized:
+        normalized = "playoff" if is_two_legged else "final"
+    if normalized not in CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS:
+        raise ValueError("Неизвестный раунд плей-офф Лиги чемпионов.")
+    if is_two_legged and normalized == "final":
+        raise ValueError("Финал Лиги чемпионов состоит из одного матча.")
+    if not is_two_legged and normalized != "final":
+        raise ValueError("Стыки, 1/8, 1/4 и 1/2 финала создаются двухматчевыми парами.")
+    return normalized
+
+
+def _resolve_shared_bracket_position(
+    connection: sqlite3.Connection,
+    *,
+    shared_tournament_id: int,
+    round_key: str | None,
+    requested_position: int | None,
+    entity: str,
+) -> int | None:
+    if round_key is None:
+        if requested_position is not None:
+            raise ValueError("Позиция сетки доступна только для раунда Лиги чемпионов.")
+        return None
+    capacity = CHAMPIONS_LEAGUE_KNOCKOUT_ROUND_CAPACITIES.get(round_key)
+    if capacity is None:  # pragma: no cover - round_key is normalized by the caller
+        raise ValueError("Неизвестный раунд плей-офф Лиги чемпионов.")
+    if requested_position is not None:
+        if (
+            isinstance(requested_position, bool)
+            or not isinstance(requested_position, int)
+            or requested_position <= 0
+        ):
+            raise ValueError("Позиция в сетке должна быть положительным числом.")
+        if requested_position > capacity:
+            raise ValueError(f"Для этого раунда доступны позиции от 1 до {capacity}.")
+        position = requested_position
+    else:
+        table = "shared_two_legged_ties" if entity == "tie" else "shared_matches"
+        extra_filter = "" if entity == "tie" else " AND shared_tie_id IS NULL"
+        occupied_rows = connection.execute(
+            f"""
+            SELECT bracket_position
+            FROM {table}
+            WHERE shared_tournament_id = ? AND round_key = ?{extra_filter}
+            """,  # noqa: S608 - table/filter are fixed internal constants.
+            (shared_tournament_id, round_key),
+        ).fetchall()
+        occupied = {
+            int(row["bracket_position"])
+            for row in occupied_rows
+            if row["bracket_position"] is not None
+        }
+        position = next(
+            (
+                candidate
+                for candidate in range(1, capacity + 1)
+                if candidate not in occupied
+            ),
+            None,
+        )
+        if position is None:
+            if entity == "tie":
+                raise SharedTwoLeggedTieConflictError(
+                    "Все позиции выбранного раунда уже заняты."
+                )
+            raise SharedMatchConflictError("Все позиции выбранного раунда уже заняты.")
+
+    table = "shared_two_legged_ties" if entity == "tie" else "shared_matches"
+    extra_filter = "" if entity == "tie" else " AND shared_tie_id IS NULL"
+    duplicate = connection.execute(
+        f"""
+        SELECT 1 FROM {table}
+        WHERE shared_tournament_id = ? AND round_key = ?
+          AND bracket_position = ?{extra_filter}
+        """,  # noqa: S608 - table/filter are fixed internal constants.
+        (shared_tournament_id, round_key, position),
+    ).fetchone()
+    if duplicate is not None:
+        if entity == "tie":
+            raise SharedTwoLeggedTieConflictError("Позиция в сетке уже занята.")
+        raise SharedMatchConflictError("Позиция в сетке уже занята.")
+    return position
+
+
 def _normalize_template_key(value: str) -> str:
     if value not in SUPPORTED_TEMPLATE_KEYS:
         raise ValueError("Неизвестный шаблон общего турнира.")
@@ -4540,6 +4838,8 @@ def _resolve_advancing_team(
     away_score: int,
     advancing_team_id: int | None,
 ) -> int:
+    """Validate a separate winner against a series or 90-minute score."""
+
     home_team_id = int(match_row["home_team_id"])
     away_team_id = int(match_row["away_team_id"])
     if template_key == "the_international_2026":
@@ -4560,7 +4860,9 @@ def _resolve_advancing_team(
         raise ValueError("Укажите команду, прошедшую дальше.")
     expected = home_team_id if home_score > away_score else away_team_id
     if home_score != away_score and advancing_team_id != expected:
-        raise ValueError("Прошедшая команда должна совпадать с победителем по счёту.")
+        raise ValueError(
+            "Прошедшая команда должна совпадать с победителем по счёту после 90 минут."
+        )
     return advancing_team_id
 
 

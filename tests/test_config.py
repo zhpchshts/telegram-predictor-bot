@@ -118,6 +118,54 @@ def test_shared_tournament_admin_ids_are_optional_and_deduplicated(monkeypatch) 
     assert load_settings().shared_tournament_admin_ids == frozenset({123, 456})
 
 
+def test_champions_league_sync_defaults_to_idle_2026_season(monkeypatch) -> None:
+    _set_required_environment(monkeypatch)
+    monkeypatch.delenv("FOOTBALL_DATA_API_TOKEN", raising=False)
+    monkeypatch.delenv("CHAMPIONS_LEAGUE_SYNC_SEASON", raising=False)
+    monkeypatch.delenv("CHAMPIONS_LEAGUE_SYNC_INTERVAL_MINUTES", raising=False)
+
+    settings = load_settings()
+
+    assert settings.football_data_api_token is None
+    assert settings.champions_league_sync_season == 2026
+    assert settings.champions_league_sync_interval_minutes == 10
+
+
+def test_champions_league_sync_configuration_is_parsed(monkeypatch) -> None:
+    _set_required_environment(monkeypatch)
+    monkeypatch.setenv("FOOTBALL_DATA_API_TOKEN", " secret-token ")
+    monkeypatch.setenv("CHAMPIONS_LEAGUE_SYNC_SEASON", "2026")
+    monkeypatch.setenv("CHAMPIONS_LEAGUE_SYNC_INTERVAL_MINUTES", "15")
+
+    settings = load_settings()
+
+    assert settings.football_data_api_token == "secret-token"
+    assert settings.champions_league_sync_season == 2026
+    assert settings.champions_league_sync_interval_minutes == 15
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("CHAMPIONS_LEAGUE_SYNC_SEASON", "1999"),
+        ("CHAMPIONS_LEAGUE_SYNC_SEASON", "2027"),
+        ("CHAMPIONS_LEAGUE_SYNC_SEASON", "invalid"),
+        ("CHAMPIONS_LEAGUE_SYNC_INTERVAL_MINUTES", "0"),
+        ("CHAMPIONS_LEAGUE_SYNC_INTERVAL_MINUTES", "1441"),
+    ],
+)
+def test_champions_league_sync_rejects_invalid_numbers(
+    monkeypatch,
+    name: str,
+    value: str,
+) -> None:
+    _set_required_environment(monkeypatch)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(RuntimeError, match=name):
+        load_settings()
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "abc", "123,,456"])
 def test_shared_tournament_admin_ids_reject_invalid_values(
     monkeypatch, value: str

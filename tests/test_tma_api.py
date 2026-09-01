@@ -406,6 +406,42 @@ def test_integer_request_fields_preserve_numeric_string_coercion() -> None:
     assert payload.predicted_advancing_team_id == 3
 
 
+@pytest.mark.parametrize(
+    ("model_class", "home_field", "away_field", "winner_field"),
+    [
+        (
+            SaveMatchPredictionRequest,
+            "predicted_home_score",
+            "predicted_away_score",
+            "predicted_advancing_team_id",
+        ),
+        (
+            SaveMatchResultRequest,
+            "home_score",
+            "away_score",
+            "advancing_team_id",
+        ),
+        (
+            tma_api.SaveSharedMatchResultRequest,
+            "home_score",
+            "away_score",
+            "advancing_team_id",
+        ),
+    ],
+)
+def test_match_score_request_contract_defines_football_scores_as_90_minutes(
+    model_class: type[BaseModel],
+    home_field: str,
+    away_field: str,
+    winner_field: str,
+) -> None:
+    properties = model_class.model_json_schema()["properties"]
+
+    assert "90 минут" in properties[home_field]["description"]
+    assert "90 минут" in properties[away_field]["description"]
+    assert "отдельно" in properties[winner_field]["description"]
+
+
 def test_swiss_stage_settings_request_defaults_to_three_plus_five() -> None:
     payload = tma_api.SaveSwissStagePredictionSettingsRequest.model_validate(
         {
@@ -1827,6 +1863,14 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
         (
             "GET",
             "/api/tma/shared-tournaments/{shared_tournament_id}",
+        ): "shared_tournament_management",
+        (
+            "PUT",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/fixture-sync",
+        ): "shared_tournament_management",
+        (
+            "POST",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/fixture-sync/run",
         ): "shared_tournament_management",
         (
             "POST",

@@ -113,6 +113,24 @@ _CURRENT_SHARED_EVENT_COLUMNS = (
 )
 _MIGRATED_SHARED_EVENT_COLUMNS = _LEGACY_SHARED_EVENT_COLUMNS + ("shared_tie_id",)
 
+_CURRENT_SHARED_TIE_COLUMNS = (
+    "id",
+    "shared_tournament_id",
+    "first_team_id",
+    "second_team_id",
+    "advancing_team_id",
+    "resolution_method",
+    "second_leg_extra_time_home_score",
+    "second_leg_extra_time_away_score",
+    "second_leg_home_penalty_score",
+    "second_leg_away_penalty_score",
+    "version",
+    "created_at",
+    "updated_at",
+)
+_BRACKET_SHARED_TIE_ADDITIONS = frozenset({"round_key", "bracket_position"})
+_BRACKET_SHARED_MATCH_ADDITIONS = frozenset({"round_key", "bracket_position"})
+
 _NEW_TABLES = ("shared_two_legged_ties", "shared_tie_links")
 
 
@@ -245,14 +263,42 @@ def _schema_state(connection: sqlite3.Connection) -> str:
             _MIGRATED_MATCH_COLUMNS,
             _MIGRATED_MATCH_COLUMNS_BEST_OF_LAST,
         }
-        and shared_match_columns
-        in {_CURRENT_SHARED_MATCH_COLUMNS, _MIGRATED_SHARED_MATCH_COLUMNS}
+        and _columns_match_with_allowed_additions(
+            shared_match_columns,
+            expected_variants=(
+                _CURRENT_SHARED_MATCH_COLUMNS,
+                _MIGRATED_SHARED_MATCH_COLUMNS,
+            ),
+            allowed_additions=_BRACKET_SHARED_MATCH_ADDITIONS,
+        )
         and shared_event_columns
         in {_CURRENT_SHARED_EVENT_COLUMNS, _MIGRATED_SHARED_EVENT_COLUMNS}
         and new_table_count == len(_NEW_TABLES)
+        and _columns_match_with_allowed_additions(
+            _column_names(connection, "shared_two_legged_ties"),
+            expected_variants=(_CURRENT_SHARED_TIE_COLUMNS,),
+            allowed_additions=_BRACKET_SHARED_TIE_ADDITIONS,
+        )
     ):
         return "current"
     return "unexpected"
+
+
+def _columns_match_with_allowed_additions(
+    actual: tuple[str, ...],
+    *,
+    expected_variants: tuple[tuple[str, ...], ...],
+    allowed_additions: frozenset[str],
+) -> bool:
+    actual_additions = set(actual).intersection(allowed_additions)
+    unexpected = set(actual).difference(
+        *(set(expected) for expected in expected_variants),
+        allowed_additions,
+    )
+    if unexpected or not actual_additions.issubset(allowed_additions):
+        return False
+    filtered = tuple(column for column in actual if column not in allowed_additions)
+    return filtered in expected_variants
 
 
 def _create_shared_two_legged_ties(connection: sqlite3.Connection) -> None:

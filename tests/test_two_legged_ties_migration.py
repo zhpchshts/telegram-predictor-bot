@@ -266,6 +266,18 @@ def test_migration_accepts_current_schema_as_noop(tmp_path: Path) -> None:
         )
 
 
+def test_migration_still_rejects_unrelated_additive_core_column(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "unexpected-current.db"
+    initialize_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("ALTER TABLE shared_matches ADD COLUMN unexpected TEXT")
+
+    with pytest.raises(RuntimeError, match="Partially applied"):
+        migrate_database(database_path)
+
+
 def test_migration_requires_existing_database_and_backup_is_non_destructive(
     tmp_path: Path,
 ) -> None:

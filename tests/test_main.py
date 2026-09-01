@@ -111,6 +111,7 @@ def test_health_reports_missing_database_and_stopped_task(tmp_path: Path) -> Non
                 "match-prediction-publications": "ok",
                 "contest-publications": "ok",
                 "match-lifecycle": "ok",
+                "champions-league-sync": "ok",
             },
         },
     }
@@ -304,6 +305,9 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
     async def match_lifecycle_worker(**_kwargs) -> None:
         await background_task("match-lifecycle")
 
+    async def champions_league_sync_worker(**_kwargs) -> None:
+        await background_task("champions-league-sync")
+
     async def startup_healthcheck_notification(**_kwargs) -> None:
         startup_steps.append("healthcheck-notification")
 
@@ -349,6 +353,11 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
     )
     monkeypatch.setattr(
         main,
+        "run_champions_league_sync_worker",
+        champions_league_sync_worker,
+    )
+    monkeypatch.setattr(
+        main,
         "send_healthcheck_notification",
         startup_healthcheck_notification,
     )
@@ -371,6 +380,7 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         "match-publication",
         "contest-publication",
         "match-lifecycle",
+        "champions-league-sync",
     }
     assert set(cancelled) == set(started)
     assert session_closed is True

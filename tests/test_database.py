@@ -54,6 +54,11 @@ def test_initialize_database_creates_current_schema(tmp_path: Path) -> None:
         "shared_two_legged_ties",
         "shared_tie_links",
         "shared_match_external_links",
+        "shared_bracket_nodes",
+        "shared_tournament_external_sources",
+        "shared_team_external_links",
+        "shared_tie_external_links",
+        "shared_fixture_imports",
         "contest_shared_tournaments",
         "shared_match_links",
         "shared_tournament_events",
@@ -95,7 +100,7 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
             """
         ).fetchone()[0]
 
-    assert tables_count == 43
+    assert tables_count == 48
 
 
 def test_initialize_database_rolls_back_all_schema_changes_on_failure(

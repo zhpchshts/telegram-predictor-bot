@@ -172,12 +172,26 @@ CREATE TABLE IF NOT EXISTS stages (
     competition_id INTEGER NOT NULL REFERENCES competitions(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     position INTEGER NOT NULL,
+    stage_key TEXT CHECK (
+        stage_key IS NULL
+        OR stage_key IN (
+            'playoff',
+            'round_of_16',
+            'quarterfinal',
+            'semifinal',
+            'final'
+        )
+    ),
     stage_type TEXT NOT NULL CHECK (
         stage_type IN ('league', 'group', 'knockout', 'final', 'other')
     ),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (competition_id, position)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stages_competition_stage_key
+    ON stages(competition_id, stage_key)
+    WHERE stage_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS teams (
     id INTEGER PRIMARY KEY,
@@ -285,6 +299,18 @@ CREATE TABLE IF NOT EXISTS shared_two_legged_ties (
         second_leg_away_penalty_score IS NULL
         OR second_leg_away_penalty_score >= 0
     ),
+    round_key TEXT CHECK (
+        round_key IS NULL
+        OR round_key IN (
+            'playoff',
+            'round_of_16',
+            'quarterfinal',
+            'semifinal'
+        )
+    ),
+    bracket_position INTEGER CHECK (
+        bracket_position IS NULL OR bracket_position > 0
+    ),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -307,6 +333,12 @@ CREATE TABLE IF NOT EXISTS shared_two_legged_ties (
 CREATE INDEX IF NOT EXISTS idx_shared_two_legged_ties_tournament
     ON shared_two_legged_ties(shared_tournament_id, id);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shared_two_legged_ties_bracket_position
+    ON shared_two_legged_ties(
+        shared_tournament_id, round_key, bracket_position
+    )
+    WHERE round_key IS NOT NULL AND bracket_position IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS shared_matches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     shared_tournament_id INTEGER NOT NULL
@@ -321,9 +353,24 @@ CREATE TABLE IF NOT EXISTS shared_matches (
     status TEXT NOT NULL DEFAULT 'scheduled' CHECK (
         status IN ('scheduled', 'started', 'finished', 'cancelled')
     ),
+    -- Legacy names retained for compatibility. For football these values are
+    -- strictly the score after 90 minutes; the eventual winner is separate.
     home_score_final INTEGER,
     away_score_final INTEGER,
     advancing_team_id INTEGER REFERENCES teams(id),
+    round_key TEXT CHECK (
+        round_key IS NULL
+        OR round_key IN (
+            'playoff',
+            'round_of_16',
+            'quarterfinal',
+            'semifinal',
+            'final'
+        )
+    ),
+    bracket_position INTEGER CHECK (
+        bracket_position IS NULL OR bracket_position > 0
+    ),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -351,6 +398,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_shared_matches_tie_leg_number
     ON shared_matches(shared_tie_id, leg_number)
     WHERE shared_tie_id IS NOT NULL;
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shared_matches_standalone_bracket_position
+    ON shared_matches(shared_tournament_id, round_key, bracket_position)
+    WHERE shared_tie_id IS NULL
+      AND round_key IS NOT NULL
+      AND bracket_position IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS shared_match_external_links (
     shared_match_id INTEGER PRIMARY KEY
         REFERENCES shared_matches(id) ON DELETE CASCADE,
@@ -364,6 +417,300 @@ CREATE TABLE IF NOT EXISTS shared_match_external_links (
         shared_tournament_id, source, external_event_id, external_match_id
     )
 );
+
+CREATE TABLE IF NOT EXISTS shared_bracket_nodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shared_tournament_id INTEGER NOT NULL
+        REFERENCES shared_tournaments(id) ON DELETE CASCADE,
+    round_key TEXT NOT NULL CHECK (
+        round_key IN (
+            'playoff',
+            'round_of_16',
+            'quarterfinal',
+            'semifinal',
+            'final'
+        )
+    ),
+    bracket_position INTEGER NOT NULL CHECK (bracket_position > 0),
+    node_format TEXT NOT NULL CHECK (
+        node_format IN ('two_legged', 'single')
+    ),
+    first_source_node_id INTEGER
+        REFERENCES shared_bracket_nodes(id) ON DELETE SET NULL,
+    second_source_node_id INTEGER
+        REFERENCES shared_bracket_nodes(id) ON DELETE SET NULL,
+    resolved_first_team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
+    resolved_second_team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
+    first_leg_starts_at_utc TEXT,
+    second_leg_starts_at_utc TEXT,
+    materialized_shared_tie_id INTEGER UNIQUE
+        REFERENCES shared_two_legged_ties(id) ON DELETE SET NULL,
+    materialized_shared_match_id INTEGER UNIQUE
+        REFERENCES shared_matches(id) ON DELETE SET NULL,
+    sync_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        sync_status IN ('pending', 'materialized', 'conflict')
+    ),
+    sync_error TEXT,
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (shared_tournament_id, round_key, bracket_position),
+    CHECK (
+        (round_key = 'final' AND node_format = 'single')
+        OR (round_key != 'final' AND node_format = 'two_legged')
+    ),
+    CHECK (
+        first_source_node_id IS NULL
+        OR second_source_node_id IS NULL
+        OR first_source_node_id != second_source_node_id
+    ),
+    CHECK (
+        resolved_first_team_id IS NULL
+        OR resolved_second_team_id IS NULL
+        OR resolved_first_team_id != resolved_second_team_id
+    ),
+    CHECK (
+        (node_format = 'two_legged' AND materialized_shared_match_id IS NULL)
+        OR (node_format = 'single' AND materialized_shared_tie_id IS NULL)
+    ),
+    CHECK (
+        node_format = 'two_legged' OR second_leg_starts_at_utc IS NULL
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_bracket_nodes_first_source
+    ON shared_bracket_nodes(first_source_node_id)
+    WHERE first_source_node_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_shared_bracket_nodes_second_source
+    ON shared_bracket_nodes(second_source_node_id)
+    WHERE second_source_node_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS shared_tournament_external_sources (
+    shared_tournament_id INTEGER NOT NULL
+        REFERENCES shared_tournaments(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    external_event_id TEXT NOT NULL,
+    sync_enabled INTEGER NOT NULL DEFAULT 0 CHECK (sync_enabled IN (0, 1)),
+    enabled_at TEXT,
+    sync_generation INTEGER NOT NULL DEFAULT 1 CHECK (sync_generation > 0),
+    last_attempt_at TEXT,
+    last_success_at TEXT,
+    last_error TEXT,
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (shared_tournament_id, source)
+);
+
+CREATE TABLE IF NOT EXISTS shared_team_external_links (
+    shared_tournament_id INTEGER NOT NULL,
+    team_id INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    external_team_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (
+        shared_tournament_id, source, external_team_id
+    ),
+    UNIQUE (shared_tournament_id, source, team_id),
+    FOREIGN KEY (shared_tournament_id, team_id)
+        REFERENCES shared_tournament_teams(shared_tournament_id, team_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (shared_tournament_id, source)
+        REFERENCES shared_tournament_external_sources(
+            shared_tournament_id, source
+        )
+        ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS shared_tie_external_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shared_tournament_id INTEGER NOT NULL
+        REFERENCES shared_tournaments(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    external_event_id TEXT NOT NULL,
+    external_tie_id TEXT NOT NULL,
+    shared_tie_id INTEGER
+        REFERENCES shared_two_legged_ties(id) ON DELETE SET NULL,
+    round_key TEXT CHECK (
+        round_key IS NULL
+        OR round_key IN (
+            'playoff',
+            'round_of_16',
+            'quarterfinal',
+            'semifinal'
+        )
+    ),
+    bracket_position INTEGER CHECK (
+        bracket_position IS NULL OR bracket_position > 0
+    ),
+    materialization_claim TEXT,
+    claim_started_at TEXT,
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    tombstoned_at TEXT,
+    UNIQUE (
+        shared_tournament_id, source, external_event_id, external_tie_id
+    ),
+    CHECK (
+        (materialization_claim IS NULL) = (claim_started_at IS NULL)
+    ),
+    CHECK (
+        (round_key IS NULL) = (bracket_position IS NULL)
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shared_tie_external_links_live_tie
+    ON shared_tie_external_links(shared_tie_id)
+    WHERE shared_tie_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS shared_fixture_imports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shared_tournament_id INTEGER NOT NULL
+        REFERENCES shared_tournaments(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    external_event_id TEXT NOT NULL,
+    external_fixture_id TEXT NOT NULL,
+    external_tie_id TEXT,
+    round_key TEXT NOT NULL CHECK (
+        round_key IN (
+            'playoff',
+            'round_of_16',
+            'quarterfinal',
+            'semifinal',
+            'final'
+        )
+    ),
+    bracket_position INTEGER NOT NULL CHECK (bracket_position > 0),
+    leg_number INTEGER CHECK (leg_number IS NULL OR leg_number IN (1, 2)),
+    shared_bracket_node_id INTEGER
+        REFERENCES shared_bracket_nodes(id) ON DELETE SET NULL,
+    shared_tie_id INTEGER
+        REFERENCES shared_two_legged_ties(id) ON DELETE SET NULL,
+    shared_match_id INTEGER
+        REFERENCES shared_matches(id) ON DELETE SET NULL,
+    payload_hash TEXT NOT NULL,
+    provider_updated_at TEXT,
+    import_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        import_status IN ('pending', 'imported', 'conflict', 'tombstoned')
+    ),
+    last_error TEXT,
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    imported_at TEXT,
+    tombstoned_at TEXT,
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    UNIQUE (
+        shared_tournament_id, source, external_event_id, external_fixture_id
+    ),
+    CHECK (
+        (round_key = 'final' AND leg_number IS NULL)
+        OR (round_key != 'final' AND leg_number IN (1, 2))
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_fixture_imports_pending
+    ON shared_fixture_imports(shared_tournament_id, import_status, last_seen_at);
+
+CREATE TRIGGER IF NOT EXISTS trg_shared_matches_fixture_import_tombstone
+BEFORE DELETE ON shared_matches
+BEGIN
+    UPDATE shared_fixture_imports
+    SET import_status = 'tombstoned',
+        tombstoned_at = CURRENT_TIMESTAMP,
+        last_error = 'Материализованный матч был удалён.',
+        version = version + 1
+    WHERE shared_match_id = OLD.id
+       OR (
+            OLD.shared_tie_id IS NULL
+            AND shared_match_id IS NULL
+            AND shared_tie_id IS NULL
+            AND shared_tournament_id = OLD.shared_tournament_id
+            AND round_key = OLD.round_key
+            AND bracket_position = OLD.bracket_position
+       );
+    UPDATE shared_bracket_nodes
+    SET sync_status = 'conflict',
+        sync_error = 'Материализованный матч был удалён.',
+        version = version + 1,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE materialized_shared_match_id = OLD.id
+       OR (
+            OLD.shared_tie_id IS NULL
+            AND materialized_shared_match_id IS NULL
+            AND materialized_shared_tie_id IS NULL
+            AND shared_tournament_id = OLD.shared_tournament_id
+            AND round_key = OLD.round_key
+            AND bracket_position = OLD.bracket_position
+       );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_shared_ties_external_link_tombstone
+BEFORE DELETE ON shared_two_legged_ties
+BEGIN
+    UPDATE shared_tie_external_links
+    SET tombstoned_at = CURRENT_TIMESTAMP,
+        last_seen_at = CURRENT_TIMESTAMP,
+        materialization_claim = NULL,
+        claim_started_at = NULL
+    WHERE shared_tie_id = OLD.id
+       OR (
+            shared_tie_id IS NULL
+            AND shared_tournament_id = OLD.shared_tournament_id
+            AND (
+                (
+                    round_key = OLD.round_key
+                    AND bracket_position = OLD.bracket_position
+                )
+                OR (
+                    round_key IS NULL
+                    AND bracket_position IS NULL
+                    AND EXISTS (
+                        SELECT 1
+                        FROM shared_fixture_imports AS fallback_fixture
+                        WHERE fallback_fixture.shared_tournament_id =
+                                  shared_tie_external_links.shared_tournament_id
+                          AND fallback_fixture.source =
+                                  shared_tie_external_links.source
+                          AND fallback_fixture.external_event_id =
+                                  shared_tie_external_links.external_event_id
+                          AND fallback_fixture.external_tie_id =
+                                  shared_tie_external_links.external_tie_id
+                          AND fallback_fixture.round_key = OLD.round_key
+                          AND fallback_fixture.bracket_position =
+                                  OLD.bracket_position
+                    )
+                )
+            )
+       );
+    UPDATE shared_fixture_imports
+    SET import_status = 'tombstoned',
+        tombstoned_at = CURRENT_TIMESTAMP,
+        last_error = 'Материализованное противостояние было удалено.',
+        version = version + 1
+    WHERE shared_tie_id = OLD.id
+       OR (
+            shared_tie_id IS NULL
+            AND shared_match_id IS NULL
+            AND shared_tournament_id = OLD.shared_tournament_id
+            AND round_key = OLD.round_key
+            AND bracket_position = OLD.bracket_position
+       );
+    UPDATE shared_bracket_nodes
+    SET sync_status = 'conflict',
+        sync_error = 'Материализованное противостояние было удалено.',
+        version = version + 1,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE materialized_shared_tie_id = OLD.id
+       OR (
+            materialized_shared_tie_id IS NULL
+            AND materialized_shared_match_id IS NULL
+            AND shared_tournament_id = OLD.shared_tournament_id
+            AND round_key = OLD.round_key
+            AND bracket_position = OLD.bracket_position
+       );
+END;
 
 CREATE TABLE IF NOT EXISTS contest_shared_tournaments (
     contest_id INTEGER PRIMARY KEY
@@ -506,6 +853,8 @@ CREATE TABLE IF NOT EXISTS matches (
     status TEXT NOT NULL DEFAULT 'scheduled' CHECK (
         status IN ('scheduled', 'started', 'finished', 'cancelled')
     ),
+    -- Legacy names retained for compatibility. For football these values are
+    -- strictly the score after 90 minutes; extra-time goals are not included.
     home_score_final INTEGER,
     away_score_final INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -536,6 +885,7 @@ CREATE TABLE IF NOT EXISTS match_predictions (
     id INTEGER PRIMARY KEY,
     match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- For football these are predictions for the score after 90 minutes.
     predicted_home_score INTEGER NOT NULL CHECK (predicted_home_score >= 0),
     predicted_away_score INTEGER NOT NULL CHECK (predicted_away_score >= 0),
     submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

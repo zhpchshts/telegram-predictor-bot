@@ -31,6 +31,9 @@ class Settings:
     telegram_mtproto_session_path: Path
     healthcheck_chat_id: int | None
     shared_tournament_admin_ids: frozenset[int]
+    football_data_api_token: str | None = None
+    champions_league_sync_season: int = 2026
+    champions_league_sync_interval_minutes: int = 10
 
 
 def load_settings() -> Settings:
@@ -70,6 +73,19 @@ def load_settings() -> Settings:
     shared_tournament_admin_ids = _parse_positive_integer_list_environment(
         "SHARED_TOURNAMENT_ADMIN_IDS"
     )
+    football_data_api_token = os.getenv("FOOTBALL_DATA_API_TOKEN", "").strip() or None
+    champions_league_sync_season = _parse_integer_environment(
+        "CHAMPIONS_LEAGUE_SYNC_SEASON",
+        default=2026,
+        minimum=2026,
+        maximum=2026,
+    )
+    champions_league_sync_interval_minutes = _parse_integer_environment(
+        "CHAMPIONS_LEAGUE_SYNC_INTERVAL_MINUTES",
+        default=10,
+        minimum=1,
+        maximum=24 * 60,
+    )
 
     return Settings(
         bot_token=bot_token,
@@ -82,6 +98,9 @@ def load_settings() -> Settings:
         telegram_mtproto_session_path=telegram_mtproto_session_path,
         healthcheck_chat_id=healthcheck_chat_id,
         shared_tournament_admin_ids=shared_tournament_admin_ids,
+        football_data_api_token=football_data_api_token,
+        champions_league_sync_season=champions_league_sync_season,
+        champions_league_sync_interval_minutes=(champions_league_sync_interval_minutes),
     )
 
 
@@ -176,3 +195,24 @@ def _parse_positive_integer_list_environment(name: str) -> frozenset[int]:
             )
         parsed_values.add(parsed_item)
     return frozenset(parsed_values)
+
+
+def _parse_integer_environment(
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed_value = int(value)
+    except ValueError as error:
+        raise RuntimeError(
+            f"{name} must be an integer from {minimum} to {maximum}."
+        ) from error
+    if parsed_value < minimum or parsed_value > maximum:
+        raise RuntimeError(f"{name} must be an integer from {minimum} to {maximum}.")
+    return parsed_value
