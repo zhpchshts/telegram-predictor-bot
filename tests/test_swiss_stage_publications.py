@@ -8,7 +8,10 @@ from pathlib import Path
 from aiogram.types import InputRichMessage
 
 from app.audit_service import AuditActor, AuditActorRole
-from app.contest_publications import render_publication_messages
+from app.contest_publications import (
+    _swiss_selection_points,
+    render_publication_messages,
+)
 from app.contest_service import (
     create_champions_league_2026_27_contest,
     create_world_cup_2026_contest,
@@ -34,6 +37,17 @@ AUDIT_ACTOR = AuditActor(
     telegram_user_id=ADMIN_ID,
     role=AuditActorRole.TELEGRAM_ADMIN,
 )
+
+
+def test_champions_league_publication_never_scores_playoff_category() -> None:
+    assert (
+        _swiss_selection_points(
+            template_key="champions_league_2026_27",
+            predicted_category="playoff",
+            actual_category="playoff",
+        )
+        == 0
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,11 +328,13 @@ def test_champions_league_publications_use_league_phase_categories(
     assert "Прогнозы на лиговый этап" in predictions_text
     assert "<b>Напрямую в 1/8</b>" in predictions_text
     assert "1. Команда 01 — 100%" in predictions_text
+    assert "<b>Стыки</b>" in predictions_text
+    assert "1. Команда 21 — 100%" in predictions_text
     assert "<b>Вылетят после лигового этапа</b>" in predictions_text
     assert "1. Команда 09 — 100%" in predictions_text
-    assert "Команда 21" not in predictions_text
     assert "Итоги лигового этапа" in result_text
     assert "Напрямую в 1/8: Команда 01" in result_text
+    assert "Стыки: Команда 07, Команда 20, Команда 23" in result_text
     assert "Вылетели после лигового этапа: Команда 08" in result_text
     assert "Средняя точность: 80%" in result_text
     assert "проход" not in result_text.lower()

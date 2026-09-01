@@ -222,7 +222,17 @@ def test_champions_league_audit_exposes_league_phase_context(
         entity_type=AuditEntityType.SWISS_STAGE_PREDICTION,
         entity_id=42,
         contest_id=42,
-        after_state={"enabled": True},
+        after_state={
+            "enabled": True,
+            "teams": [
+                {"id": team_id, "name": f"Команда {team_id:02d}"}
+                for team_id in range(1, 37)
+            ],
+            "actual_result": {
+                "direct_team_ids": list(range(1, 9)),
+                "elimination_team_ids": list(range(25, 37)),
+            },
+        },
     )
     _configure_environment(monkeypatch, database_path=database_path)
 
@@ -240,6 +250,9 @@ def test_champions_league_audit_exposes_league_phase_context(
     )
     assert swiss_event["contest"]["template_key"] == "champions_league_2026_27"
     assert swiss_event["entity"]["display_name"] == "Итоги лигового этапа"
+    assert swiss_event["after_state"]["actual_result"]["playoff_team_ids"] == list(
+        range(9, 25)
+    )
 
 
 def test_supermoderator_reads_audit_with_fresh_access_check(

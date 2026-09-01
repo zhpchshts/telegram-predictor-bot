@@ -129,6 +129,7 @@ class SharedSwissStageSettings:
     direct_qualifier_count: int
     elimination_qualifier_count: int
     direct_qualifier_team_ids: tuple[int, ...]
+    playoff_team_ids: tuple[int, ...]
     elimination_qualifier_team_ids: tuple[int, ...]
     settings_locked: bool
 
@@ -2357,6 +2358,17 @@ def _get_shared_tournament_details(
     direct_ids, elimination_ids = _get_shared_swiss_result_ids(
         connection, shared_tournament_id=shared_tournament_id
     )
+    selected_ids = {*direct_ids, *elimination_ids}
+    playoff_ids = (
+        tuple(
+            int(team_row["id"])
+            for team_row in team_rows
+            if int(team_row["id"]) not in selected_ids
+        )
+        if str(row["template_key"]) == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY
+        and selected_ids
+        else ()
+    )
     return SharedTournamentDetails(
         tournament=_shared_tournament_summary_from_row(row),
         teams=tuple(
@@ -2385,6 +2397,7 @@ def _get_shared_tournament_details(
                 settings["swiss_elimination_qualifier_count"]
             ),
             direct_qualifier_team_ids=direct_ids,
+            playoff_team_ids=playoff_ids,
             elimination_qualifier_team_ids=elimination_ids,
             settings_locked=_shared_swiss_settings_locked(
                 connection, shared_tournament_id=shared_tournament_id

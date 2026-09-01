@@ -2588,6 +2588,27 @@ def _serialize_shared_match(match) -> dict[str, object]:
 
 
 def _serialize_shared_tournament_details(details) -> dict[str, object]:
+    swiss_stage_prediction = {
+        "is_enabled": details.swiss_stage_prediction.is_enabled,
+        "deadline_at": details.swiss_stage_prediction.deadline_at,
+        "direct_qualifier_count": (
+            details.swiss_stage_prediction.direct_qualifier_count
+        ),
+        "elimination_qualifier_count": (
+            details.swiss_stage_prediction.elimination_qualifier_count
+        ),
+        "direct_qualifier_team_ids": list(
+            details.swiss_stage_prediction.direct_qualifier_team_ids
+        ),
+        "elimination_qualifier_team_ids": list(
+            details.swiss_stage_prediction.elimination_qualifier_team_ids
+        ),
+        "settings_locked": details.swiss_stage_prediction.settings_locked,
+    }
+    if details.tournament.template_key == "champions_league_2026_27":
+        swiss_stage_prediction["playoff_team_ids"] = list(
+            details.swiss_stage_prediction.playoff_team_ids
+        )
     return {
         **_serialize_shared_tournament_summary(details.tournament),
         "teams": [{"id": team.id, "name": team.name} for team in details.teams],
@@ -2605,23 +2626,7 @@ def _serialize_shared_tournament_details(details) -> dict[str, object]:
                 else None
             ),
         },
-        "swiss_stage_prediction": {
-            "is_enabled": details.swiss_stage_prediction.is_enabled,
-            "deadline_at": details.swiss_stage_prediction.deadline_at,
-            "direct_qualifier_count": (
-                details.swiss_stage_prediction.direct_qualifier_count
-            ),
-            "elimination_qualifier_count": (
-                details.swiss_stage_prediction.elimination_qualifier_count
-            ),
-            "direct_qualifier_team_ids": list(
-                details.swiss_stage_prediction.direct_qualifier_team_ids
-            ),
-            "elimination_qualifier_team_ids": list(
-                details.swiss_stage_prediction.elimination_qualifier_team_ids
-            ),
-            "settings_locked": details.swiss_stage_prediction.settings_locked,
-        },
+        "swiss_stage_prediction": swiss_stage_prediction,
     }
 
 
@@ -2726,7 +2731,7 @@ def _serialize_tournament_teams(tournament_teams) -> dict[str, object]:
 
 
 def _serialize_swiss_stage_selection(selection) -> dict[str, object]:
-    return {
+    result = {
         "direct_teams": [
             _serialize_team_summary(team) for team in selection.direct_teams
         ],
@@ -2734,6 +2739,11 @@ def _serialize_swiss_stage_selection(selection) -> dict[str, object]:
             _serialize_team_summary(team) for team in selection.elimination_teams
         ],
     }
+    if selection.playoff_teams:
+        result["playoff_teams"] = [
+            _serialize_team_summary(team) for team in selection.playoff_teams
+        ]
+    return result
 
 
 def _serialize_swiss_stage_award(award) -> dict[str, object]:

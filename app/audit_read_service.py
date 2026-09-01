@@ -13,6 +13,9 @@ from app.audit_service import AuditEntityType, AuditEventType
 from app.database import create_connection
 
 
+CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY = "champions_league_2026_27"
+
+
 @dataclass(frozen=True, slots=True)
 class AuditEventsPage:
     events: list[dict[str, object]]
@@ -433,7 +436,11 @@ def _event_team_ids(events: list[dict[str, object]]) -> set[int]:
                         team_ids.add(int(team["id"]))
             actual_result = state.get("actual_result")
             if isinstance(actual_result, dict):
-                for key in ("direct_team_ids", "elimination_team_ids"):
+                for key in (
+                    "direct_team_ids",
+                    "playoff_team_ids",
+                    "elimination_team_ids",
+                ):
                     values = actual_result.get(key)
                     if isinstance(values, list):
                         team_ids.update(
@@ -452,25 +459,84 @@ def _enrich_event(
     actor_user_id = int(event["actor_user_id"])
     contest_id = event["contest_id"]
     contest = contest_by_id.get(int(contest_id)) if _is_integer(contest_id) else None
+    enriched_event = _enrich_champions_league_swiss_states(
+        event,
+        contest=contest,
+    )
     target_user_id = _target_telegram_user_id(event)
     target_user = users.get(target_user_id) if target_user_id is not None else None
     related_teams = [
         {"id": team_id, "name": name}
         for team_id, name in sorted(teams.items())
-        if team_id in _event_team_ids([event])
+        if team_id in _event_team_ids([enriched_event])
     ]
     return {
-        **event,
+        **enriched_event,
         "actor": users.get(actor_user_id),
         "contest": contest,
         "entity": _build_entity(
-            event,
+            enriched_event,
             contest=contest,
             target_user=target_user,
             target_user_id=target_user_id,
         ),
         "related_teams": related_teams,
     }
+
+
+def _enrich_champions_league_swiss_states(
+    event: dict[str, object],
+    *,
+    contest: dict[str, object] | None,
+) -> dict[str, object]:
+    if (
+        event.get("entity_type") != AuditEntityType.SWISS_STAGE_PREDICTION.value
+        or contest is None
+        or contest.get("template_key") != CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY
+    ):
+        return event
+
+    enriched_event = dict(event)
+    for state_name in ("before_state", "after_state"):
+        state = event.get(state_name)
+        enriched_event[state_name] = _with_derived_playoff_team_ids(state)
+    return enriched_event
+
+
+def _with_derived_playoff_team_ids(state: object) -> object:
+    if not isinstance(state, dict):
+        return state
+    candidate_teams = state.get("teams")
+    actual_result = state.get("actual_result")
+    if not isinstance(candidate_teams, list) or not isinstance(actual_result, dict):
+        return state
+    if isinstance(actual_result.get("playoff_team_ids"), list):
+        return state
+
+    candidate_ids = [
+        int(team["id"])
+        for team in candidate_teams
+        if isinstance(team, dict) and _is_integer(team.get("id"))
+    ]
+    direct_ids = _integer_list(actual_result.get("direct_team_ids"))
+    elimination_ids = _integer_list(actual_result.get("elimination_team_ids"))
+    if not candidate_ids or direct_ids is None or elimination_ids is None:
+        return state
+
+    extreme_ids = {*direct_ids, *elimination_ids}
+    enriched_result = {
+        **actual_result,
+        "playoff_team_ids": [
+            team_id for team_id in candidate_ids if team_id not in extreme_ids
+        ],
+    }
+    return {**state, "actual_result": enriched_result}
+
+
+def _integer_list(value: object) -> list[int] | None:
+    if not isinstance(value, list) or not all(_is_integer(item) for item in value):
+        return None
+    return [int(item) for item in value]
 
 
 def _build_entity(
@@ -517,7 +583,7 @@ def _build_entity(
     if entity_type == AuditEntityType.SWISS_STAGE_PREDICTION.value:
         is_champions_league = (
             contest is not None
-            and contest.get("template_key") == "champions_league_2026_27"
+            and contest.get("template_key") == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY
         )
         return {
             "id": entity_id,

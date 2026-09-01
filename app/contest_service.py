@@ -264,12 +264,13 @@ class ChampionPredictionHistory:
     awarded_points: int | None
 
 
-SwissStageCategory = Literal["direct", "elimination"]
+SwissStageCategory = Literal["direct", "playoff", "elimination"]
 
 
 @dataclass(frozen=True, slots=True)
 class SwissStageSelection:
     direct_teams: tuple[TeamSummary, ...]
+    playoff_teams: tuple[TeamSummary, ...]
     elimination_teams: tuple[TeamSummary, ...]
 
 
@@ -3051,6 +3052,8 @@ def save_swiss_stage_prediction(
         )
         return _swiss_stage_selection_from_ids(
             connection,
+            contest_id=contest_id,
+            template_key=str(contest_row["template_key"]),
             direct_team_ids=normalized_direct_ids,
             elimination_team_ids=normalized_elimination_ids,
         )
@@ -3148,6 +3151,8 @@ def save_swiss_stage_result(
         ):
             return _swiss_stage_selection_from_ids(
                 connection,
+                contest_id=contest_id,
+                template_key=str(contest_row["template_key"]),
                 direct_team_ids=existing_direct_ids,
                 elimination_team_ids=existing_elimination_ids,
             )
@@ -3212,6 +3217,8 @@ def save_swiss_stage_result(
         )
         return _swiss_stage_selection_from_ids(
             connection,
+            contest_id=contest_id,
+            template_key=str(contest_row["template_key"]),
             direct_team_ids=normalized_direct_ids,
             elimination_team_ids=normalized_elimination_ids,
         )
@@ -4173,12 +4180,21 @@ def _get_swiss_stage_prediction_details(
         """,
         (contest_id,),
     ).fetchall()
-    prediction = _swiss_stage_selection_from_rows(prediction_rows)
-    actual_result = _swiss_stage_selection_from_rows(result_rows)
+    template_key = str(configuration_row["template_key"])
+    prediction = _swiss_stage_selection_from_rows(
+        prediction_rows,
+        candidates=candidates,
+        template_key=template_key,
+    )
+    actual_result = _swiss_stage_selection_from_rows(
+        result_rows,
+        candidates=candidates,
+        template_key=template_key,
+    )
     awards = _swiss_stage_awards_from_rows(
         prediction_rows,
         result_rows=result_rows,
-        template_key=str(configuration_row["template_key"]),
+        template_key=template_key,
     )
     deadline_at = configuration_row["deadline_at"]
     deadline_at_value = str(deadline_at) if deadline_at is not None else None
@@ -4528,6 +4544,8 @@ def _insert_swiss_stage_selections(
 def _swiss_stage_selection_from_ids(
     connection,
     *,
+    contest_id: int,
+    template_key: str,
     direct_team_ids: tuple[int, ...],
     elimination_team_ids: tuple[int, ...],
 ) -> SwissStageSelection:
@@ -4542,15 +4560,33 @@ def _swiss_stage_selection_from_ids(
         selected_ids,
     ).fetchall()
     teams_by_id = {int(row["id"]): _team_summary_from_row(row) for row in rows}
+    playoff_teams = _swiss_stage_playoff_teams(
+        tuple(
+            _team_summary_from_row(row)
+            for row in _get_swiss_stage_candidate_rows(
+                connection,
+                contest_id=contest_id,
+            )
+        ),
+        direct_team_ids=direct_team_ids,
+        elimination_team_ids=elimination_team_ids,
+        template_key=template_key,
+    )
     return SwissStageSelection(
         direct_teams=tuple(teams_by_id[team_id] for team_id in direct_team_ids),
+        playoff_teams=playoff_teams,
         elimination_teams=tuple(
             teams_by_id[team_id] for team_id in elimination_team_ids
         ),
     )
 
 
-def _swiss_stage_selection_from_rows(rows) -> SwissStageSelection | None:
+def _swiss_stage_selection_from_rows(
+    rows,
+    *,
+    candidates: tuple[TeamSummary, ...],
+    template_key: str,
+) -> SwissStageSelection | None:
     if not rows:
         return None
     direct_teams: list[TeamSummary] = []
@@ -4563,8 +4599,27 @@ def _swiss_stage_selection_from_rows(rows) -> SwissStageSelection | None:
             elimination_teams.append(team)
     return SwissStageSelection(
         direct_teams=tuple(direct_teams),
+        playoff_teams=_swiss_stage_playoff_teams(
+            candidates,
+            direct_team_ids=tuple(team.id for team in direct_teams),
+            elimination_team_ids=tuple(team.id for team in elimination_teams),
+            template_key=template_key,
+        ),
         elimination_teams=tuple(elimination_teams),
     )
+
+
+def _swiss_stage_playoff_teams(
+    candidates: tuple[TeamSummary, ...],
+    *,
+    direct_team_ids: tuple[int, ...],
+    elimination_team_ids: tuple[int, ...],
+    template_key: str,
+) -> tuple[TeamSummary, ...]:
+    if template_key != CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key:
+        return ()
+    selected_ids = {*direct_team_ids, *elimination_team_ids}
+    return tuple(team for team in candidates if team.id not in selected_ids)
 
 
 def _swiss_stage_awards_from_rows(
@@ -4579,14 +4634,25 @@ def _swiss_stage_awards_from_rows(
     for row in prediction_rows:
         predicted_category = str(row["category"])
         actual_category = actual_categories.get(int(row["id"]))
+        if (
+            has_result
+            and actual_category is None
+            and template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key
+        ):
+            actual_category = "playoff"
         points = None
         if has_result:
-            if actual_category is None:
+            if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key:
+                points = (
+                    2
+                    if predicted_category in {"direct", "elimination"}
+                    and actual_category == predicted_category
+                    else 0
+                )
+            elif actual_category is None:
                 points = 0
             elif actual_category == predicted_category:
                 points = 2
-            elif template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key:
-                points = 0
             else:
                 points = 1
         awards.append(
@@ -5310,7 +5376,11 @@ def _get_swiss_stage_prediction_history_rows(
         """,
         (contest_id,),
     ).fetchall()
-    return prediction_rows, result_rows
+    candidate_rows = _get_swiss_stage_candidate_rows(
+        connection,
+        contest_id=contest_id,
+    )
+    return prediction_rows, result_rows, candidate_rows
 
 
 def _leaderboard_swiss_stage_prediction_history_by_user(
@@ -5318,14 +5388,23 @@ def _leaderboard_swiss_stage_prediction_history_by_user(
     *,
     template_key: str,
 ) -> dict[int, SwissStagePredictionHistory]:
-    prediction_rows, result_rows = rows
+    prediction_rows, result_rows, candidate_rows = rows
+    candidates = tuple(_team_summary_from_row(row) for row in candidate_rows)
     rows_by_user: dict[int, list[object]] = {}
     for row in prediction_rows:
         rows_by_user.setdefault(int(row["user_id"]), []).append(row)
-    actual_result = _swiss_stage_selection_from_rows(result_rows)
+    actual_result = _swiss_stage_selection_from_rows(
+        result_rows,
+        candidates=candidates,
+        template_key=template_key,
+    )
     history_by_user: dict[int, SwissStagePredictionHistory] = {}
     for user_id, user_rows in rows_by_user.items():
-        prediction = _swiss_stage_selection_from_rows(user_rows)
+        prediction = _swiss_stage_selection_from_rows(
+            user_rows,
+            candidates=candidates,
+            template_key=template_key,
+        )
         if prediction is None:
             continue
         awards = _swiss_stage_awards_from_rows(

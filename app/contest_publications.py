@@ -506,26 +506,28 @@ def _render_swiss_predictions(
             teams = connection.execute(
                 """
                 SELECT
-                    teams.name,
-                    candidates.position,
-                    selections.category,
-                    COUNT(DISTINCT selections.prediction_id) AS support_count
-                FROM swiss_stage_prediction_selections AS selections
-                JOIN teams ON teams.id = selections.team_id
-                JOIN contest_teams AS candidates
-                    ON candidates.contest_id = selections.contest_id
-                   AND candidates.team_id = selections.team_id
-                WHERE selections.contest_id = ?
-                GROUP BY
                     teams.id,
                     teams.name,
                     candidates.position,
-                    selections.category
-                ORDER BY
-                    selections.category,
-                    support_count DESC,
-                    candidates.position ASC,
-                    teams.id ASC
+                    COUNT(DISTINCT CASE
+                        WHEN selections.category = 'direct'
+                        THEN selections.prediction_id
+                    END) AS direct_support_count,
+                    COUNT(DISTINCT CASE
+                        WHEN selections.category = 'elimination'
+                        THEN selections.prediction_id
+                    END) AS elimination_support_count
+                FROM contest_teams AS candidates
+                JOIN teams ON teams.id = candidates.team_id
+                LEFT JOIN swiss_stage_prediction_selections AS selections
+                    ON selections.contest_id = candidates.contest_id
+                   AND selections.team_id = candidates.team_id
+                WHERE candidates.contest_id = ?
+                GROUP BY
+                    teams.id,
+                    teams.name,
+                    candidates.position
+                ORDER BY candidates.position ASC, teams.id ASC
                 """,
                 (contest_id,),
             ).fetchall()
@@ -561,14 +563,19 @@ def _render_swiss_predictions(
 
     lines: list[str] = [f"<b>Прогнозов: {prediction_count}</b>"]
     if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
+        support_rows = _champions_league_support_rows(
+            teams,
+            prediction_count=prediction_count,
+        )
         for category, label in (
             ("direct", copy["direct_prediction"]),
+            ("playoff", copy["playoff_prediction"]),
             ("elimination", copy["elimination_prediction"]),
         ):
             lines.append(f"<b>{label}</b>")
             lines.extend(
                 _ranked_swiss_support_lines(
-                    tuple(row for row in teams if row["category"] == category),
+                    tuple(row for row in support_rows if row["category"] == category),
                     prediction_count=prediction_count,
                 )
             )
@@ -645,6 +652,16 @@ def _render_swiss_result(
                 (contest_id,),
             ).fetchall()
         )
+        candidate_rows = connection.execute(
+            """
+            SELECT teams.id, teams.name
+            FROM contest_teams AS candidates
+            JOIN teams ON teams.id = candidates.team_id
+            WHERE candidates.contest_id = ?
+            ORDER BY candidates.position ASC, teams.id ASC
+            """,
+            (contest_id,),
+        ).fetchall()
 
     actual_categories = {
         int(row["team_id"]): str(row["category"]) for row in actual_rows
@@ -655,16 +672,35 @@ def _render_swiss_result(
     elimination_names = tuple(
         str(row["name"]) for row in actual_rows if row["category"] == "elimination"
     )
-    copy = _swiss_publication_copy(str(settings["template_key"]))
+    template_key = str(settings["template_key"])
+    copy = _swiss_publication_copy(template_key)
     header = (
         f"<p>🎯 <b>{copy['result_title']}</b></p>"
         f"<p>Конкурс: «{escape_rich_text(settings['name'])}»</p>"
     )
-    result_lines = (
-        f"{copy['direct_result']}: " + ", ".join(map(escape_rich_text, direct_names)),
-        f"{copy['elimination_result']}: "
-        + ", ".join(map(escape_rich_text, elimination_names)),
-    )
+    result_lines: tuple[str, ...]
+    if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
+        actual_extreme_team_ids = set(actual_categories)
+        playoff_names = tuple(
+            str(row["name"])
+            for row in candidate_rows
+            if int(row["id"]) not in actual_extreme_team_ids
+        )
+        result_lines = (
+            f"{copy['direct_result']}: "
+            + ", ".join(map(escape_rich_text, direct_names)),
+            f"{copy['playoff_result']}: "
+            + ", ".join(map(escape_rich_text, playoff_names)),
+            f"{copy['elimination_result']}: "
+            + ", ".join(map(escape_rich_text, elimination_names)),
+        )
+    else:
+        result_lines = (
+            f"{copy['direct_result']}: "
+            + ", ".join(map(escape_rich_text, direct_names)),
+            f"{copy['elimination_result']}: "
+            + ", ".join(map(escape_rich_text, elimination_names)),
+        )
     prediction_count = len(prediction_ids)
     if prediction_count == 0:
         return _split_lines(
@@ -678,7 +714,6 @@ def _render_swiss_result(
         prediction_id: {} for prediction_id in prediction_ids
     }
     support_counts: dict[int, int] = {}
-    template_key = str(settings["template_key"])
     for row in prediction_rows:
         prediction_id = int(row["prediction_id"])
         team_id = int(row["team_id"])
@@ -762,8 +797,10 @@ def _swiss_publication_copy(template_key: str) -> dict[str, str]:
             "predictions_title": "Прогнозы на лиговый этап",
             "result_title": "Итоги лигового этапа",
             "direct_result": "Напрямую в 1/8",
+            "playoff_result": "Стыки",
             "elimination_result": "Вылетели после лигового этапа",
             "direct_prediction": "Напрямую в 1/8",
+            "playoff_prediction": "Стыки",
             "elimination_prediction": "Вылетят после лигового этапа",
             "no_predictions": "Прогнозов на лиговый этап нет",
             "no_predictions_past": "Прогнозов на лиговый этап не было",
@@ -812,16 +849,61 @@ def _ranked_swiss_support_lines(
     return tuple(lines) if lines else ("—",)
 
 
+def _champions_league_support_rows(
+    teams,
+    *,
+    prediction_count: int,
+) -> tuple[dict[str, object], ...]:
+    rows: list[dict[str, object]] = []
+    for team in teams:
+        direct_support = int(team["direct_support_count"])
+        elimination_support = int(team["elimination_support_count"])
+        support_by_category = {
+            "direct": direct_support,
+            "playoff": max(
+                0,
+                prediction_count - direct_support - elimination_support,
+            ),
+            "elimination": elimination_support,
+        }
+        for category, support_count in support_by_category.items():
+            if support_count == 0:
+                continue
+            rows.append(
+                {
+                    "category": category,
+                    "name": team["name"],
+                    "position": int(team["position"]),
+                    "team_id": int(team["id"]),
+                    "support_count": support_count,
+                }
+            )
+    rows.sort(
+        key=lambda row: (
+            str(row["category"]),
+            -int(row["support_count"]),
+            int(row["position"]),
+            int(row["team_id"]),
+        )
+    )
+    return tuple(rows)
+
+
 def _swiss_selection_points(
     *,
     template_key: str,
     predicted_category: str,
     actual_category: str | None,
 ) -> int:
+    if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
+        return (
+            2
+            if predicted_category in {"direct", "elimination"}
+            and actual_category == predicted_category
+            else 0
+        )
     if actual_category == predicted_category:
         return 2
-    if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
-        return 0
     return 1 if actual_category is not None else 0
 
 

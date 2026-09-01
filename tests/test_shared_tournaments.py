@@ -274,6 +274,25 @@ def test_champions_league_shared_defaults_to_eight_direct_plus_twelve_eliminated
     ]
     assert match_count == 0
 
+    shared = get_shared_tournament_details(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+    )
+    team_ids = [team.id for team in shared.teams]
+    saved_result = save_shared_swiss_result(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        direct_team_ids=team_ids[:8],
+        elimination_team_ids=team_ids[8:20],
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-09-02T00:00:00Z"),
+    )
+    assert saved_result.swiss_stage_prediction.playoff_team_ids == tuple(team_ids[20:])
+
 
 def test_shared_versioned_writes_accept_only_exact_single_step_retries(
     tmp_path: Path,

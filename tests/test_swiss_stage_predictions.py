@@ -311,6 +311,7 @@ def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_tw
     )
 
     assert len(saved.direct_teams) == 8
+    assert tuple(team.id for team in saved.playoff_teams) == tuple(candidate_ids[20:])
     assert len(saved.elimination_teams) == 12
     assert details.matches == ()
 
@@ -332,6 +333,14 @@ def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_tw
     )
 
     assert scored.swiss_stage_prediction.awarded_points == 40
+    assert scored.swiss_stage_prediction.prediction is not None
+    assert scored.swiss_stage_prediction.actual_result is not None
+    assert tuple(
+        team.id for team in scored.swiss_stage_prediction.prediction.playoff_teams
+    ) == tuple(candidate_ids[20:])
+    assert tuple(
+        team.id for team in scored.swiss_stage_prediction.actual_result.playoff_teams
+    ) == tuple(candidate_ids[20:])
     assert scored.leaderboard[0].total_points == 40
 
     save_swiss_stage_result(
@@ -366,15 +375,44 @@ def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_tw
     assert awards_by_team_id[candidate_ids[7]].points == 0
     assert awards_by_team_id[candidate_ids[8]].actual_category == "direct"
     assert awards_by_team_id[candidate_ids[8]].points == 0
-    assert awards_by_team_id[candidate_ids[6]].actual_category is None
+    assert awards_by_team_id[candidate_ids[6]].actual_category == "playoff"
     assert awards_by_team_id[candidate_ids[6]].points == 0
-    assert awards_by_team_id[candidate_ids[19]].actual_category is None
+    assert awards_by_team_id[candidate_ids[19]].actual_category == "playoff"
     assert awards_by_team_id[candidate_ids[19]].points == 0
     assert history is not None
     assert history.awarded_points == 32
+    assert tuple(team.id for team in history.prediction.playoff_teams) == tuple(
+        candidate_ids[20:]
+    )
+    corrected_result_selected_ids = {
+        *candidate_ids[:6],
+        candidate_ids[8],
+        candidate_ids[20],
+        *candidate_ids[9:19],
+        candidate_ids[7],
+        candidate_ids[21],
+    }
+    assert history.actual_result is not None
+    assert tuple(team.id for team in history.actual_result.playoff_teams) == tuple(
+        team_id
+        for team_id in candidate_ids
+        if team_id not in corrected_result_selected_ids
+    )
     assert {award.team.id: award.points for award in history.awards} == {
         award.team.id: award.points for award in corrected.swiss_stage_prediction.awards
     }
+
+
+def test_champions_league_playoff_category_is_never_scored() -> None:
+    awards = contest_service._swiss_stage_awards_from_rows(
+        [{"id": 1, "name": "Альфа", "category": "playoff"}],
+        result_rows=[{"id": 1, "name": "Альфа", "category": "playoff"}],
+        template_key="champions_league_2026_27",
+    )
+
+    assert len(awards) == 1
+    assert awards[0].actual_category == "playoff"
+    assert awards[0].points == 0
 
 
 def test_swiss_stage_settings_create_candidates_without_matches_and_are_audited(

@@ -2809,6 +2809,132 @@ def test_create_contest_creates_ucl_with_eight_direct_plus_twelve_eliminated(
     }
 
 
+def test_ucl_prediction_api_returns_derived_playoff_teams(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(
+        client,
+        idempotency_key="create-ucl-playoff-selection",
+        name="Лига чемпионов 2026/27",
+        template_key="champions_league_2026_27",
+    )
+    contest_id = int(contest["id"])
+    teams_response = client.put(
+        f"/api/tma/contests/{contest_id}/teams",
+        headers=build_tma_headers(),
+        json={"team_names": [f"Команда {number:02d}" for number in range(1, 37)]},
+    )
+    assert teams_response.status_code == 200
+    team_ids = [
+        int(team["id"]) for team in teams_response.json()["tournament_teams"]["teams"]
+    ]
+    settings_response = client.put(
+        f"/api/tma/contests/{contest_id}/swiss-stage-prediction/settings",
+        headers=build_tma_headers(),
+        json={
+            "enabled": True,
+            "deadline_at": "2030-09-01T12:00:00Z",
+            "direct_qualifier_count": 8,
+            "elimination_qualifier_count": 12,
+        },
+    )
+    assert settings_response.status_code == 200
+
+    response = client.put(
+        f"/api/tma/contests/{contest_id}/swiss-stage-prediction",
+        headers=build_tma_headers(),
+        json={
+            "direct_team_ids": team_ids[:8],
+            "elimination_team_ids": team_ids[8:20],
+        },
+    )
+
+    assert response.status_code == 200
+    prediction = response.json()["swiss_stage_prediction"]["prediction"]
+    assert [team["id"] for team in prediction["direct_teams"]] == team_ids[:8]
+    assert [team["id"] for team in prediction["playoff_teams"]] == team_ids[20:]
+    assert [team["id"] for team in prediction["elimination_teams"]] == team_ids[8:20]
+
+
+def test_shared_ucl_result_api_returns_derived_playoff_team_ids(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    monkeypatch.setenv("SHARED_TOURNAMENT_ADMIN_IDS", "123")
+    current_time = {"value": datetime(2030, 8, 1, tzinfo=timezone.utc)}
+    monkeypatch.setattr(
+        "app.shared_tournament_service._resolve_now",
+        lambda _value: current_time["value"],
+    )
+    client = TestClient(create_app())
+
+    create_response = client.post(
+        "/api/tma/shared-tournaments",
+        headers=build_tma_headers(),
+        json={
+            "name": "Общая Лига чемпионов 2026/27",
+            "template_key": "champions_league_2026_27",
+        },
+    )
+    assert create_response.status_code == 201
+    shared = create_response.json()["shared_tournament"]
+    assert shared["swiss_stage_prediction"]["playoff_team_ids"] == []
+
+    teams_response = client.put(
+        f"/api/tma/shared-tournaments/{shared['id']}/teams",
+        headers=build_tma_headers(),
+        json={
+            "team_names": [f"Команда {number:02d}" for number in range(1, 37)],
+            "expected_version": shared["version"],
+        },
+    )
+    assert teams_response.status_code == 200
+    shared = teams_response.json()["shared_tournament"]
+    team_ids = [int(team["id"]) for team in shared["teams"]]
+    settings_response = client.put(
+        f"/api/tma/shared-tournaments/{shared['id']}/swiss-stage/settings",
+        headers=build_tma_headers(),
+        json={
+            "enabled": True,
+            "deadline_at": "2030-09-01T12:00:00Z",
+            "direct_qualifier_count": 8,
+            "elimination_qualifier_count": 12,
+            "expected_version": shared["version"],
+        },
+    )
+    assert settings_response.status_code == 200
+    shared = settings_response.json()["shared_tournament"]
+    current_time["value"] = datetime(2030, 9, 2, tzinfo=timezone.utc)
+
+    result_response = client.put(
+        f"/api/tma/shared-tournaments/{shared['id']}/swiss-stage/result",
+        headers=build_tma_headers(),
+        json={
+            "direct_team_ids": team_ids[:8],
+            "elimination_team_ids": team_ids[8:20],
+            "expected_version": shared["version"],
+        },
+    )
+
+    assert result_response.status_code == 200, result_response.json()
+    result = result_response.json()["shared_tournament"]["swiss_stage_prediction"]
+    assert result["playoff_team_ids"] == team_ids[20:]
+
+
 def test_create_contest_reuses_result_for_same_idempotency_key(
     monkeypatch,
     tmp_path: Path,
