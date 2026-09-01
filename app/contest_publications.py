@@ -156,6 +156,7 @@ def _render_match_result(
             LEFT JOIN ties ON ties.id = matches.tie_id
             LEFT JOIN teams AS advancing_team
                 ON advancing_team.id = ties.advancing_team_id
+               AND ties.is_two_legged = 0
             WHERE matches.id = ?
             """,
             (match_id,),
@@ -191,9 +192,11 @@ def _render_match_result(
             FROM match_predictions
             JOIN users ON users.id = match_predictions.user_id
             JOIN matches ON matches.id = match_predictions.match_id
+            JOIN ties ON ties.id = matches.tie_id
             LEFT JOIN tie_predictions
                 ON tie_predictions.tie_id = matches.tie_id
                AND tie_predictions.user_id = match_predictions.user_id
+               AND ties.is_two_legged = 0
             LEFT JOIN teams AS predicted_advancing_team
                 ON predicted_advancing_team.id =
                     tie_predictions.predicted_advancing_team_id
@@ -794,16 +797,16 @@ def _validate_swiss_publication_deadline(settings, *, now_utc) -> None:
 def _swiss_publication_copy(template_key: str) -> dict[str, str]:
     if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
         return {
-            "predictions_title": "Прогнозы на лиговый этап",
-            "result_title": "Итоги лигового этапа",
+            "predictions_title": "Прогнозы на общий этап",
+            "result_title": "Итоги общего этапа",
             "direct_result": "Напрямую в 1/8",
             "playoff_result": "Стыки",
-            "elimination_result": "Вылетели после лигового этапа",
+            "elimination_result": "Вылетели после общего этапа",
             "direct_prediction": "Напрямую в 1/8",
             "playoff_prediction": "Стыки",
-            "elimination_prediction": "Вылетят после лигового этапа",
-            "no_predictions": "Прогнозов на лиговый этап нет",
-            "no_predictions_past": "Прогнозов на лиговый этап не было",
+            "elimination_prediction": "Вылетят после общего этапа",
+            "no_predictions": "Прогнозов на общий этап нет",
+            "no_predictions_past": "Прогнозов на общий этап не было",
         }
     return {
         "predictions_title": "Прогнозы на швейцарский этап",
@@ -821,8 +824,8 @@ def _adapt_swiss_insight(text: str, template_key: str) -> str:
     if template_key != CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
         return text
     return (
-        text.replace("Швейцарский этап", "Лиговый этап")
-        .replace("швейцарский этап", "лиговый этап")
+        text.replace("Швейцарский этап", "Общий этап")
+        .replace("швейцарский этап", "общий этап")
         .replace("Большую часть проходов", "Большую часть крайних позиций")
         .replace("прошедшая команда", "команда из крайних зон")
         .replace("прошедших команд", "команд крайних зон")

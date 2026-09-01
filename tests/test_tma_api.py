@@ -1861,6 +1861,10 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
             "/api/tma/shared-tournaments/{shared_tournament_id}/matches",
         ): "shared_tournament_management",
         (
+            "POST",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/two-legged-ties",
+        ): "shared_tournament_management",
+        (
             "PUT",
             "/api/tma/shared-tournaments/{shared_tournament_id}/matches/{shared_match_id}",
         ): "shared_tournament_management",
@@ -1872,6 +1876,18 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
             "DELETE",
             "/api/tma/shared-tournaments/{shared_tournament_id}/matches/{shared_match_id}",
         ): "shared_tournament_management",
+        (
+            "PUT",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/two-legged-ties/{shared_tie_id}/result",
+        ): "shared_tournament_management",
+        (
+            "DELETE",
+            "/api/tma/shared-tournaments/{shared_tournament_id}/two-legged-ties/{shared_tie_id}",
+        ): "shared_tournament_management",
+        (
+            "DELETE",
+            "/api/tma/contests/{contest_id}/two-legged-ties/{tie_id}",
+        ): "contest_management",
         (
             "DELETE",
             "/api/tma/contests/{contest_id}/matches/{match_id}",
@@ -1895,12 +1911,24 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
             "/api/tma/contests/{contest_id}/matches",
         ): "contest_management",
         (
+            "POST",
+            "/api/tma/contests/{contest_id}/two-legged-ties",
+        ): "contest_management",
+        (
             "PUT",
             "/api/tma/contests/{contest_id}/matches/{match_id}/prediction",
         ): "prediction",
         (
             "PUT",
             "/api/tma/contests/{contest_id}/matches/{match_id}/result",
+        ): "contest_management",
+        (
+            "PUT",
+            "/api/tma/contests/{contest_id}/two-legged-ties/{tie_id}/prediction",
+        ): "prediction",
+        (
+            "PUT",
+            "/api/tma/contests/{contest_id}/two-legged-ties/{tie_id}/result",
         ): "contest_management",
         (
             "PUT",

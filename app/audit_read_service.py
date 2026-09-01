@@ -589,7 +589,7 @@ def _build_entity(
             "id": entity_id,
             "type": entity_type,
             "display_name": (
-                "Итоги лигового этапа"
+                "Итоги общего этапа"
                 if is_champions_league
                 else "Итоги швейцарского этапа"
             ),

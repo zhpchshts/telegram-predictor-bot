@@ -223,7 +223,7 @@ def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_tw
         team_names=first_35_teams,
         audit_actor=AUDIT_ACTOR,
     )
-    with pytest.raises(PredictionUnavailableError, match="лиговый этап"):
+    with pytest.raises(PredictionUnavailableError, match="общий этап"):
         save_swiss_stage_prediction(
             database_path=database_path,
             telegram_chat_id=CHAT_ID,

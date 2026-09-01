@@ -51,6 +51,8 @@ def test_initialize_database_creates_current_schema(tmp_path: Path) -> None:
         "shared_tournament_teams",
         "shared_swiss_stage_result_selections",
         "shared_matches",
+        "shared_two_legged_ties",
+        "shared_tie_links",
         "shared_match_external_links",
         "contest_shared_tournaments",
         "shared_match_links",
@@ -93,7 +95,7 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
             """
         ).fetchone()[0]
 
-    assert tables_count == 41
+    assert tables_count == 43
 
 
 def test_initialize_database_rolls_back_all_schema_changes_on_failure(

@@ -250,10 +250,62 @@ CREATE TABLE IF NOT EXISTS shared_swiss_stage_result_selections (
         ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS shared_two_legged_ties (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shared_tournament_id INTEGER NOT NULL
+        REFERENCES shared_tournaments(id) ON DELETE CASCADE,
+    first_team_id INTEGER NOT NULL REFERENCES teams(id),
+    second_team_id INTEGER NOT NULL REFERENCES teams(id),
+    advancing_team_id INTEGER REFERENCES teams(id),
+    resolution_method TEXT CHECK (
+        resolution_method IS NULL
+        OR resolution_method IN ('aggregate', 'extra_time', 'penalties')
+    ),
+    second_leg_extra_time_home_score INTEGER CHECK (
+        second_leg_extra_time_home_score IS NULL
+        OR second_leg_extra_time_home_score >= 0
+    ),
+    second_leg_extra_time_away_score INTEGER CHECK (
+        second_leg_extra_time_away_score IS NULL
+        OR second_leg_extra_time_away_score >= 0
+    ),
+    second_leg_home_penalty_score INTEGER CHECK (
+        second_leg_home_penalty_score IS NULL
+        OR second_leg_home_penalty_score >= 0
+    ),
+    second_leg_away_penalty_score INTEGER CHECK (
+        second_leg_away_penalty_score IS NULL
+        OR second_leg_away_penalty_score >= 0
+    ),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (first_team_id != second_team_id),
+    CHECK (
+        advancing_team_id IS NULL
+        OR advancing_team_id = first_team_id
+        OR advancing_team_id = second_team_id
+    ),
+    CHECK (
+        (second_leg_extra_time_home_score IS NULL) =
+        (second_leg_extra_time_away_score IS NULL)
+    ),
+    CHECK (
+        (second_leg_home_penalty_score IS NULL) =
+        (second_leg_away_penalty_score IS NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_two_legged_ties_tournament
+    ON shared_two_legged_ties(shared_tournament_id, id);
+
 CREATE TABLE IF NOT EXISTS shared_matches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     shared_tournament_id INTEGER NOT NULL
         REFERENCES shared_tournaments(id) ON DELETE CASCADE,
+    shared_tie_id INTEGER
+        REFERENCES shared_two_legged_ties(id) ON DELETE CASCADE,
+    leg_number INTEGER CHECK (leg_number IS NULL OR leg_number IN (1, 2)),
     home_team_id INTEGER NOT NULL REFERENCES teams(id),
     away_team_id INTEGER NOT NULL REFERENCES teams(id),
     starts_at_utc TEXT NOT NULL,
@@ -286,6 +338,10 @@ CREATE TABLE IF NOT EXISTS shared_matches (
 
 CREATE INDEX IF NOT EXISTS idx_shared_matches_tournament_start
     ON shared_matches(shared_tournament_id, starts_at_utc, id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shared_matches_tie_leg_number
+    ON shared_matches(shared_tie_id, leg_number)
+    WHERE shared_tie_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS shared_match_external_links (
     shared_match_id INTEGER PRIMARY KEY
@@ -328,11 +384,26 @@ CREATE TABLE IF NOT EXISTS shared_match_links (
 CREATE INDEX IF NOT EXISTS idx_shared_match_links_contest
     ON shared_match_links(contest_id, match_id);
 
+CREATE TABLE IF NOT EXISTS shared_tie_links (
+    shared_tie_id INTEGER NOT NULL
+        REFERENCES shared_two_legged_ties(id) ON DELETE CASCADE,
+    tie_id INTEGER NOT NULL REFERENCES ties(id) ON DELETE CASCADE,
+    contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+    linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (shared_tie_id, contest_id),
+    UNIQUE (tie_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_tie_links_contest
+    ON shared_tie_links(contest_id, tie_id);
+
 CREATE TABLE IF NOT EXISTS shared_tournament_events (
     id INTEGER PRIMARY KEY,
     shared_tournament_id INTEGER NOT NULL
         REFERENCES shared_tournaments(id) ON DELETE CASCADE,
     shared_match_id INTEGER REFERENCES shared_matches(id) ON DELETE SET NULL,
+    shared_tie_id INTEGER
+        REFERENCES shared_two_legged_ties(id) ON DELETE SET NULL,
     actor_telegram_user_id INTEGER NOT NULL CHECK (actor_telegram_user_id > 0),
     event_type TEXT NOT NULL,
     before_state TEXT,
@@ -343,6 +414,10 @@ CREATE TABLE IF NOT EXISTS shared_tournament_events (
 
 CREATE INDEX IF NOT EXISTS idx_shared_tournament_events_tournament
     ON shared_tournament_events(shared_tournament_id, created_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_shared_tournament_events_tie
+    ON shared_tournament_events(shared_tie_id, id)
+    WHERE shared_tie_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS contest_teams (
     contest_id INTEGER NOT NULL
@@ -361,9 +436,53 @@ CREATE TABLE IF NOT EXISTS ties (
     name TEXT NOT NULL,
     position INTEGER NOT NULL,
     is_two_legged INTEGER NOT NULL DEFAULT 0 CHECK (is_two_legged IN (0, 1)),
+    first_team_id INTEGER REFERENCES teams(id),
+    second_team_id INTEGER REFERENCES teams(id),
     advancing_team_id INTEGER REFERENCES teams(id),
+    resolution_method TEXT CHECK (
+        resolution_method IS NULL
+        OR resolution_method IN ('aggregate', 'extra_time', 'penalties')
+    ),
+    second_leg_extra_time_home_score INTEGER CHECK (
+        second_leg_extra_time_home_score IS NULL
+        OR second_leg_extra_time_home_score >= 0
+    ),
+    second_leg_extra_time_away_score INTEGER CHECK (
+        second_leg_extra_time_away_score IS NULL
+        OR second_leg_extra_time_away_score >= 0
+    ),
+    second_leg_home_penalty_score INTEGER CHECK (
+        second_leg_home_penalty_score IS NULL
+        OR second_leg_home_penalty_score >= 0
+    ),
+    second_leg_away_penalty_score INTEGER CHECK (
+        second_leg_away_penalty_score IS NULL
+        OR second_leg_away_penalty_score >= 0
+    ),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (stage_id, position)
+    UNIQUE (stage_id, position),
+    CHECK (
+        (first_team_id IS NULL AND second_team_id IS NULL)
+        OR (
+            first_team_id IS NOT NULL
+            AND second_team_id IS NOT NULL
+            AND first_team_id != second_team_id
+        )
+    ),
+    CHECK (
+        first_team_id IS NULL
+        OR advancing_team_id IS NULL
+        OR advancing_team_id = first_team_id
+        OR advancing_team_id = second_team_id
+    ),
+    CHECK (
+        (second_leg_extra_time_home_score IS NULL) =
+        (second_leg_extra_time_away_score IS NULL)
+    ),
+    CHECK (
+        (second_leg_home_penalty_score IS NULL) =
+        (second_leg_away_penalty_score IS NULL)
+    )
 );
 
 CREATE TABLE IF NOT EXISTS matches (
@@ -374,6 +493,7 @@ CREATE TABLE IF NOT EXISTS matches (
     home_team_id INTEGER NOT NULL REFERENCES teams(id),
     away_team_id INTEGER NOT NULL REFERENCES teams(id),
     starts_at_utc TEXT NOT NULL,
+    leg_number INTEGER CHECK (leg_number IS NULL OR leg_number IN (1, 2)),
     best_of INTEGER CHECK (best_of IS NULL OR best_of IN (3, 5)),
     status TEXT NOT NULL DEFAULT 'scheduled' CHECK (
         status IN ('scheduled', 'started', 'finished', 'cancelled')
@@ -632,6 +752,10 @@ CREATE INDEX IF NOT EXISTS idx_matches_stage_id
 
 CREATE INDEX IF NOT EXISTS idx_matches_tie_id
     ON matches(tie_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_tie_leg_number
+    ON matches(tie_id, leg_number)
+    WHERE leg_number IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_matches_starts_at_utc
     ON matches(starts_at_utc);

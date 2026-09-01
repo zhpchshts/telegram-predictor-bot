@@ -45,14 +45,20 @@ from app.contest_service import (
     SwissStagePredictionSettingsLockedError,
     SwissStageResultUnavailableError,
     TournamentTeamsLockedError,
+    TwoLeggedTieCreationConflictError,
+    TwoLeggedTieNotFoundError,
+    TwoLeggedTiePredictionUnavailableError,
+    TwoLeggedTieResultUnavailableError,
     SharedTournamentManagedError,
     complete_contest,
     create_champions_league_2026_27_contest,
     create_match,
+    create_two_legged_tie,
     create_the_international_2026_contest,
     create_world_cup_2026_contest,
     delete_contest,
     delete_match,
+    delete_two_legged_tie,
     get_active_contests,
     get_completed_contests,
     get_contest_details,
@@ -62,6 +68,8 @@ from app.contest_service import (
     save_match_prediction,
     save_match_prediction_publication_settings,
     save_match_result,
+    save_two_legged_tie_prediction,
+    save_two_legged_tie_result,
     save_swiss_stage_prediction,
     save_swiss_stage_prediction_settings,
     save_swiss_stage_result,
@@ -79,14 +87,20 @@ from app.shared_tournament_service import (
     SharedTournamentNotFoundError,
     SharedTournamentResultUnavailableError,
     SharedTournamentSettingsLockedError,
+    SharedTwoLeggedTieConflictError,
+    SharedTwoLeggedTieNotFoundError,
+    SharedTwoLeggedTieResultUnavailableError,
     archive_shared_tournament,
     create_shared_match,
+    create_shared_two_legged_tie,
     create_shared_tournament,
     delete_shared_match,
+    delete_shared_two_legged_tie,
     get_shared_tournament_details,
     list_shared_tournaments,
     restore_shared_tournament,
     save_shared_match_result,
+    save_shared_two_legged_tie_result,
     save_shared_champion_result,
     save_shared_champion_settings,
     save_shared_swiss_result,
@@ -232,6 +246,15 @@ class CreateMatchRequest(BaseModel):
     best_of: Literal[3, 5] | None = None
 
 
+class CreateTwoLeggedTieRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    first_team_id: SqliteInteger
+    second_team_id: SqliteInteger
+    first_leg_starts_at_utc: str
+    second_leg_starts_at_utc: str
+
+
 class SaveTournamentTeamsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -252,6 +275,22 @@ class SaveMatchResultRequest(BaseModel):
     home_score: SqliteInteger
     away_score: SqliteInteger
     advancing_team_id: SqliteInteger | None = None
+
+
+class SaveTwoLeggedTiePredictionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    predicted_advancing_team_id: SqliteInteger
+
+
+class SaveTwoLeggedTieResultRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    advancing_team_id: SqliteInteger | None = None
+    second_leg_extra_time_home_score: SqliteInteger | None = None
+    second_leg_extra_time_away_score: SqliteInteger | None = None
+    second_leg_home_penalty_score: SqliteInteger | None = None
+    second_leg_away_penalty_score: SqliteInteger | None = None
 
 
 class SaveChampionPredictionSettingsRequest(BaseModel):
@@ -356,6 +395,10 @@ class SaveSharedMatchResultRequest(BaseModel):
     home_score: SqliteInteger
     away_score: SqliteInteger
     advancing_team_id: SqliteInteger | None = None
+    expected_version: SqliteInteger
+
+
+class SaveSharedTwoLeggedTieResultRequest(SaveTwoLeggedTieResultRequest):
     expected_version: SqliteInteger
 
 
@@ -1362,6 +1405,54 @@ async def create_tma_shared_match(
     return {"match": _serialize_shared_match(match)}
 
 
+@router.post(
+    "/shared-tournaments/{shared_tournament_id}/two-legged-ties",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_tma_shared_two_legged_tie(
+    shared_tournament_id: SqliteInteger,
+    payload: CreateTwoLeggedTieRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        tie = create_shared_two_legged_tie(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            first_team_id=payload.first_team_id,
+            second_team_id=payload.second_team_id,
+            first_leg_starts_at_utc=payload.first_leg_starts_at_utc,
+            second_leg_starts_at_utc=payload.second_leg_starts_at_utc,
+            actor_telegram_user_id=management.user.telegram_user_id,
+            now_utc=_utc_now(),
+        )
+    except (
+        SharedTournamentNotFoundError,
+        SharedTwoLeggedTieNotFoundError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (
+        SharedTournamentLockedError,
+        SharedTwoLeggedTieConflictError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+    return {"two_legged_tie": _serialize_shared_two_legged_tie(tie)}
+
+
 @router.put("/shared-tournaments/{shared_tournament_id}/matches/{shared_match_id}")
 async def update_tma_shared_match_start(
     shared_tournament_id: SqliteInteger,
@@ -1447,6 +1538,61 @@ async def save_tma_shared_match_result(
     return {"match": _serialize_shared_match(match)}
 
 
+@router.put(
+    "/shared-tournaments/{shared_tournament_id}/two-legged-ties/{shared_tie_id}/result"
+)
+async def save_tma_shared_two_legged_tie_result(
+    shared_tournament_id: SqliteInteger,
+    shared_tie_id: SqliteInteger,
+    payload: SaveSharedTwoLeggedTieResultRequest,
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        tie = save_shared_two_legged_tie_result(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            shared_tie_id=shared_tie_id,
+            advancing_team_id=payload.advancing_team_id,
+            second_leg_extra_time_home_score=(payload.second_leg_extra_time_home_score),
+            second_leg_extra_time_away_score=(payload.second_leg_extra_time_away_score),
+            second_leg_home_penalty_score=(payload.second_leg_home_penalty_score),
+            second_leg_away_penalty_score=(payload.second_leg_away_penalty_score),
+            expected_version=payload.expected_version,
+            actor_telegram_user_id=management.user.telegram_user_id,
+            actor_first_name=management.user.first_name,
+            actor_last_name=management.user.last_name,
+            actor_username=management.user.username,
+            now_utc=_utc_now(),
+        )
+    except (
+        SharedTournamentNotFoundError,
+        SharedTwoLeggedTieNotFoundError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (
+        SharedTournamentLockedError,
+        SharedTwoLeggedTieConflictError,
+        SharedTwoLeggedTieResultUnavailableError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+    return {"two_legged_tie": _serialize_shared_two_legged_tie(tie)}
+
+
 @router.delete("/shared-tournaments/{shared_tournament_id}/matches/{shared_match_id}")
 async def delete_tma_shared_match(
     shared_tournament_id: SqliteInteger,
@@ -1473,7 +1619,11 @@ async def delete_tma_shared_match(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
         ) from error
-    except (SharedTournamentLockedError, SharedMatchConflictError) as error:
+    except (
+        SharedTournamentLockedError,
+        SharedMatchConflictError,
+        SharedMatchUpdateUnavailableError,
+    ) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(error)
         ) from error
@@ -1482,6 +1632,98 @@ async def delete_tma_shared_match(
         "linked_contest_count": result.linked_contest_count,
         "deleted_prediction_count": result.deleted_prediction_count,
     }
+
+
+@router.delete(
+    "/shared-tournaments/{shared_tournament_id}/two-legged-ties/{shared_tie_id}"
+)
+async def delete_tma_shared_two_legged_tie(
+    shared_tournament_id: SqliteInteger,
+    shared_tie_id: SqliteInteger,
+    expected_version: Annotated[int, Query(gt=0, le=SQLITE_SIGNED_64_MAX)],
+    management: Annotated[
+        SharedTournamentManagementContext,
+        Depends(_authorize_shared_tournament_management),
+    ],
+) -> dict[str, object]:
+    settings = load_settings()
+    try:
+        result = delete_shared_two_legged_tie(
+            database_path=settings.database_path,
+            shared_tournament_id=shared_tournament_id,
+            shared_tie_id=shared_tie_id,
+            expected_version=expected_version,
+            actor_telegram_user_id=management.user.telegram_user_id,
+            actor_first_name=management.user.first_name,
+            actor_last_name=management.user.last_name,
+            actor_username=management.user.username,
+            now_utc=_utc_now(),
+        )
+    except (
+        SharedTournamentNotFoundError,
+        SharedTwoLeggedTieNotFoundError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (
+        SharedTournamentLockedError,
+        SharedTwoLeggedTieConflictError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    return {
+        "deleted": True,
+        "linked_contest_count": result.linked_contest_count,
+        "deleted_match_prediction_count": result.deleted_match_prediction_count,
+        "deleted_advancing_prediction_count": (
+            result.deleted_advancing_prediction_count
+        ),
+    }
+
+
+@router.delete(
+    "/contests/{contest_id}/two-legged-ties/{tie_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_tma_two_legged_tie(
+    contest_id: SqliteInteger,
+    tie_id: SqliteInteger,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
+) -> Response:
+    settings = load_settings()
+    try:
+        delete_two_legged_tie(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            tie_id=tie_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            audit_actor=_audit_actor(context.context, context.access),
+        )
+    except (ContestNotFoundError, TwoLeggedTieNotFoundError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (
+        ContestCompletedError,
+        MatchUpdateUnavailableError,
+        SharedTournamentManagedError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.delete(
@@ -1519,7 +1761,11 @@ async def delete_tma_match(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    except (ContestCompletedError, SharedTournamentManagedError) as error:
+    except (
+        ContestCompletedError,
+        MatchUpdateUnavailableError,
+        SharedTournamentManagedError,
+    ) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
@@ -1809,6 +2055,73 @@ async def create_tma_match(
     )
 
 
+@router.post("/contests/{contest_id}/two-legged-ties")
+async def create_tma_two_legged_tie(
+    contest_id: SqliteInteger,
+    payload: CreateTwoLeggedTieRequest,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias=IDEMPOTENCY_KEY_HEADER),
+    ] = None,
+) -> JSONResponse:
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Не передан ключ идемпотентности создания противостояния.",
+        )
+
+    settings = load_settings()
+    try:
+        result = create_two_legged_tie(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            first_team_id=payload.first_team_id,
+            second_team_id=payload.second_team_id,
+            first_leg_starts_at_utc=payload.first_leg_starts_at_utc,
+            second_leg_starts_at_utc=payload.second_leg_starts_at_utc,
+            idempotency_key=idempotency_key,
+            audit_actor=_audit_actor(context.context, context.access),
+            now_utc=_utc_now(),
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (
+        ContestCompletedError,
+        SharedTournamentManagedError,
+        TwoLeggedTieCreationConflictError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        status_code=(
+            status.HTTP_201_CREATED if result.was_created else status.HTTP_200_OK
+        ),
+        content={
+            "two_legged_tie": _serialize_two_legged_tie(result.tie),
+            "was_created": result.was_created,
+        },
+    )
+
+
 @router.put("/contests/{contest_id}/matches/{match_id}/prediction")
 async def save_tma_match_prediction(
     contest_id: SqliteInteger,
@@ -1927,6 +2240,124 @@ async def save_tma_match_result(
         status_code=response_status,
         content={
             "result": _serialize_result(result.result),
+            "was_created": result.was_created,
+        },
+    )
+
+
+@router.put("/contests/{contest_id}/two-legged-ties/{tie_id}/prediction")
+async def save_tma_two_legged_tie_prediction(
+    contest_id: SqliteInteger,
+    tie_id: SqliteInteger,
+    payload: SaveTwoLeggedTiePredictionRequest,
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> JSONResponse:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+    try:
+        result = save_two_legged_tie_prediction(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            tie_id=tie_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            predicted_advancing_team_id=payload.predicted_advancing_team_id,
+            now_utc=_utc_now(),
+        )
+    except (ContestNotFoundError, TwoLeggedTieNotFoundError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (
+        ContestCompletedError,
+        TwoLeggedTiePredictionUnavailableError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        status_code=(
+            status.HTTP_201_CREATED if result.was_created else status.HTTP_200_OK
+        ),
+        content={
+            "prediction": {
+                "advancing_team_id": result.prediction.advancing_team_id,
+            },
+            "was_created": result.was_created,
+        },
+    )
+
+
+@router.put("/contests/{contest_id}/two-legged-ties/{tie_id}/result")
+async def save_tma_two_legged_tie_result(
+    contest_id: SqliteInteger,
+    tie_id: SqliteInteger,
+    payload: SaveTwoLeggedTieResultRequest,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
+) -> JSONResponse:
+    settings = load_settings()
+    try:
+        result = save_two_legged_tie_result(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            tie_id=tie_id,
+            telegram_user_id=context.user.telegram_user_id,
+            first_name=context.user.first_name,
+            last_name=context.user.last_name,
+            username=context.user.username,
+            advancing_team_id=payload.advancing_team_id,
+            second_leg_extra_time_home_score=(payload.second_leg_extra_time_home_score),
+            second_leg_extra_time_away_score=(payload.second_leg_extra_time_away_score),
+            second_leg_home_penalty_score=(payload.second_leg_home_penalty_score),
+            second_leg_away_penalty_score=(payload.second_leg_away_penalty_score),
+            audit_actor=_audit_actor(context.context, context.access),
+            now_utc=_utc_now(),
+        )
+    except (ContestNotFoundError, TwoLeggedTieNotFoundError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except (
+        ContestCompletedError,
+        SharedTournamentManagedError,
+        TwoLeggedTieResultUnavailableError,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    return JSONResponse(
+        status_code=(
+            status.HTTP_201_CREATED if result.was_created else status.HTTP_200_OK
+        ),
+        content={
+            "result": _serialize_two_legged_tie_result(result.result),
             "was_created": result.was_created,
         },
     )
@@ -2565,7 +2996,7 @@ def _serialize_shared_tournament_summary(tournament) -> dict[str, object]:
 
 
 def _serialize_shared_match(match) -> dict[str, object]:
-    return {
+    result = {
         "id": match.id,
         "home_team": {"id": match.home_team.id, "name": match.home_team.name},
         "away_team": {"id": match.away_team.id, "name": match.away_team.name},
@@ -2585,6 +3016,15 @@ def _serialize_shared_match(match) -> dict[str, object]:
         "linked_contest_count": match.linked_contest_count,
         "prediction_count": match.prediction_count,
     }
+    if match.shared_tie_id is not None:
+        result.update(
+            {
+                "shared_tie_id": match.shared_tie_id,
+                "leg_number": match.leg_number,
+                "is_two_legged": True,
+            }
+        )
+    return result
 
 
 def _serialize_shared_tournament_details(details) -> dict[str, object]:
@@ -2609,7 +3049,7 @@ def _serialize_shared_tournament_details(details) -> dict[str, object]:
         swiss_stage_prediction["playoff_team_ids"] = list(
             details.swiss_stage_prediction.playoff_team_ids
         )
-    return {
+    result = {
         **_serialize_shared_tournament_summary(details.tournament),
         "teams": [{"id": team.id, "name": team.name} for team in details.teams],
         "matches": [_serialize_shared_match(match) for match in details.matches],
@@ -2627,6 +3067,32 @@ def _serialize_shared_tournament_details(details) -> dict[str, object]:
             ),
         },
         "swiss_stage_prediction": swiss_stage_prediction,
+    }
+    if details.two_legged_ties:
+        result["two_legged_ties"] = [
+            _serialize_shared_two_legged_tie(tie) for tie in details.two_legged_ties
+        ]
+    return result
+
+
+def _serialize_shared_two_legged_tie(tie) -> dict[str, object]:
+    return {
+        "id": tie.id,
+        "first_team": {"id": tie.first_team.id, "name": tie.first_team.name},
+        "second_team": {"id": tie.second_team.id, "name": tie.second_team.name},
+        "first_leg": _serialize_shared_match(tie.first_leg),
+        "second_leg": _serialize_shared_match(tie.second_leg),
+        "aggregate_first_team_score": tie.aggregate_first_team_score,
+        "aggregate_second_team_score": tie.aggregate_second_team_score,
+        "advancing_team_id": tie.advancing_team_id,
+        "resolution_method": tie.resolution_method,
+        "second_leg_extra_time_home_score": (tie.second_leg_extra_time_home_score),
+        "second_leg_extra_time_away_score": (tie.second_leg_extra_time_away_score),
+        "second_leg_home_penalty_score": tie.second_leg_home_penalty_score,
+        "second_leg_away_penalty_score": tie.second_leg_away_penalty_score,
+        "version": tie.version,
+        "linked_contest_count": tie.linked_contest_count,
+        "prediction_count": tie.prediction_count,
     }
 
 
@@ -2670,6 +3136,10 @@ def _serialize_contest_details(contest) -> dict[str, object]:
         ],
         "matches": [_serialize_match(match) for match in contest.matches],
     }
+    if contest.two_legged_ties:
+        result["two_legged_ties"] = [
+            _serialize_two_legged_tie(tie) for tie in contest.two_legged_ties
+        ]
     if (
         contest.swiss_stage_prediction.is_enabled
         or contest.swiss_stage_prediction.deadline_at is not None
@@ -2818,6 +3288,10 @@ def _serialize_leaderboard_entry(entry) -> dict[str, object]:
             if entry.swiss_stage_prediction_history is not None
             else None
         )
+    if entry.two_legged_tie_predictions_count:
+        result["two_legged_tie_predictions_count"] = (
+            entry.two_legged_tie_predictions_count
+        )
     return result
 
 
@@ -2849,7 +3323,7 @@ def _serialize_leaderboard_swiss_stage_prediction_history(
 
 
 def _serialize_match(match) -> dict[str, object]:
-    return {
+    result = {
         "id": match.id,
         "tie_id": match.tie_id,
         **({"best_of": match.best_of} if match.best_of is not None else {}),
@@ -2873,9 +3347,49 @@ def _serialize_match(match) -> dict[str, object]:
             else None
         ),
     }
+    if match.is_two_legged:
+        result.update({"is_two_legged": True, "leg_number": match.leg_number})
+    return result
 
 
-def _serialize_result(result) -> dict[str, int]:
+def _serialize_two_legged_tie(tie) -> dict[str, object]:
+    return {
+        "id": tie.id,
+        "name": tie.name,
+        "first_team": {"id": tie.first_team_id, "name": tie.first_team_name},
+        "second_team": {"id": tie.second_team_id, "name": tie.second_team_name},
+        "first_leg_match_id": tie.first_leg_match_id,
+        "second_leg_match_id": tie.second_leg_match_id,
+        "prediction_deadline_at": tie.prediction_deadline_at,
+        "is_prediction_open": tie.is_prediction_open,
+        "prediction": (
+            {"advancing_team_id": tie.prediction.advancing_team_id}
+            if tie.prediction is not None
+            else None
+        ),
+        "result": (
+            _serialize_two_legged_tie_result(tie.result)
+            if tie.result is not None
+            else None
+        ),
+        "awarded_points": tie.awarded_points,
+    }
+
+
+def _serialize_two_legged_tie_result(result) -> dict[str, object]:
+    return {
+        "aggregate_first_team_score": result.aggregate_first_team_score,
+        "aggregate_second_team_score": result.aggregate_second_team_score,
+        "advancing_team_id": result.advancing_team_id,
+        "resolution_method": result.resolution_method,
+        "second_leg_extra_time_home_score": (result.second_leg_extra_time_home_score),
+        "second_leg_extra_time_away_score": (result.second_leg_extra_time_away_score),
+        "second_leg_home_penalty_score": result.second_leg_home_penalty_score,
+        "second_leg_away_penalty_score": result.second_leg_away_penalty_score,
+    }
+
+
+def _serialize_result(result) -> dict[str, int | None]:
     return {
         "home_score": result.home_score,
         "away_score": result.away_score,
@@ -2883,7 +3397,7 @@ def _serialize_result(result) -> dict[str, int]:
     }
 
 
-def _serialize_prediction(prediction) -> dict[str, int]:
+def _serialize_prediction(prediction) -> dict[str, int | None]:
     return {
         "home_score": prediction.home_score,
         "away_score": prediction.away_score,

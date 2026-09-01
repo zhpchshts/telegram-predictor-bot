@@ -137,7 +137,7 @@ def test_champions_league_shared_defaults_to_eight_direct_plus_twelve_eliminated
     )
     with pytest.raises(
         SharedTournamentResultUnavailableError,
-        match="лиговый этап",
+        match="общий этап",
     ):
         save_shared_swiss_result(
             database_path=database_path,

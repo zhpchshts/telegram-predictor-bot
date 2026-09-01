@@ -249,7 +249,7 @@ def test_champions_league_audit_exposes_league_phase_context(
         event for event in payload["events"] if event["id"] == swiss_event_id
     )
     assert swiss_event["contest"]["template_key"] == "champions_league_2026_27"
-    assert swiss_event["entity"]["display_name"] == "Итоги лигового этапа"
+    assert swiss_event["entity"]["display_name"] == "Итоги общего этапа"
     assert swiss_event["after_state"]["actual_result"]["playoff_team_ids"] == list(
         range(9, 25)
     )

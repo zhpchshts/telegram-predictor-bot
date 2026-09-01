@@ -747,6 +747,17 @@ summary:focus-visible {
   background: var(--surface-subtle);
 }
 
+.two-legged-tie-list-item,
+.two-legged-tie-administration-item {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface-subtle));
+}
+
+.two-legged-match-leg {
+  color: var(--accent);
+  font-weight: 750;
+}
+
 .match-card-header {
   display: flex;
   gap: 10px;
@@ -853,6 +864,23 @@ summary:focus-visible {
 .match-prediction-form {
   display: grid;
   gap: 12px;
+}
+
+.two-legged-tie-team-field .form-hint {
+  margin: 0;
+}
+
+.two-legged-tie-score-heading {
+  margin: 2px 0 -3px;
+}
+
+.two-legged-tie-administration-item .match-deletion-section > .action-button {
+  justify-self: start;
+}
+
+.two-legged-tie-form-card .match-form-overview,
+.two-legged-tie-administration-item .match-meta {
+  overflow-wrap: anywhere;
 }
 
 .match-score-grid {

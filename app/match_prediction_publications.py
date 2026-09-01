@@ -225,9 +225,11 @@ def _get_prediction_rows(*, database_path: Path, match_id: int):
             FROM match_predictions
             JOIN users ON users.id = match_predictions.user_id
             JOIN matches ON matches.id = match_predictions.match_id
+            JOIN ties ON ties.id = matches.tie_id
             LEFT JOIN tie_predictions
                 ON tie_predictions.tie_id = matches.tie_id
                AND tie_predictions.user_id = match_predictions.user_id
+               AND ties.is_two_legged = 0
             LEFT JOIN teams AS advancing_team
                 ON advancing_team.id = tie_predictions.predicted_advancing_team_id
             WHERE match_predictions.match_id = ?

@@ -19,6 +19,7 @@ from app.publication_outbox import (
 from app.scoring_service import (
     recalculate_match_prediction_scores,
     recalculate_tie_prediction_scores,
+    resolve_two_legged_tie_result,
 )
 
 
@@ -66,6 +67,18 @@ class SharedMatchResultUnavailableError(ValueError):
     pass
 
 
+class SharedTwoLeggedTieNotFoundError(ValueError):
+    pass
+
+
+class SharedTwoLeggedTieConflictError(ValueError):
+    pass
+
+
+class SharedTwoLeggedTieResultUnavailableError(ValueError):
+    pass
+
+
 class SharedTournamentSettingsLockedError(ValueError):
     pass
 
@@ -83,6 +96,8 @@ class SharedTeam:
 @dataclass(frozen=True, slots=True)
 class SharedMatch:
     id: int
+    shared_tie_id: int | None
+    leg_number: int | None
     home_team: SharedTeam
     away_team: SharedTeam
     starts_at_utc: str
@@ -91,6 +106,26 @@ class SharedMatch:
     home_score: int | None
     away_score: int | None
     advancing_team_id: int | None
+    version: int
+    linked_contest_count: int
+    prediction_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class SharedTwoLeggedTie:
+    id: int
+    first_team: SharedTeam
+    second_team: SharedTeam
+    first_leg: SharedMatch
+    second_leg: SharedMatch
+    aggregate_first_team_score: int | None
+    aggregate_second_team_score: int | None
+    advancing_team_id: int | None
+    resolution_method: str | None
+    second_leg_extra_time_home_score: int | None
+    second_leg_extra_time_away_score: int | None
+    second_leg_home_penalty_score: int | None
+    second_leg_away_penalty_score: int | None
     version: int
     linked_contest_count: int
     prediction_count: int
@@ -139,6 +174,7 @@ class SharedTournamentDetails:
     tournament: SharedTournamentSummary
     teams: tuple[SharedTeam, ...]
     matches: tuple[SharedMatch, ...]
+    two_legged_ties: tuple[SharedTwoLeggedTie, ...]
     champion_prediction: SharedChampionSettings
     swiss_stage_prediction: SharedSwissStageSettings
 
@@ -147,6 +183,13 @@ class SharedTournamentDetails:
 class SharedMatchDeletionResult:
     linked_contest_count: int
     deleted_prediction_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class SharedTwoLeggedTieDeletionResult:
+    linked_contest_count: int
+    deleted_match_prediction_count: int
+    deleted_advancing_prediction_count: int
 
 
 def list_shared_tournaments(
@@ -283,6 +326,7 @@ def archive_shared_tournament(
             SELECT 1
             FROM shared_matches
             WHERE shared_tournament_id = ?
+              AND shared_tie_id IS NULL
               AND (
                   status != 'finished'
                   OR home_score_final IS NULL
@@ -296,6 +340,31 @@ def archive_shared_tournament(
         if incomplete_match is not None:
             raise SharedTournamentCompletionUnavailableError(
                 "Сначала внесите финальные результаты всех матчей общего турнира."
+            )
+        incomplete_tie = connection.execute(
+            """
+            SELECT 1
+            FROM shared_two_legged_ties AS tie
+            WHERE tie.shared_tournament_id = ?
+              AND (
+                    tie.advancing_team_id IS NULL
+                 OR tie.resolution_method IS NULL
+                 OR (
+                        SELECT COUNT(*)
+                        FROM shared_matches AS match
+                        WHERE match.shared_tie_id = tie.id
+                          AND match.status = 'finished'
+                          AND match.home_score_final IS NOT NULL
+                          AND match.away_score_final IS NOT NULL
+                    ) != 2
+              )
+            LIMIT 1
+            """,
+            (shared_tournament_id,),
+        ).fetchone()
+        if incomplete_tie is not None:
+            raise SharedTournamentCompletionUnavailableError(
+                "Сначала завершите все двухматчевые противостояния общего турнира."
             )
 
         settings = _get_shared_settings_row(
@@ -530,7 +599,7 @@ def save_shared_tournament_teams(
             and len(normalized_names) != 36
         ):
             raise ValueError(
-                "Для включённого прогноза на лиговый этап Лиги чемпионов "
+                "Для включённого прогноза на общий этап Лиги чемпионов "
                 "нужно сохранить ровно 36 команд."
             )
         if bool(settings_row["swiss_stage_prediction_enabled"]) and (
@@ -634,6 +703,144 @@ def create_shared_match(
             actor_telegram_user_id=actor_telegram_user_id,
             resolved_now=resolved_now,
             allow_duplicate_pair=allow_duplicate_pair,
+        )
+
+
+def create_shared_two_legged_tie(
+    *,
+    database_path: Path,
+    shared_tournament_id: int,
+    first_team_id: int,
+    second_team_id: int,
+    first_leg_starts_at_utc: str,
+    second_leg_starts_at_utc: str,
+    actor_telegram_user_id: int,
+    now_utc: datetime | None = None,
+) -> SharedTwoLeggedTie:
+    normalized_first_start = _normalize_datetime(first_leg_starts_at_utc)
+    normalized_second_start = _normalize_datetime(second_leg_starts_at_utc)
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        resolved_now = _resolve_now(now_utc)
+        if _parse_datetime(normalized_first_start) <= resolved_now:
+            raise ValueError("Время начала первого матча должно быть в будущем.")
+        if _parse_datetime(normalized_second_start) <= _parse_datetime(
+            normalized_first_start
+        ):
+            raise ValueError("Ответный матч должен начинаться после первого.")
+        tournament_row = _get_active_tournament_row(
+            connection, shared_tournament_id=shared_tournament_id
+        )
+        if str(tournament_row["template_key"]) == "the_international_2026":
+            raise ValueError("Двухматчевые противостояния доступны только для футбола.")
+        first_team = _get_shared_team_row(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            team_id=first_team_id,
+        )
+        second_team = _get_shared_team_row(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            team_id=second_team_id,
+        )
+        if first_team is None or second_team is None:
+            raise ValueError("Обе команды должны входить в общий турнир.")
+        if first_team_id == second_team_id:
+            raise ValueError("В противостоянии должны участвовать разные команды.")
+        duplicate = connection.execute(
+            """
+            SELECT 1
+            FROM shared_matches
+            WHERE shared_tournament_id = ?
+              AND (
+                    (home_team_id = ? AND away_team_id = ?)
+                 OR (home_team_id = ? AND away_team_id = ?)
+              )
+            LIMIT 1
+            """,
+            (
+                shared_tournament_id,
+                first_team_id,
+                second_team_id,
+                second_team_id,
+                first_team_id,
+            ),
+        ).fetchone()
+        if duplicate is not None:
+            raise SharedTwoLeggedTieConflictError(
+                "Противостояние между этими командами уже существует."
+            )
+
+        shared_tie_id = int(
+            connection.execute(
+                """
+                INSERT INTO shared_two_legged_ties (
+                    shared_tournament_id, first_team_id, second_team_id
+                )
+                VALUES (?, ?, ?)
+                """,
+                (shared_tournament_id, first_team_id, second_team_id),
+            ).lastrowid
+        )
+        first_leg_id = _insert_shared_tie_leg(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_tie_id=shared_tie_id,
+            leg_number=1,
+            home_team_id=first_team_id,
+            away_team_id=second_team_id,
+            starts_at_utc=normalized_first_start,
+        )
+        second_leg_id = _insert_shared_tie_leg(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_tie_id=shared_tie_id,
+            leg_number=2,
+            home_team_id=second_team_id,
+            away_team_id=first_team_id,
+            starts_at_utc=normalized_second_start,
+        )
+        contest_rows = connection.execute(
+            """
+            SELECT contests.id
+            FROM contest_shared_tournaments AS link
+            JOIN contests ON contests.id = link.contest_id
+            WHERE link.shared_tournament_id = ? AND contests.is_active = 1
+            ORDER BY contests.id
+            """,
+            (shared_tournament_id,),
+        ).fetchall()
+        tie_row = _get_shared_two_legged_tie_row(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_tie_id=shared_tie_id,
+        )
+        for contest_row in contest_rows:
+            _create_local_two_legged_tie(
+                connection,
+                contest_id=int(contest_row["id"]),
+                shared_tie_row=tie_row,
+            )
+        _touch_tournament(connection, shared_tournament_id=shared_tournament_id)
+        _record_event(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_match_id=None,
+            shared_tie_id=shared_tie_id,
+            actor_telegram_user_id=actor_telegram_user_id,
+            event_type="shared_tie.created",
+            before_state=None,
+            after_state=_shared_two_legged_tie_snapshot(tie_row),
+            metadata={
+                "first_leg_id": first_leg_id,
+                "second_leg_id": second_leg_id,
+                "linked_contest_count": len(contest_rows),
+            },
+        )
+        return _get_shared_two_legged_tie_details(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_tie_id=shared_tie_id,
         )
 
 
@@ -861,6 +1068,34 @@ def update_shared_match_start(
             raise SharedMatchUpdateUnavailableError(
                 "Дедлайн матча уже наступил и больше не может быть изменён."
             )
+        shared_tie_id = (
+            int(match_row["shared_tie_id"])
+            if match_row["shared_tie_id"] is not None
+            else None
+        )
+        if shared_tie_id is not None:
+            sibling = connection.execute(
+                """
+                SELECT leg_number, starts_at_utc
+                FROM shared_matches
+                WHERE shared_tie_id = ? AND id != ?
+                """,
+                (shared_tie_id, shared_match_id),
+            ).fetchone()
+            if sibling is None:
+                raise RuntimeError("У противостояния не найден второй матч.")
+            if int(match_row["leg_number"]) == 1 and _parse_datetime(
+                normalized_start
+            ) >= _parse_datetime(str(sibling["starts_at_utc"])):
+                raise SharedMatchUpdateUnavailableError(
+                    "Первый матч должен начинаться раньше ответного."
+                )
+            if int(match_row["leg_number"]) == 2 and _parse_datetime(
+                normalized_start
+            ) <= _parse_datetime(str(sibling["starts_at_utc"])):
+                raise SharedMatchUpdateUnavailableError(
+                    "Ответный матч должен начинаться после первого."
+                )
         local_rows = connection.execute(
             """
             SELECT matches.status, matches.starts_at_utc
@@ -911,6 +1146,15 @@ def update_shared_match_start(
             """,
             (normalized_start, shared_match_id),
         )
+        if shared_tie_id is not None:
+            connection.execute(
+                """
+                UPDATE shared_two_legged_ties
+                SET version = version + 1, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (shared_tie_id,),
+            )
         _touch_tournament(connection, shared_tournament_id=shared_tournament_id)
         updated_row = _get_shared_match_row(
             connection,
@@ -921,6 +1165,7 @@ def update_shared_match_start(
             connection,
             shared_tournament_id=shared_tournament_id,
             shared_match_id=shared_match_id,
+            shared_tie_id=shared_tie_id,
             actor_telegram_user_id=actor_telegram_user_id,
             event_type="shared_match.start_updated",
             before_state=before_state,
@@ -976,21 +1221,44 @@ def save_shared_match_result(
             raise SharedMatchResultUnavailableError(
                 "Результат можно внести только после начала матча."
             )
-        normalized_advancing_team_id = _resolve_advancing_team(
-            match_row,
-            template_key=str(tournament_row["template_key"]),
-            home_score=normalized_home_score,
-            away_score=normalized_away_score,
-            advancing_team_id=advancing_team_id,
+        shared_tie_id = (
+            int(match_row["shared_tie_id"])
+            if match_row["shared_tie_id"] is not None
+            else None
         )
+        if shared_tie_id is None:
+            normalized_advancing_team_id = _resolve_advancing_team(
+                match_row,
+                template_key=str(tournament_row["template_key"]),
+                home_score=normalized_home_score,
+                away_score=normalized_away_score,
+                advancing_team_id=advancing_team_id,
+            )
+        else:
+            if advancing_team_id is not None:
+                raise ValueError(
+                    "Для матча двухматчевой пары сохраняется только счёт "
+                    "после 90 минут. Прошедшую команду укажите для всей пары."
+                )
+            normalized_advancing_team_id = None
         if (
             str(match_row["status"]) == "finished"
             and match_row["home_score_final"] is not None
             and int(match_row["home_score_final"]) == normalized_home_score
             and match_row["away_score_final"] is not None
             and int(match_row["away_score_final"]) == normalized_away_score
-            and match_row["advancing_team_id"] is not None
-            and int(match_row["advancing_team_id"]) == normalized_advancing_team_id
+            and (
+                (
+                    match_row["advancing_team_id"] is None
+                    and normalized_advancing_team_id is None
+                )
+                or (
+                    match_row["advancing_team_id"] is not None
+                    and normalized_advancing_team_id is not None
+                    and int(match_row["advancing_team_id"])
+                    == normalized_advancing_team_id
+                )
+            )
             and _expected_version_allows_exact_noop(
                 connection,
                 match_row,
@@ -1071,12 +1339,13 @@ def save_shared_match_result(
                 """,
                 (normalized_home_score, normalized_away_score, local_match_id),
             )
-            connection.execute(
-                "UPDATE ties SET advancing_team_id = ? WHERE id = ?",
-                (normalized_advancing_team_id, tie_id),
-            )
             recalculate_match_prediction_scores(connection, match_id=local_match_id)
-            recalculate_tie_prediction_scores(connection, tie_id=tie_id)
+            if shared_tie_id is None:
+                connection.execute(
+                    "UPDATE ties SET advancing_team_id = ? WHERE id = ?",
+                    (normalized_advancing_team_id, tie_id),
+                )
+                recalculate_tie_prediction_scores(connection, tie_id=tie_id)
             event = connection.execute(
                 """
                 INSERT INTO event_log (
@@ -1124,6 +1393,13 @@ def save_shared_match_result(
                 was_created=local_was_created,
                 now_utc=resolved_now,
             )
+        if shared_tie_id is not None:
+            _reconcile_shared_two_legged_tie_after_match_result(
+                connection,
+                shared_tournament_id=shared_tournament_id,
+                shared_tie_id=shared_tie_id,
+                actor_telegram_user_id=actor_telegram_user_id,
+            )
         _touch_tournament(connection, shared_tournament_id=shared_tournament_id)
         updated_row = _get_shared_match_row(
             connection,
@@ -1134,6 +1410,7 @@ def save_shared_match_result(
             connection,
             shared_tournament_id=shared_tournament_id,
             shared_match_id=shared_match_id,
+            shared_tie_id=shared_tie_id,
             actor_telegram_user_id=actor_telegram_user_id,
             event_type=(
                 "shared_match.result_corrected"
@@ -1157,6 +1434,223 @@ def save_shared_match_result(
                 shared_tournament_id=shared_tournament_id,
                 shared_match_id=shared_match_id,
             )
+        )
+
+
+def save_shared_two_legged_tie_result(
+    *,
+    database_path: Path,
+    shared_tournament_id: int,
+    shared_tie_id: int,
+    advancing_team_id: int | None,
+    second_leg_extra_time_home_score: int | None,
+    second_leg_extra_time_away_score: int | None,
+    second_leg_home_penalty_score: int | None,
+    second_leg_away_penalty_score: int | None,
+    expected_version: int,
+    actor_telegram_user_id: int,
+    actor_first_name: str,
+    actor_last_name: str | None,
+    actor_username: str | None,
+    now_utc: datetime | None = None,
+) -> SharedTwoLeggedTie:
+    normalized_extra_time_home = _normalize_optional_score(
+        second_leg_extra_time_home_score,
+        field_name="Счёт хозяев в дополнительное время",
+    )
+    normalized_extra_time_away = _normalize_optional_score(
+        second_leg_extra_time_away_score,
+        field_name="Счёт гостей в дополнительное время",
+    )
+    normalized_penalty_home = _normalize_optional_score(
+        second_leg_home_penalty_score,
+        field_name="Счёт хозяев в серии пенальти",
+    )
+    normalized_penalty_away = _normalize_optional_score(
+        second_leg_away_penalty_score,
+        field_name="Счёт гостей в серии пенальти",
+    )
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        _get_active_tournament_row(
+            connection, shared_tournament_id=shared_tournament_id
+        )
+        tie_row = _get_shared_two_legged_tie_row(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_tie_id=shared_tie_id,
+        )
+        leg_rows = _get_shared_tie_leg_rows(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_tie_id=shared_tie_id,
+        )
+        if len(leg_rows) != 2 or any(
+            str(row["status"]) != "finished"
+            or row["home_score_final"] is None
+            or row["away_score_final"] is None
+            for row in leg_rows
+        ):
+            raise SharedTwoLeggedTieResultUnavailableError(
+                "Сначала внесите результаты обоих матчей противостояния."
+            )
+        resolution = _resolve_shared_two_legged_tie_result(
+            tie_row,
+            leg_rows=leg_rows,
+            second_leg_extra_time_home_score=normalized_extra_time_home,
+            second_leg_extra_time_away_score=normalized_extra_time_away,
+            second_leg_home_penalty_score=normalized_penalty_home,
+            second_leg_away_penalty_score=normalized_penalty_away,
+            advancing_team_id=advancing_team_id,
+        )
+        requested_state = (
+            resolution.advancing_team_id,
+            resolution.resolution_method,
+            normalized_extra_time_home,
+            normalized_extra_time_away,
+            normalized_penalty_home,
+            normalized_penalty_away,
+        )
+        current_state = _shared_two_legged_tie_result_state(tie_row)
+        if current_state == requested_state and _expected_version_allows_exact_noop(
+            connection,
+            tie_row,
+            shared_tournament_id=shared_tournament_id,
+            expected_version=expected_version,
+            actor_telegram_user_id=actor_telegram_user_id,
+            event_types=(
+                "shared_tie.result_recorded",
+                "shared_tie.result_corrected",
+                "shared_tie.result_reconciled",
+            ),
+            shared_tie_id=shared_tie_id,
+            allow_current=True,
+        ):
+            return _get_shared_two_legged_tie_details(
+                connection,
+                shared_tournament_id=shared_tournament_id,
+                shared_tie_id=shared_tie_id,
+            )
+        _require_expected_shared_tie_version(tie_row, expected_version=expected_version)
+        before_state = _shared_two_legged_tie_snapshot(tie_row)
+        was_created = tie_row["advancing_team_id"] is None
+        actor_user_id = _upsert_actor_user(
+            connection,
+            telegram_user_id=actor_telegram_user_id,
+            first_name=actor_first_name,
+            last_name=actor_last_name,
+            username=actor_username,
+        )
+        updated = connection.execute(
+            """
+            UPDATE shared_two_legged_ties
+            SET advancing_team_id = ?,
+                resolution_method = ?,
+                second_leg_extra_time_home_score = ?,
+                second_leg_extra_time_away_score = ?,
+                second_leg_home_penalty_score = ?,
+                second_leg_away_penalty_score = ?,
+                version = version + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND version = ?
+            """,
+            (
+                resolution.advancing_team_id,
+                resolution.resolution_method,
+                normalized_extra_time_home,
+                normalized_extra_time_away,
+                normalized_penalty_home,
+                normalized_penalty_away,
+                shared_tie_id,
+                expected_version,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise SharedTwoLeggedTieConflictError(
+                "Противостояние уже было изменено. Обновите данные и повторите действие."
+            )
+        local_rows = connection.execute(
+            """
+            SELECT contest_id, tie_id
+            FROM shared_tie_links
+            WHERE shared_tie_id = ?
+            ORDER BY contest_id
+            """,
+            (shared_tie_id,),
+        ).fetchall()
+        for local_row in local_rows:
+            local_tie_id = int(local_row["tie_id"])
+            _save_local_two_legged_tie_result(
+                connection,
+                tie_id=local_tie_id,
+                advancing_team_id=resolution.advancing_team_id,
+                resolution_method=resolution.resolution_method,
+                second_leg_extra_time_home_score=normalized_extra_time_home,
+                second_leg_extra_time_away_score=normalized_extra_time_away,
+                second_leg_home_penalty_score=normalized_penalty_home,
+                second_leg_away_penalty_score=normalized_penalty_away,
+            )
+            recalculate_tie_prediction_scores(connection, tie_id=local_tie_id)
+            connection.execute(
+                """
+                INSERT INTO event_log (
+                    contest_id, actor_user_id, event_type, entity_type,
+                    entity_id, payload_json
+                )
+                VALUES (?, ?, ?, 'tie', ?, ?)
+                """,
+                (
+                    int(local_row["contest_id"]),
+                    actor_user_id,
+                    (
+                        "shared_tie.result_recorded"
+                        if was_created
+                        else "shared_tie.result_corrected"
+                    ),
+                    local_tie_id,
+                    json.dumps(
+                        {
+                            "shared_tie_id": shared_tie_id,
+                            "aggregate_first_team_score": (
+                                resolution.aggregate_first_team_score
+                            ),
+                            "aggregate_second_team_score": (
+                                resolution.aggregate_second_team_score
+                            ),
+                            "advancing_team_id": resolution.advancing_team_id,
+                            "resolution_method": resolution.resolution_method,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ),
+            )
+        _touch_tournament(connection, shared_tournament_id=shared_tournament_id)
+        updated_row = _get_shared_two_legged_tie_row(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_tie_id=shared_tie_id,
+        )
+        _record_event(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_match_id=None,
+            shared_tie_id=shared_tie_id,
+            actor_telegram_user_id=actor_telegram_user_id,
+            event_type=(
+                "shared_tie.result_recorded"
+                if was_created
+                else "shared_tie.result_corrected"
+            ),
+            before_state=before_state,
+            after_state=_shared_two_legged_tie_snapshot(updated_row),
+            metadata={"linked_contest_count": len(local_rows)},
+        )
+        return _get_shared_two_legged_tie_details(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_tie_id=shared_tie_id,
         )
 
 
@@ -1481,7 +1975,7 @@ def save_shared_swiss_settings(
         ):
             raise ValueError(
                 "Для Лиги чемпионов выберите 8 команд напрямую в 1/8 "
-                "и 12 команд, которые вылетят после лигового этапа."
+                "и 12 команд, которые вылетят после общего этапа."
             )
         settings = _get_shared_settings_row(
             connection, shared_tournament_id=shared_tournament_id
@@ -1497,7 +1991,7 @@ def save_shared_swiss_settings(
             and team_count != 36
         ):
             raise ValueError(
-                "Для лигового этапа Лиги чемпионов добавьте ровно 36 команд."
+                "Для общего этапа Лиги чемпионов добавьте ровно 36 команд."
             )
         if enabled and direct_count + elimination_count > team_count:
             raise ValueError(
@@ -1825,6 +2319,11 @@ def delete_shared_match(
             shared_match_id=shared_match_id,
         )
         _require_expected_version(match_row, expected_version=expected_version)
+        if match_row["shared_tie_id"] is not None:
+            raise SharedMatchConflictError(
+                "Этот матч входит в двухматчевое противостояние. "
+                "Удалите противостояние целиком."
+            )
         actor_user_id = _upsert_actor_user(
             connection,
             telegram_user_id=actor_telegram_user_id,
@@ -1908,6 +2407,139 @@ def delete_shared_match(
         return SharedMatchDeletionResult(
             linked_contest_count=len(link_rows),
             deleted_prediction_count=deleted_prediction_count,
+        )
+
+
+def delete_shared_two_legged_tie(
+    *,
+    database_path: Path,
+    shared_tournament_id: int,
+    shared_tie_id: int,
+    expected_version: int,
+    actor_telegram_user_id: int,
+    actor_first_name: str,
+    actor_last_name: str | None,
+    actor_username: str | None,
+    now_utc: datetime | None = None,
+) -> SharedTwoLeggedTieDeletionResult:
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        resolved_now = _resolve_now(now_utc)
+        _get_active_tournament_row(
+            connection, shared_tournament_id=shared_tournament_id
+        )
+        tie_row = _get_shared_two_legged_tie_row(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_tie_id=shared_tie_id,
+        )
+        _require_expected_shared_tie_version(tie_row, expected_version=expected_version)
+        actor_user_id = _upsert_actor_user(
+            connection,
+            telegram_user_id=actor_telegram_user_id,
+            first_name=actor_first_name,
+            last_name=actor_last_name,
+            username=actor_username,
+        )
+        local_match_rows = connection.execute(
+            """
+            SELECT link.contest_id, link.match_id, matches.tie_id,
+                   shared_match.id AS shared_match_id,
+                   COUNT(match_predictions.id) AS prediction_count
+            FROM shared_matches AS shared_match
+            JOIN shared_match_links AS link
+              ON link.shared_match_id = shared_match.id
+            JOIN matches ON matches.id = link.match_id
+            LEFT JOIN match_predictions
+              ON match_predictions.match_id = matches.id
+            WHERE shared_match.shared_tie_id = ?
+            GROUP BY link.contest_id, link.match_id, matches.tie_id, shared_match.id
+            ORDER BY link.contest_id, shared_match.leg_number
+            """,
+            (shared_tie_id,),
+        ).fetchall()
+        local_tie_rows = connection.execute(
+            """
+            SELECT link.contest_id, link.tie_id,
+                   COUNT(tie_predictions.id) AS prediction_count
+            FROM shared_tie_links AS link
+            LEFT JOIN tie_predictions ON tie_predictions.tie_id = link.tie_id
+            WHERE link.shared_tie_id = ?
+            GROUP BY link.contest_id, link.tie_id
+            ORDER BY link.contest_id
+            """,
+            (shared_tie_id,),
+        ).fetchall()
+        deleted_match_prediction_count = sum(
+            int(row["prediction_count"]) for row in local_match_rows
+        )
+        deleted_advancing_prediction_count = sum(
+            int(row["prediction_count"]) for row in local_tie_rows
+        )
+        _record_event(
+            connection,
+            shared_tournament_id=shared_tournament_id,
+            shared_match_id=None,
+            shared_tie_id=shared_tie_id,
+            actor_telegram_user_id=actor_telegram_user_id,
+            event_type="shared_tie.deleted",
+            before_state=_shared_two_legged_tie_snapshot(tie_row),
+            after_state=None,
+            metadata={
+                "linked_contest_count": len(local_tie_rows),
+                "deleted_match_prediction_count": deleted_match_prediction_count,
+                "deleted_advancing_prediction_count": (
+                    deleted_advancing_prediction_count
+                ),
+            },
+        )
+        for local_match_row in local_match_rows:
+            contest_id = int(local_match_row["contest_id"])
+            local_match_id = int(local_match_row["match_id"])
+            event = connection.execute(
+                """
+                INSERT INTO event_log (
+                    contest_id, actor_user_id, event_type, entity_type,
+                    entity_id, payload_json
+                )
+                VALUES (?, ?, 'shared_tie.match_deleted', 'match', ?, ?)
+                """,
+                (
+                    contest_id,
+                    actor_user_id,
+                    local_match_id,
+                    json.dumps(
+                        {
+                            "shared_tie_id": shared_tie_id,
+                            "shared_match_id": int(local_match_row["shared_match_id"]),
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            if event.lastrowid is None:
+                raise RuntimeError("Не удалось записать удаление матча пары.")
+            handle_match_publication_deletion(
+                connection,
+                contest_id=contest_id,
+                match_id=local_match_id,
+                event_id=int(event.lastrowid),
+                now_utc=resolved_now,
+            )
+            connection.execute("DELETE FROM matches WHERE id = ?", (local_match_id,))
+        for local_tie_row in local_tie_rows:
+            connection.execute(
+                "DELETE FROM ties WHERE id = ?", (int(local_tie_row["tie_id"]),)
+            )
+        connection.execute(
+            "DELETE FROM shared_two_legged_ties WHERE id = ?", (shared_tie_id,)
+        )
+        _touch_tournament(connection, shared_tournament_id=shared_tournament_id)
+        return SharedTwoLeggedTieDeletionResult(
+            linked_contest_count=len(local_tie_rows),
+            deleted_match_prediction_count=deleted_match_prediction_count,
+            deleted_advancing_prediction_count=deleted_advancing_prediction_count,
         )
 
 
@@ -2011,10 +2643,25 @@ def attach_shared_tournament(
             [(contest_id, team_id, "direct") for team_id in direct_ids]
             + [(contest_id, team_id, "elimination") for team_id in elimination_ids],
         )
+    shared_tie_rows = connection.execute(
+        """
+        SELECT *
+        FROM shared_two_legged_ties
+        WHERE shared_tournament_id = ?
+        ORDER BY id
+        """,
+        (shared_tournament_id,),
+    ).fetchall()
+    for shared_tie_row in shared_tie_rows:
+        _create_local_two_legged_tie(
+            connection,
+            contest_id=contest_id,
+            shared_tie_row=shared_tie_row,
+        )
     match_rows = connection.execute(
         """
         SELECT * FROM shared_matches
-        WHERE shared_tournament_id = ?
+        WHERE shared_tournament_id = ? AND shared_tie_id IS NULL
         ORDER BY starts_at_utc, id
         """,
         (shared_tournament_id,),
@@ -2143,6 +2790,37 @@ def _create_shared_match_in_connection(
     )
 
 
+def _insert_shared_tie_leg(
+    connection: sqlite3.Connection,
+    *,
+    shared_tournament_id: int,
+    shared_tie_id: int,
+    leg_number: int,
+    home_team_id: int,
+    away_team_id: int,
+    starts_at_utc: str,
+) -> int:
+    return int(
+        connection.execute(
+            """
+            INSERT INTO shared_matches (
+                shared_tournament_id, shared_tie_id, leg_number,
+                home_team_id, away_team_id, starts_at_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                shared_tournament_id,
+                shared_tie_id,
+                leg_number,
+                home_team_id,
+                away_team_id,
+                starts_at_utc,
+            ),
+        ).lastrowid
+    )
+
+
 def _insert_shared_match_external_link(
     connection: sqlite3.Connection,
     *,
@@ -2168,6 +2846,196 @@ def _insert_shared_match_external_link(
             external_match_id,
         ),
     )
+
+
+def _create_local_two_legged_tie(
+    connection: sqlite3.Connection,
+    *,
+    contest_id: int,
+    shared_tie_row: sqlite3.Row,
+) -> int:
+    shared_tie_id = int(shared_tie_row["id"])
+    existing = connection.execute(
+        """
+        SELECT tie_id FROM shared_tie_links
+        WHERE shared_tie_id = ? AND contest_id = ?
+        """,
+        (shared_tie_id, contest_id),
+    ).fetchone()
+    if existing is not None:
+        raise RuntimeError("Общее противостояние уже материализовано в конкурсе.")
+
+    competition_row = connection.execute(
+        """
+        SELECT competitions.id AS competition_id,
+               scoring_rule_sets.id AS scoring_rule_set_id
+        FROM competitions
+        JOIN scoring_rule_sets
+          ON scoring_rule_sets.competition_id = competitions.id
+        WHERE competitions.contest_id = ?
+          AND competitions.is_active = 1
+          AND scoring_rule_sets.is_active = 1
+        ORDER BY competitions.id, scoring_rule_sets.version DESC
+        LIMIT 1
+        """,
+        (contest_id,),
+    ).fetchone()
+    if competition_row is None:
+        raise RuntimeError("Не найдены правила связанного конкурса.")
+    competition_id = int(competition_row["competition_id"])
+    stage_row = connection.execute(
+        """
+        SELECT id FROM stages
+        WHERE competition_id = ?
+        ORDER BY position, id
+        LIMIT 1
+        """,
+        (competition_id,),
+    ).fetchone()
+    if stage_row is None:
+        stage_id = int(
+            connection.execute(
+                """
+                INSERT INTO stages (competition_id, name, position, stage_type)
+                VALUES (?, 'Плей-офф', 1, 'knockout')
+                """,
+                (competition_id,),
+            ).lastrowid
+        )
+    else:
+        stage_id = int(stage_row["id"])
+    position = int(
+        connection.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM ties WHERE stage_id = ?",
+            (stage_id,),
+        ).fetchone()[0]
+    )
+    team_names = connection.execute(
+        """
+        SELECT first.name AS first_name, second.name AS second_name
+        FROM teams AS first, teams AS second
+        WHERE first.id = ? AND second.id = ?
+        """,
+        (
+            int(shared_tie_row["first_team_id"]),
+            int(shared_tie_row["second_team_id"]),
+        ),
+    ).fetchone()
+    if team_names is None:
+        raise RuntimeError("Не найдены команды общего противостояния.")
+    scoring_rule_set_id = int(competition_row["scoring_rule_set_id"])
+    local_tie_id = int(
+        connection.execute(
+            """
+            INSERT INTO ties (
+                stage_id, scoring_rule_set_id, name, position,
+                is_two_legged, first_team_id, second_team_id,
+                advancing_team_id, resolution_method,
+                second_leg_extra_time_home_score,
+                second_leg_extra_time_away_score,
+                second_leg_home_penalty_score,
+                second_leg_away_penalty_score
+            )
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                stage_id,
+                scoring_rule_set_id,
+                f"{team_names['first_name']} — {team_names['second_name']}",
+                position,
+                int(shared_tie_row["first_team_id"]),
+                int(shared_tie_row["second_team_id"]),
+                shared_tie_row["advancing_team_id"],
+                shared_tie_row["resolution_method"],
+                shared_tie_row["second_leg_extra_time_home_score"],
+                shared_tie_row["second_leg_extra_time_away_score"],
+                shared_tie_row["second_leg_home_penalty_score"],
+                shared_tie_row["second_leg_away_penalty_score"],
+            ),
+        ).lastrowid
+    )
+    leg_rows = _get_shared_tie_leg_rows(
+        connection,
+        shared_tournament_id=int(shared_tie_row["shared_tournament_id"]),
+        shared_tie_id=shared_tie_id,
+    )
+    if len(leg_rows) != 2:
+        raise RuntimeError("У общего противостояния должны быть ровно два матча.")
+    for leg_row in leg_rows:
+        _insert_local_shared_tie_leg(
+            connection,
+            contest_id=contest_id,
+            stage_id=stage_id,
+            tie_id=local_tie_id,
+            scoring_rule_set_id=scoring_rule_set_id,
+            shared_match_row=leg_row,
+        )
+    connection.execute(
+        """
+        INSERT INTO shared_tie_links (shared_tie_id, tie_id, contest_id)
+        VALUES (?, ?, ?)
+        """,
+        (shared_tie_id, local_tie_id, contest_id),
+    )
+    return local_tie_id
+
+
+def _insert_local_shared_tie_leg(
+    connection: sqlite3.Connection,
+    *,
+    contest_id: int,
+    stage_id: int,
+    tie_id: int,
+    scoring_rule_set_id: int,
+    shared_match_row: sqlite3.Row,
+) -> int:
+    next_match_id_row = connection.execute(
+        """
+        SELECT MAX(value) + 1 AS next_id
+        FROM (
+            SELECT COALESCE(MAX(id), 0) AS value FROM matches
+            UNION ALL
+            SELECT COALESCE(MAX(entity_id), 0) AS value
+            FROM event_log
+            WHERE entity_type = 'match'
+        )
+        """
+    ).fetchone()
+    if next_match_id_row is None or next_match_id_row["next_id"] is None:
+        raise RuntimeError("Не удалось определить идентификатор связанного матча.")
+    local_match_id = int(next_match_id_row["next_id"])
+    connection.execute(
+        """
+        INSERT INTO matches (
+            id, stage_id, tie_id, scoring_rule_set_id, home_team_id,
+            away_team_id, starts_at_utc, leg_number, best_of, status,
+            home_score_final, away_score_final
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            local_match_id,
+            stage_id,
+            tie_id,
+            scoring_rule_set_id,
+            int(shared_match_row["home_team_id"]),
+            int(shared_match_row["away_team_id"]),
+            str(shared_match_row["starts_at_utc"]),
+            int(shared_match_row["leg_number"]),
+            shared_match_row["best_of"],
+            str(shared_match_row["status"]),
+            shared_match_row["home_score_final"],
+            shared_match_row["away_score_final"],
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO shared_match_links (shared_match_id, match_id, contest_id)
+        VALUES (?, ?, ?)
+        """,
+        (int(shared_match_row["id"]), local_match_id, contest_id),
+    )
+    return local_match_id
 
 
 def _create_local_match(
@@ -2342,6 +3210,15 @@ def _get_shared_tournament_details(
         + " ORDER BY shared_match.starts_at_utc, shared_match.id",
         (shared_tournament_id,),
     ).fetchall()
+    shared_tie_rows = connection.execute(
+        """
+        SELECT id
+        FROM shared_two_legged_ties
+        WHERE shared_tournament_id = ?
+        ORDER BY id
+        """,
+        (shared_tournament_id,),
+    ).fetchall()
     settings = _get_shared_settings_row(
         connection, shared_tournament_id=shared_tournament_id
     )
@@ -2375,6 +3252,14 @@ def _get_shared_tournament_details(
             SharedTeam(id=int(item["id"]), name=str(item["name"])) for item in team_rows
         ),
         matches=tuple(_shared_match_from_row(item) for item in match_rows),
+        two_legged_ties=tuple(
+            _get_shared_two_legged_tie_details(
+                connection,
+                shared_tournament_id=shared_tournament_id,
+                shared_tie_id=int(item["id"]),
+            )
+            for item in shared_tie_rows
+        ),
         champion_prediction=SharedChampionSettings(
             is_enabled=bool(settings["champion_prediction_enabled"]),
             deadline_at=(
@@ -2438,6 +3323,137 @@ def _get_shared_match_details_row(
     if row is None:
         raise SharedMatchNotFoundError("Общий матч не найден.")
     return row
+
+
+def _get_shared_two_legged_tie_details(
+    connection: sqlite3.Connection,
+    *,
+    shared_tournament_id: int,
+    shared_tie_id: int,
+) -> SharedTwoLeggedTie:
+    tie_row = _get_shared_two_legged_tie_row(
+        connection,
+        shared_tournament_id=shared_tournament_id,
+        shared_tie_id=shared_tie_id,
+    )
+    team_row = connection.execute(
+        """
+        SELECT first.id AS first_id, first.name AS first_name,
+               second.id AS second_id, second.name AS second_name
+        FROM teams AS first, teams AS second
+        WHERE first.id = ? AND second.id = ?
+        """,
+        (int(tie_row["first_team_id"]), int(tie_row["second_team_id"])),
+    ).fetchone()
+    if team_row is None:
+        raise RuntimeError("Не найдены команды общего противостояния.")
+    leg_rows = connection.execute(
+        _SHARED_MATCH_DETAILS_QUERY
+        + " WHERE shared_match.shared_tournament_id = ?"
+        + " AND shared_match.shared_tie_id = ?"
+        + " GROUP BY shared_match.id"
+        + " ORDER BY shared_match.leg_number",
+        (shared_tournament_id, shared_tie_id),
+    ).fetchall()
+    if len(leg_rows) != 2 or [int(row["leg_number"]) for row in leg_rows] != [1, 2]:
+        raise RuntimeError(
+            "У общего противостояния должны быть первый и ответный матчи."
+        )
+    counts = connection.execute(
+        """
+        SELECT COUNT(DISTINCT link.contest_id) AS linked_contest_count,
+               COUNT(DISTINCT prediction.id) AS prediction_count
+        FROM shared_tie_links AS link
+        LEFT JOIN tie_predictions AS prediction ON prediction.tie_id = link.tie_id
+        WHERE link.shared_tie_id = ?
+        """,
+        (shared_tie_id,),
+    ).fetchone()
+    aggregate_first, aggregate_second = _aggregate_two_legged_scores(
+        tie_row, leg_rows=leg_rows
+    )
+    return SharedTwoLeggedTie(
+        id=shared_tie_id,
+        first_team=SharedTeam(
+            id=int(team_row["first_id"]), name=str(team_row["first_name"])
+        ),
+        second_team=SharedTeam(
+            id=int(team_row["second_id"]), name=str(team_row["second_name"])
+        ),
+        first_leg=_shared_match_from_row(leg_rows[0]),
+        second_leg=_shared_match_from_row(leg_rows[1]),
+        aggregate_first_team_score=aggregate_first,
+        aggregate_second_team_score=aggregate_second,
+        advancing_team_id=(
+            int(tie_row["advancing_team_id"])
+            if tie_row["advancing_team_id"] is not None
+            else None
+        ),
+        resolution_method=(
+            str(tie_row["resolution_method"])
+            if tie_row["resolution_method"] is not None
+            else None
+        ),
+        second_leg_extra_time_home_score=(
+            int(tie_row["second_leg_extra_time_home_score"])
+            if tie_row["second_leg_extra_time_home_score"] is not None
+            else None
+        ),
+        second_leg_extra_time_away_score=(
+            int(tie_row["second_leg_extra_time_away_score"])
+            if tie_row["second_leg_extra_time_away_score"] is not None
+            else None
+        ),
+        second_leg_home_penalty_score=(
+            int(tie_row["second_leg_home_penalty_score"])
+            if tie_row["second_leg_home_penalty_score"] is not None
+            else None
+        ),
+        second_leg_away_penalty_score=(
+            int(tie_row["second_leg_away_penalty_score"])
+            if tie_row["second_leg_away_penalty_score"] is not None
+            else None
+        ),
+        version=int(tie_row["version"]),
+        linked_contest_count=(
+            int(counts["linked_contest_count"]) if counts is not None else 0
+        ),
+        prediction_count=int(counts["prediction_count"]) if counts is not None else 0,
+    )
+
+
+def _get_shared_two_legged_tie_row(
+    connection: sqlite3.Connection,
+    *,
+    shared_tournament_id: int,
+    shared_tie_id: int,
+) -> sqlite3.Row:
+    row = connection.execute(
+        """
+        SELECT * FROM shared_two_legged_ties
+        WHERE shared_tournament_id = ? AND id = ?
+        """,
+        (shared_tournament_id, shared_tie_id),
+    ).fetchone()
+    if row is None:
+        raise SharedTwoLeggedTieNotFoundError("Общее противостояние не найдено.")
+    return row
+
+
+def _get_shared_tie_leg_rows(
+    connection: sqlite3.Connection,
+    *,
+    shared_tournament_id: int,
+    shared_tie_id: int,
+) -> list[sqlite3.Row]:
+    return connection.execute(
+        """
+        SELECT * FROM shared_matches
+        WHERE shared_tournament_id = ? AND shared_tie_id = ?
+        ORDER BY leg_number
+        """,
+        (shared_tournament_id, shared_tie_id),
+    ).fetchall()
 
 
 def _get_shared_match_row(
@@ -2511,6 +3527,10 @@ def _shared_tournament_summary_from_row(row: sqlite3.Row) -> SharedTournamentSum
 def _shared_match_from_row(row: sqlite3.Row) -> SharedMatch:
     return SharedMatch(
         id=int(row["id"]),
+        shared_tie_id=(
+            int(row["shared_tie_id"]) if row["shared_tie_id"] is not None else None
+        ),
+        leg_number=(int(row["leg_number"]) if row["leg_number"] is not None else None),
         home_team=SharedTeam(
             id=int(row["home_team_detail_id"]), name=str(row["home_team_name"])
         ),
@@ -2544,6 +3564,12 @@ def _shared_match_from_row(row: sqlite3.Row) -> SharedMatch:
 def _shared_match_snapshot(row: sqlite3.Row) -> dict[str, object]:
     return {
         "id": int(row["id"]),
+        "shared_tie_id": (
+            int(row["shared_tie_id"]) if row["shared_tie_id"] is not None else None
+        ),
+        "leg_number": (
+            int(row["leg_number"]) if row["leg_number"] is not None else None
+        ),
         "home_team_id": int(row["home_team_id"]),
         "away_team_id": int(row["away_team_id"]),
         "starts_at_utc": str(row["starts_at_utc"]),
@@ -2566,6 +3592,282 @@ def _shared_match_snapshot(row: sqlite3.Row) -> dict[str, object]:
         ),
         "version": int(row["version"]),
     }
+
+
+def _shared_two_legged_tie_snapshot(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "id": int(row["id"]),
+        "first_team_id": int(row["first_team_id"]),
+        "second_team_id": int(row["second_team_id"]),
+        "advancing_team_id": (
+            int(row["advancing_team_id"])
+            if row["advancing_team_id"] is not None
+            else None
+        ),
+        "resolution_method": (
+            str(row["resolution_method"])
+            if row["resolution_method"] is not None
+            else None
+        ),
+        "second_leg_extra_time_home_score": row["second_leg_extra_time_home_score"],
+        "second_leg_extra_time_away_score": row["second_leg_extra_time_away_score"],
+        "second_leg_home_penalty_score": row["second_leg_home_penalty_score"],
+        "second_leg_away_penalty_score": row["second_leg_away_penalty_score"],
+        "version": int(row["version"]),
+    }
+
+
+def _shared_two_legged_tie_result_state(
+    row: sqlite3.Row,
+) -> tuple[int | None, str | None, int | None, int | None, int | None, int | None]:
+    return (
+        int(row["advancing_team_id"]) if row["advancing_team_id"] is not None else None,
+        str(row["resolution_method"]) if row["resolution_method"] is not None else None,
+        int(row["second_leg_extra_time_home_score"])
+        if row["second_leg_extra_time_home_score"] is not None
+        else None,
+        int(row["second_leg_extra_time_away_score"])
+        if row["second_leg_extra_time_away_score"] is not None
+        else None,
+        int(row["second_leg_home_penalty_score"])
+        if row["second_leg_home_penalty_score"] is not None
+        else None,
+        int(row["second_leg_away_penalty_score"])
+        if row["second_leg_away_penalty_score"] is not None
+        else None,
+    )
+
+
+def _aggregate_two_legged_scores(
+    tie_row: sqlite3.Row, *, leg_rows: list[sqlite3.Row]
+) -> tuple[int | None, int | None]:
+    if len(leg_rows) != 2 or any(
+        row["home_score_final"] is None or row["away_score_final"] is None
+        for row in leg_rows
+    ):
+        return None, None
+    first_team_id = int(tie_row["first_team_id"])
+    second_team_id = int(tie_row["second_team_id"])
+
+    def team_score(row: sqlite3.Row, team_id: int) -> int:
+        return (
+            int(row["home_score_final"])
+            if int(row["home_team_id"]) == team_id
+            else int(row["away_score_final"])
+        )
+
+    return (
+        sum(team_score(row, first_team_id) for row in leg_rows),
+        sum(team_score(row, second_team_id) for row in leg_rows),
+    )
+
+
+def _resolve_shared_two_legged_tie_result(
+    tie_row: sqlite3.Row,
+    *,
+    leg_rows: list[sqlite3.Row],
+    second_leg_extra_time_home_score: int | None,
+    second_leg_extra_time_away_score: int | None,
+    second_leg_home_penalty_score: int | None,
+    second_leg_away_penalty_score: int | None,
+    advancing_team_id: int | None,
+):
+    if len(leg_rows) != 2 or [int(row["leg_number"]) for row in leg_rows] != [1, 2]:
+        raise RuntimeError("У общего противостояния нарушен порядок матчей.")
+    first_leg, second_leg = leg_rows
+    return resolve_two_legged_tie_result(
+        first_team_id=int(tie_row["first_team_id"]),
+        second_team_id=int(tie_row["second_team_id"]),
+        first_leg_home_team_id=int(first_leg["home_team_id"]),
+        first_leg_away_team_id=int(first_leg["away_team_id"]),
+        first_leg_home_score=int(first_leg["home_score_final"]),
+        first_leg_away_score=int(first_leg["away_score_final"]),
+        second_leg_home_team_id=int(second_leg["home_team_id"]),
+        second_leg_away_team_id=int(second_leg["away_team_id"]),
+        second_leg_home_score=int(second_leg["home_score_final"]),
+        second_leg_away_score=int(second_leg["away_score_final"]),
+        second_leg_extra_time_home_score=second_leg_extra_time_home_score,
+        second_leg_extra_time_away_score=second_leg_extra_time_away_score,
+        second_leg_home_penalty_score=second_leg_home_penalty_score,
+        second_leg_away_penalty_score=second_leg_away_penalty_score,
+        advancing_team_id=advancing_team_id,
+    )
+
+
+def _save_local_two_legged_tie_result(
+    connection: sqlite3.Connection,
+    *,
+    tie_id: int,
+    advancing_team_id: int | None,
+    resolution_method: str | None,
+    second_leg_extra_time_home_score: int | None,
+    second_leg_extra_time_away_score: int | None,
+    second_leg_home_penalty_score: int | None,
+    second_leg_away_penalty_score: int | None,
+) -> None:
+    connection.execute(
+        """
+        UPDATE ties
+        SET advancing_team_id = ?,
+            resolution_method = ?,
+            second_leg_extra_time_home_score = ?,
+            second_leg_extra_time_away_score = ?,
+            second_leg_home_penalty_score = ?,
+            second_leg_away_penalty_score = ?
+        WHERE id = ? AND is_two_legged = 1
+        """,
+        (
+            advancing_team_id,
+            resolution_method,
+            second_leg_extra_time_home_score,
+            second_leg_extra_time_away_score,
+            second_leg_home_penalty_score,
+            second_leg_away_penalty_score,
+            tie_id,
+        ),
+    )
+
+
+def _reconcile_shared_two_legged_tie_after_match_result(
+    connection: sqlite3.Connection,
+    *,
+    shared_tournament_id: int,
+    shared_tie_id: int,
+    actor_telegram_user_id: int,
+) -> None:
+    tie_row = _get_shared_two_legged_tie_row(
+        connection,
+        shared_tournament_id=shared_tournament_id,
+        shared_tie_id=shared_tie_id,
+    )
+    leg_rows = _get_shared_tie_leg_rows(
+        connection,
+        shared_tournament_id=shared_tournament_id,
+        shared_tie_id=shared_tie_id,
+    )
+    desired_state: tuple[
+        int | None, str | None, int | None, int | None, int | None, int | None
+    ] = (None, None, None, None, None, None)
+    both_finished = len(leg_rows) == 2 and all(
+        str(row["status"]) == "finished"
+        and row["home_score_final"] is not None
+        and row["away_score_final"] is not None
+        for row in leg_rows
+    )
+    if both_finished:
+        aggregate_first, aggregate_second = _aggregate_two_legged_scores(
+            tie_row, leg_rows=leg_rows
+        )
+        if aggregate_first != aggregate_second:
+            resolution = _resolve_shared_two_legged_tie_result(
+                tie_row,
+                leg_rows=leg_rows,
+                second_leg_extra_time_home_score=None,
+                second_leg_extra_time_away_score=None,
+                second_leg_home_penalty_score=None,
+                second_leg_away_penalty_score=None,
+                advancing_team_id=None,
+            )
+            desired_state = (
+                resolution.advancing_team_id,
+                resolution.resolution_method,
+                None,
+                None,
+                None,
+                None,
+            )
+        elif tie_row["second_leg_extra_time_home_score"] is not None:
+            try:
+                resolution = _resolve_shared_two_legged_tie_result(
+                    tie_row,
+                    leg_rows=leg_rows,
+                    second_leg_extra_time_home_score=int(
+                        tie_row["second_leg_extra_time_home_score"]
+                    ),
+                    second_leg_extra_time_away_score=int(
+                        tie_row["second_leg_extra_time_away_score"]
+                    ),
+                    second_leg_home_penalty_score=(
+                        int(tie_row["second_leg_home_penalty_score"])
+                        if tie_row["second_leg_home_penalty_score"] is not None
+                        else None
+                    ),
+                    second_leg_away_penalty_score=(
+                        int(tie_row["second_leg_away_penalty_score"])
+                        if tie_row["second_leg_away_penalty_score"] is not None
+                        else None
+                    ),
+                    advancing_team_id=None,
+                )
+            except ValueError:
+                pass
+            else:
+                desired_state = (
+                    resolution.advancing_team_id,
+                    resolution.resolution_method,
+                    int(tie_row["second_leg_extra_time_home_score"]),
+                    int(tie_row["second_leg_extra_time_away_score"]),
+                    (
+                        int(tie_row["second_leg_home_penalty_score"])
+                        if tie_row["second_leg_home_penalty_score"] is not None
+                        else None
+                    ),
+                    (
+                        int(tie_row["second_leg_away_penalty_score"])
+                        if tie_row["second_leg_away_penalty_score"] is not None
+                        else None
+                    ),
+                )
+    if _shared_two_legged_tie_result_state(tie_row) == desired_state:
+        return
+    before_state = _shared_two_legged_tie_snapshot(tie_row)
+    connection.execute(
+        """
+        UPDATE shared_two_legged_ties
+        SET advancing_team_id = ?, resolution_method = ?,
+            second_leg_extra_time_home_score = ?,
+            second_leg_extra_time_away_score = ?,
+            second_leg_home_penalty_score = ?,
+            second_leg_away_penalty_score = ?,
+            version = version + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (*desired_state, shared_tie_id),
+    )
+    local_rows = connection.execute(
+        "SELECT tie_id FROM shared_tie_links WHERE shared_tie_id = ?",
+        (shared_tie_id,),
+    ).fetchall()
+    for local_row in local_rows:
+        local_tie_id = int(local_row["tie_id"])
+        _save_local_two_legged_tie_result(
+            connection,
+            tie_id=local_tie_id,
+            advancing_team_id=desired_state[0],
+            resolution_method=desired_state[1],
+            second_leg_extra_time_home_score=desired_state[2],
+            second_leg_extra_time_away_score=desired_state[3],
+            second_leg_home_penalty_score=desired_state[4],
+            second_leg_away_penalty_score=desired_state[5],
+        )
+        recalculate_tie_prediction_scores(connection, tie_id=local_tie_id)
+    updated_row = _get_shared_two_legged_tie_row(
+        connection,
+        shared_tournament_id=shared_tournament_id,
+        shared_tie_id=shared_tie_id,
+    )
+    _record_event(
+        connection,
+        shared_tournament_id=shared_tournament_id,
+        shared_match_id=None,
+        shared_tie_id=shared_tie_id,
+        actor_telegram_user_id=actor_telegram_user_id,
+        event_type="shared_tie.result_reconciled",
+        before_state=before_state,
+        after_state=_shared_two_legged_tie_snapshot(updated_row),
+        metadata={"linked_contest_count": len(local_rows)},
+    )
 
 
 def _get_shared_settings_row(
@@ -2847,18 +4149,21 @@ def _record_event(
     before_state: dict[str, object] | None,
     after_state: dict[str, object] | None,
     metadata: dict[str, object] | None = None,
+    shared_tie_id: int | None = None,
 ) -> None:
     connection.execute(
         """
         INSERT INTO shared_tournament_events (
-            shared_tournament_id, shared_match_id, actor_telegram_user_id,
+            shared_tournament_id, shared_match_id, shared_tie_id,
+            actor_telegram_user_id,
             event_type, before_state, after_state, metadata
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             shared_tournament_id,
             shared_match_id,
+            shared_tie_id,
             actor_telegram_user_id,
             _normalize_event_type(event_type),
             _json(before_state),
@@ -2890,6 +4195,19 @@ def _require_expected_version(row: sqlite3.Row, *, expected_version: int) -> Non
         )
 
 
+def _require_expected_shared_tie_version(
+    row: sqlite3.Row, *, expected_version: int
+) -> None:
+    if isinstance(expected_version, bool) or expected_version <= 0:
+        raise ValueError(
+            "Версия противостояния должна быть положительным целым числом."
+        )
+    if int(row["version"]) != expected_version:
+        raise SharedTwoLeggedTieConflictError(
+            "Противостояние уже было изменено. Обновите данные и повторите действие."
+        )
+
+
 def _require_expected_tournament_version(
     row: sqlite3.Row, *, expected_version: int
 ) -> None:
@@ -2910,6 +4228,7 @@ def _expected_version_allows_exact_noop(
     actor_telegram_user_id: int,
     event_types: tuple[str, ...],
     shared_match_id: int | None = None,
+    shared_tie_id: int | None = None,
     allow_current: bool = False,
 ) -> bool:
     if (
@@ -2924,18 +4243,9 @@ def _expected_version_allows_exact_noop(
     if expected_version != current_version - 1:
         return False
 
-    if shared_match_id is None:
-        last_event = connection.execute(
-            """
-            SELECT actor_telegram_user_id, event_type
-            FROM shared_tournament_events
-            WHERE shared_tournament_id = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (shared_tournament_id,),
-        ).fetchone()
-    else:
+    if shared_match_id is not None and shared_tie_id is not None:
+        raise RuntimeError("Событие не может одновременно относиться к матчу и паре.")
+    if shared_match_id is not None:
         last_event = connection.execute(
             """
             SELECT actor_telegram_user_id, event_type
@@ -2945,6 +4255,28 @@ def _expected_version_allows_exact_noop(
             LIMIT 1
             """,
             (shared_tournament_id, shared_match_id),
+        ).fetchone()
+    elif shared_tie_id is not None:
+        last_event = connection.execute(
+            """
+            SELECT actor_telegram_user_id, event_type
+            FROM shared_tournament_events
+            WHERE shared_tournament_id = ? AND shared_tie_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (shared_tournament_id, shared_tie_id),
+        ).fetchone()
+    else:
+        last_event = connection.execute(
+            """
+            SELECT actor_telegram_user_id, event_type
+            FROM shared_tournament_events
+            WHERE shared_tournament_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (shared_tournament_id,),
         ).fetchone()
     return (
         last_event is not None
@@ -2990,7 +4322,7 @@ def _shared_template_defaults(template_key: str) -> tuple[int, int, int]:
 
 def _shared_stage_terms(template_key: str) -> tuple[str, str]:
     if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
-        return "лиговый этап", "лигового этапа"
+        return "общий этап", "общего этапа"
     return "швейцарский этап", "швейцарского этапа"
 
 
@@ -3081,6 +4413,16 @@ def _normalize_score(value: int) -> int:
         raise ValueError("Счёт должен быть целым числом.")
     if value < 0:
         raise ValueError("Счёт не может быть отрицательным.")
+    return value
+
+
+def _normalize_optional_score(value: int | None, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} должен быть целым числом.")
+    if value < 0:
+        raise ValueError(f"{field_name} не может быть отрицательным.")
     return value
 
 

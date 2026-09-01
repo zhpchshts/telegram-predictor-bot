@@ -153,10 +153,9 @@ async function apiRequestForCurrentView(path, options = {}) {
   return result;
 }
 
-function queueMatchPredictionSave(contestId, matchId, payload) {
-  const queueKey = `${contestId}:${matchId}`;
+function queuePredictionSave(queueKey, path, payload) {
   const sendSave = () => apiRequest(
-    `/api/tma/contests/${contestId}/matches/${matchId}/prediction`,
+    path,
     {
       method: "PUT",
       keepalive: true,
@@ -177,6 +176,22 @@ function queueMatchPredictionSave(contestId, matchId, payload) {
   void trackedRequest.catch(() => undefined);
   matchPredictionSaveQueues.set(queueKey, trackedRequest);
   return trackedRequest;
+}
+
+function queueMatchPredictionSave(contestId, matchId, payload) {
+  return queuePredictionSave(
+    `${contestId}:match:${matchId}`,
+    `/api/tma/contests/${contestId}/matches/${matchId}/prediction`,
+    payload,
+  );
+}
+
+function queueTwoLeggedTiePredictionSave(contestId, tieId, payload) {
+  return queuePredictionSave(
+    `${contestId}:two-legged-tie:${tieId}`,
+    `/api/tma/contests/${contestId}/two-legged-ties/${tieId}/prediction`,
+    payload,
+  );
 }
 
 async function waitForMatchPredictionSaves(contestId) {
@@ -786,7 +801,7 @@ function createContestFormCard(bootstrap, state) {
     );
     if (sharedTemplateKey) {
       description.textContent = isChampionsLeague
-        ? "Состав, дедлайн и итог лигового этапа будут синхронизироваться с общим турниром."
+        ? "Состав, дедлайн и итог общего этапа будут синхронизироваться с общим турниром."
         : "Команды, матчи, дедлайны и результаты будут синхронизироваться с общим турниром.";
     } else if (isTi) {
       description.textContent = "Конкурс прогнозов на The International 2026.";
@@ -804,7 +819,7 @@ function createContestFormCard(bootstrap, state) {
     } else if (isWorldCup) {
       hint.textContent = "3 очка за точный счёт, 2 — за разницу голов, 1 — за исход.";
     } else if (isChampionsLeague) {
-      hint.textContent = "Лиговый этап без матчей: распределите все 36 команд — 8 напрямую в 1/8, 16 в стыки и 12 в вылет. Баллы начисляются только за точно угаданные категории «Напрямую» и «Вылет».";
+      hint.textContent = "Общий этап без матчей: распределите все 36 команд — 8 напрямую в 1/8, 16 в стыки и 12 в вылет. Баллы начисляются только за точно угаданные категории «Напрямую» и «Вылет».";
     } else {
       hint.textContent = "Параметры матчей и начисления зависят от выбранного шаблона.";
     }
@@ -905,7 +920,7 @@ function createContestConfirmationCard(bootstrap, state) {
   } else if (state.draftTemplateKey === "world_cup_2026") {
     details.textContent = "Будет создан конкурс Чемпионата мира 2026 со стандартными футбольными правилами.";
   } else if (state.draftTemplateKey === "champions_league_2026_27") {
-    details.textContent = "Будет создан конкурс Лиги чемпионов 2026/27 без матчей лигового этапа: один прогноз с распределением всех 36 команд — 8 напрямую в 1/8, 16 в стыки и 12 в вылет. Баллы начисляются только за категории «Напрямую» и «Вылет».";
+    details.textContent = "Будет создан конкурс Лиги чемпионов 2026/27 без матчей общего этапа: один прогноз с распределением всех 36 команд — 8 напрямую в 1/8, 16 в стыки и 12 в вылет. Баллы начисляются только за категории «Напрямую» и «Вылет».";
   } else {
     details.textContent = `Будет создан конкурс по шаблону «${selectedTemplate.label}».`;
   }
@@ -916,7 +931,7 @@ function createContestConfirmationCard(bootstrap, state) {
     details.textContent = state.draftTemplateKey === "champions_league_2026_27"
       ? (
         `Конкурс будет связан с общим турниром «${tournament?.name || "Без названия"}». `
-        + "Состав, дедлайн и итог лигового этапа редактируются только в глобальном разделе."
+        + "Состав, дедлайн и итог общего этапа редактируются только в глобальном разделе."
       )
       : (
         `Конкурс будет связан с общим турниром «${tournament?.name || "Без названия"}». `
@@ -1484,6 +1499,13 @@ function createLeaderboardCard(
     )
       ? entry.swiss_stage_prediction_count
       : 0;
+    const twoLeggedTiePredictionCount = Number.isSafeInteger(
+      entry?.two_legged_tie_predictions_count,
+    )
+      ? entry.two_legged_tie_predictions_count
+      : (Number.isSafeInteger(entry?.tie_predictions_count)
+        ? entry.tie_predictions_count
+        : 0);
     const calculatedPredictionsCount = Number.isSafeInteger(
       entry?.calculated_predictions_count,
     )
@@ -1502,12 +1524,21 @@ function createLeaderboardCard(
       typeof entry.swiss_stage_prediction_history === "object"
         ? entry.swiss_stage_prediction_history
         : null;
+    const twoLeggedTiePredictionHistory = Array.isArray(
+      entry?.two_legged_tie_prediction_history,
+    )
+      ? entry.two_legged_tie_prediction_history
+      : (Array.isArray(entry?.two_legged_tie_predictions_history)
+        ? entry.two_legged_tie_predictions_history
+        : []);
     const hasPredictionHistory =
       predictionHistory.length > 0 ||
+      twoLeggedTiePredictionHistory.length > 0 ||
       championPredictionHistory !== null ||
       swissStagePredictionHistory !== null;
     const savedPredictionsCount =
       matchPredictionsCount +
+      twoLeggedTiePredictionCount +
       championPredictionCount +
       swissStagePredictionCount;
     const pendingPredictionsCount = Math.max(
@@ -1535,6 +1566,7 @@ function createLeaderboardCard(
       const summary = document.createElement("summary");
       const history = createLeaderboardPredictionHistory(
         predictionHistory,
+        twoLeggedTiePredictionHistory,
         championPredictionHistory,
         swissStagePredictionHistory,
         templateKey,
@@ -1623,6 +1655,7 @@ function createLeaderboardRow(
 
 function createLeaderboardPredictionHistory(
   predictionHistory,
+  twoLeggedTiePredictionHistory,
   championPredictionHistory,
   swissStagePredictionHistory,
   templateKey,
@@ -1679,6 +1712,12 @@ function createLeaderboardPredictionHistory(
     list.append(item);
   }
 
+  for (const tiePrediction of twoLeggedTiePredictionHistory) {
+    list.append(
+      createLeaderboardTwoLeggedTiePredictionHistory(tiePrediction),
+    );
+  }
+
   if (championPredictionHistory !== null) {
     list.append(
       createLeaderboardChampionPredictionHistory(championPredictionHistory),
@@ -1694,6 +1733,62 @@ function createLeaderboardPredictionHistory(
   }
 
   return list;
+}
+
+function createLeaderboardTwoLeggedTiePredictionHistory(history) {
+  const tie = history?.tie && typeof history.tie === "object"
+    ? { ...history.tie, ...history }
+    : history;
+  const firstTeam = tie?.first_team;
+  const secondTeam = tie?.second_team;
+  const prediction = tie?.prediction;
+  const result = tie?.result;
+  const awardedPoints = Number.isSafeInteger(tie?.awarded_points)
+    ? tie.awarded_points
+    : null;
+  const item = createElement("li", {
+    className: "leaderboard-history-match two-legged-tie-history",
+  });
+  const header = createElement("div", {
+    className: "leaderboard-history-header",
+  });
+  header.append(
+    createElement("span", {
+      className: "leaderboard-history-title",
+      text: tie?.name || (
+        `${firstTeam?.name || "Первая команда"} — `
+        + `${secondTeam?.name || "Вторая команда"}: проход`
+      ),
+    }),
+    createElement("span", {
+      className: "leaderboard-history-points",
+      text: awardedPoints === null
+        ? "—"
+        : (awardedPoints > 0 ? `+${awardedPoints}` : "0"),
+    }),
+  );
+  const getHistoryTeamName = (teamId) => {
+    for (const team of [firstTeam, secondTeam]) {
+      if (team?.id === teamId) {
+        return team.name;
+      }
+    }
+    return "—";
+  };
+  item.append(
+    header,
+    createLeaderboardHistoryRow(
+      "Прогноз",
+      getHistoryTeamName(prediction?.advancing_team_id),
+    ),
+    createLeaderboardHistoryRow(
+      "Факт",
+      result
+        ? getHistoryTeamName(result.advancing_team_id)
+        : "Ожидает результата",
+    ),
+  );
+  return item;
 }
 
 function createLeaderboardHistoryRow(label, value) {
@@ -1871,6 +1966,7 @@ function createContestRulesCard(
   templateKey,
   championPrediction,
   swissStagePrediction,
+  twoLeggedTies = [],
 ) {
   const card = document.createElement("details");
   const summary = document.createElement("summary");
@@ -1888,6 +1984,8 @@ function createContestRulesCard(
   const swissStageCopy = getSwissStageCopy(templateKey);
   const isSwissStagePredictionEnabled =
     swissStagePrediction?.is_enabled === true;
+  const hasTwoLeggedTies = Array.isArray(twoLeggedTies)
+    && twoLeggedTies.length > 0;
   const championPoints = Number.isSafeInteger(championPrediction?.points)
     ? championPrediction.points
     : (isSeriesContest ? 4 : 5);
@@ -1903,8 +2001,9 @@ function createContestRulesCard(
     tiOverviewParts.push("Double Elimination 2/1");
     overviewText = tiOverviewParts.join(" → ");
   } else {
-    const footballOverview =
-      "3 — счёт · 2 — разница · 1 — исход · +1 — победитель";
+    const footballOverview = hasTwoLeggedTies
+      ? "3 — счёт · 2 — разница · 1 — исход · +1 — проход"
+      : "3 — счёт · 2 — разница · 1 — исход · +1 — победитель";
     const footballAndChampionOverview = isChampionPredictionEnabled
       ? `${footballOverview} · +${championPoints} — чемпион`
       : footballOverview;
@@ -1977,6 +2076,23 @@ function createContestRulesCard(
         }),
       );
     }
+    if (hasTwoLeggedTies) {
+      body.append(
+        createElement("p", {
+          text: (
+            "Двухматчевая пара: каждый матч оценивается отдельно по счёту "
+            + "после 90 минут, а верно выбранная прошедшая команда даёт ещё "
+            + "1 балл. Максимум за пару — 7 баллов."
+          ),
+        }),
+        createElement("p", {
+          text: (
+            "Прогноз на проход закрывается с началом первого матча. "
+            + "Прогноз счёта ответного матча остаётся открыт до его начала."
+          ),
+        }),
+      );
+    }
   }
 
   if (isSeriesContest) {
@@ -1994,6 +2110,17 @@ function createContestRulesCard(
         text: "Прогноз на матч можно изменить до начала матча.",
       }),
     );
+    if (hasTwoLeggedTies) {
+      body.append(
+        createElement("p", {
+          text: (
+            "Для матчей двухматчевой пары действует отдельное правило: "
+            + "учитывается только счёт после 90 минут. Дополнительное время "
+            + "и пенальти определяют только команду, которая прошла дальше."
+          ),
+        }),
+      );
+    }
   }
 
   card.append(summary, body);
@@ -2073,6 +2200,217 @@ function isMatchPredictionOpen(match) {
     !Number.isNaN(startsAt.getTime()) &&
     startsAt.getTime() > Date.now()
   );
+}
+
+function isTwoLeggedMatch(match) {
+  return match?.is_two_legged === true;
+}
+
+function getTwoLeggedTies(container) {
+  return Array.isArray(container?.two_legged_ties)
+    ? container.two_legged_ties
+    : [];
+}
+
+function getTwoLeggedTieId(tie) {
+  if (Number.isSafeInteger(tie?.id)) {
+    return tie.id;
+  }
+  return Number.isSafeInteger(tie?.tie_id) ? tie.tie_id : null;
+}
+
+function getMatchTeamSummary(match, side) {
+  const nestedTeam = match?.[`${side}_team`];
+  const teamId = Number.isSafeInteger(nestedTeam?.id)
+    ? nestedTeam.id
+    : match?.[`${side}_team_id`];
+  const teamName = typeof nestedTeam?.name === "string" && nestedTeam.name
+    ? nestedTeam.name
+    : match?.[`${side}_team_name`];
+  return {
+    id: Number.isSafeInteger(teamId) ? teamId : null,
+    name: typeof teamName === "string" && teamName ? teamName : null,
+  };
+}
+
+function getContainerTeamSummary(container, teamId) {
+  if (!Number.isSafeInteger(teamId)) {
+    return null;
+  }
+  const tournamentTeams = Array.isArray(container?.tournament_teams?.teams)
+    ? container.tournament_teams.teams
+    : (Array.isArray(container?.teams) ? container.teams : []);
+  const tournamentTeam = tournamentTeams.find((team) => team?.id === teamId);
+  if (tournamentTeam) {
+    return {
+      id: teamId,
+      name: typeof tournamentTeam.name === "string" && tournamentTeam.name
+        ? tournamentTeam.name
+        : `Команда #${teamId}`,
+    };
+  }
+  for (const match of container?.matches || []) {
+    for (const side of ["home", "away"]) {
+      const team = getMatchTeamSummary(match, side);
+      if (team.id === teamId) {
+        return {
+          id: teamId,
+          name: team.name || `Команда #${teamId}`,
+        };
+      }
+    }
+  }
+  return { id: teamId, name: `Команда #${teamId}` };
+}
+
+function getTwoLeggedTieMatches(container, tie) {
+  const matches = Array.isArray(container?.matches) ? container.matches : [];
+  const firstLegMatchId = Number.isSafeInteger(tie?.first_leg_match_id)
+    ? tie.first_leg_match_id
+    : null;
+  const secondLegMatchId = Number.isSafeInteger(tie?.second_leg_match_id)
+    ? tie.second_leg_match_id
+    : null;
+  const tieId = getTwoLeggedTieId(tie);
+  const findMatch = (matchId, legNumber) => (
+    matches.find((match) => match?.id === matchId)
+    || matches.find(
+      (match) => (
+        isTwoLeggedMatch(match)
+        && (match?.tie_id === tieId || match?.shared_tie_id === tieId)
+        && match?.leg_number === legNumber
+      ),
+    )
+    || (legNumber === 1 ? tie?.first_leg : tie?.second_leg)
+    || null
+  );
+  return {
+    firstLeg: findMatch(firstLegMatchId, 1),
+    secondLeg: findMatch(secondLegMatchId, 2),
+  };
+}
+
+function normalizeTwoLeggedTieTeam(container, tie, position, fallbackMatch) {
+  const nestedTeam = tie?.[`${position}_team`];
+  const explicitTeamId = Number.isSafeInteger(nestedTeam?.id)
+    ? nestedTeam.id
+    : tie?.[`${position}_team_id`];
+  const explicitTeamName = typeof nestedTeam?.name === "string" && nestedTeam.name
+    ? nestedTeam.name
+    : tie?.[`${position}_team_name`];
+  if (Number.isSafeInteger(explicitTeamId)) {
+    const knownTeam = getContainerTeamSummary(container, explicitTeamId);
+    return {
+      id: explicitTeamId,
+      name: typeof explicitTeamName === "string" && explicitTeamName
+        ? explicitTeamName
+        : knownTeam?.name || `Команда #${explicitTeamId}`,
+    };
+  }
+  if (fallbackMatch) {
+    return getMatchTeamSummary(
+      fallbackMatch,
+      position === "first" ? "home" : "away",
+    );
+  }
+  return {
+    id: null,
+    name: position === "first" ? "Первая команда" : "Вторая команда",
+  };
+}
+
+function getTwoLeggedTieTeams(container, tie) {
+  const { firstLeg, secondLeg } = getTwoLeggedTieMatches(container, tie);
+  const fallbackMatch = firstLeg || secondLeg;
+  const firstTeam = normalizeTwoLeggedTieTeam(
+    container,
+    tie,
+    "first",
+    fallbackMatch,
+  );
+  const secondTeam = normalizeTwoLeggedTieTeam(
+    container,
+    tie,
+    "second",
+    fallbackMatch,
+  );
+  return [firstTeam, secondTeam];
+}
+
+function getTwoLeggedTiePrediction(tie) {
+  const prediction = tie?.prediction;
+  if (prediction && typeof prediction === "object") {
+    return prediction;
+  }
+  if (Number.isSafeInteger(tie?.predicted_advancing_team_id)) {
+    return { advancing_team_id: tie.predicted_advancing_team_id };
+  }
+  return null;
+}
+
+function getTwoLeggedTieResult(tie) {
+  const result = tie?.result;
+  if (result && typeof result === "object") {
+    return result;
+  }
+  if (Number.isSafeInteger(tie?.advancing_team_id)) {
+    return {
+      aggregate_first_team_score: tie.aggregate_first_team_score ?? null,
+      aggregate_second_team_score: tie.aggregate_second_team_score ?? null,
+      advancing_team_id: tie.advancing_team_id,
+      resolution_method: tie.resolution_method || null,
+      second_leg_extra_time_home_score:
+        tie.second_leg_extra_time_home_score ?? null,
+      second_leg_extra_time_away_score:
+        tie.second_leg_extra_time_away_score ?? null,
+      second_leg_home_penalty_score: tie.second_leg_home_penalty_score ?? null,
+      second_leg_away_penalty_score: tie.second_leg_away_penalty_score ?? null,
+    };
+  }
+  return null;
+}
+
+function getTwoLeggedTiePredictionDeadline(container, tie) {
+  if (typeof tie?.prediction_deadline_at === "string") {
+    return tie.prediction_deadline_at;
+  }
+  return getTwoLeggedTieMatches(container, tie).firstLeg?.starts_at_utc || null;
+}
+
+function isTwoLeggedTiePredictionOpen(container, tie) {
+  if (container?.is_active === false || tie?.is_prediction_open === false) {
+    return false;
+  }
+  const firstLeg = getTwoLeggedTieMatches(container, tie).firstLeg;
+  if (firstLeg && firstLeg.status !== "scheduled") {
+    return false;
+  }
+  const deadline = new Date(getTwoLeggedTiePredictionDeadline(container, tie));
+  return !Number.isNaN(deadline.getTime()) && deadline.getTime() > Date.now();
+}
+
+function getTwoLeggedTieTeamName(container, tie, teamId) {
+  const team = getTwoLeggedTieTeams(container, tie).find(
+    (candidate) => candidate.id === teamId,
+  );
+  return team?.name || "Не определена";
+}
+
+function getTwoLeggedTieResolutionLabel(method) {
+  const labels = {
+    aggregate: "по сумме двух матчей",
+    extra_time: "после дополнительного времени",
+    penalties: "в серии пенальти",
+  };
+  return labels[method] || "";
+}
+
+function getTwoLeggedTieAggregateText(result) {
+  const firstScore = result?.aggregate_first_team_score;
+  const secondScore = result?.aggregate_second_team_score;
+  return Number.isSafeInteger(firstScore) && Number.isSafeInteger(secondScore)
+    ? `Сумма за 90 минут: ${firstScore} : ${secondScore}. `
+    : "";
 }
 
 function getMatchStatusLabel(status) {
@@ -2303,6 +2641,64 @@ function createAdvancingTeamField(
   };
 }
 
+function createTwoLeggedTieTeamField(
+  container,
+  tie,
+  {
+    idPrefix,
+    selectedTeamId = null,
+    hintText = "Выберите одну из команд пары.",
+  },
+) {
+  const field = createElement("fieldset", {
+    className: "advancing-team-field two-legged-tie-team-field",
+  });
+  const legend = createElement("legend", {
+    className: "form-field-label",
+    text: "Кто пройдёт дальше?",
+  });
+  const hint = createElement("p", {
+    className: "form-hint",
+    text: hintText,
+  });
+  const options = createElement("div", {
+    className: "advancing-team-options",
+  });
+  const radios = [];
+
+  hint.id = `${idPrefix}-hint`;
+  for (const [index, team] of getTwoLeggedTieTeams(container, tie).entries()) {
+    const option = createElement("label", {
+      className: "advancing-team-option",
+    });
+    const radio = createElement("input");
+    const text = createElement("span", { text: team.name });
+    radio.id = `${idPrefix}-team-${index + 1}`;
+    radio.name = `${idPrefix}-advancing-team`;
+    radio.type = "radio";
+    radio.value = team.id === null ? "" : String(team.id);
+    radio.checked = team.id !== null && team.id === selectedTeamId;
+    radio.disabled = team.id === null;
+    radio.setAttribute("aria-describedby", hint.id);
+    option.append(radio, text);
+    options.append(option);
+    radios.push(radio);
+  }
+  field.append(legend, hint, options);
+
+  return {
+    element: field,
+    focus() {
+      radios.find((radio) => !radio.disabled)?.focus();
+    },
+    getSelectedTeamId() {
+      const selected = radios.find((radio) => radio.checked && !radio.disabled);
+      const teamId = selected ? Number(selected.value) : null;
+      return Number.isSafeInteger(teamId) ? teamId : null;
+    },
+  };
+}
+
 function getPredictionScoreTypeLabel(scoreType) {
   const labels = {
     exact_score: "Точный счёт",
@@ -2434,6 +2830,7 @@ function createMatchResultSection(
 ) {
   const result = match.result;
   const isSeries = Number.isSafeInteger(match.best_of);
+  const isTwoLegged = isTwoLeggedMatch(match);
   const section = createElement("div", {
     className: "match-result-section",
   });
@@ -2449,11 +2846,13 @@ function createMatchResultSection(
         ? (
           isSeries
             ? `Итоговый счёт серии: ${result.home_score} : ${result.away_score}.`
-            : (
+            : isTwoLegged
+              ? `Счёт после 90 минут: ${result.home_score} : ${result.away_score}.`
+              : (
               `Итоговый счёт: ${result.home_score} : ${result.away_score}. `
               + `Победитель противостояния: `
               + `${getTeamNameById(match, result.advancing_team_id)}.`
-            )
+              )
         )
         : contest.is_active === false
           ? "Конкурс завершён. Результаты доступны только для просмотра."
@@ -2500,17 +2899,24 @@ function createMatchResultSection(
     className: "match-prediction-hint",
     text: isSeries
       ? `Выберите официальный итоговый счёт Bo${match.best_of}. Результат можно исправить.`
-      : (
+      : isTwoLegged
+        ? (
+          "Укажите счёт после 90 минут. Дополнительное время и серия "
+          + "пенальти учитываются отдельно в результате всей пары."
+        )
+        : (
         "Укажите итоговый счёт после 90 или 120 минут. " +
         "Голы серии пенальти в него не входят. Результат можно исправить."
-      ),
+        ),
   });
   const form = createElement("form", {
     className: "match-prediction-form",
   });
   const scoreHeading = createElement("p", {
     className: "form-field-label",
-    text: isSeries ? "Итоговый счёт серии" : "Итоговый счёт матча",
+    text: isSeries
+      ? "Итоговый счёт серии"
+      : (isTwoLegged ? "Счёт после 90 минут" : "Итоговый счёт матча"),
   });
   const scoreGrid = createElement("div", {
     className: "match-score-grid",
@@ -2596,7 +3002,7 @@ function createMatchResultSection(
   awayScoreInput.value = result ? String(result.away_score) : "";
   awayScoreInput.required = true;
 
-  const advancingTeamField = isSeries
+  const advancingTeamField = isSeries || isTwoLegged
     ? null
     : createAdvancingTeamField(match, {
       idPrefix: `match-${match.id}-result`,
@@ -2621,7 +3027,9 @@ function createMatchResultSection(
     scoreHeading,
     ...(isSeries
       ? [seriesScoreField]
-      : [scoreGrid, advancingTeamField.element]),
+      : isTwoLegged
+        ? [scoreGrid]
+        : [scoreGrid, advancingTeamField.element]),
     message,
     actions,
   );
@@ -2688,16 +3096,18 @@ function createMatchResultSection(
       }
 
       awayScoreInput.removeAttribute("aria-invalid");
-      advancingTeamId = advancingTeamField.getAdvancingTeamId();
+      if (!isTwoLegged) {
+        advancingTeamId = advancingTeamField.getAdvancingTeamId();
 
-      if (advancingTeamId === null) {
-        setFormMessage(
-          message,
-          "При ничейном счёте выберите победителя противостояния.",
-          "error",
-        );
-        advancingTeamField.focus();
-        return;
+        if (advancingTeamId === null) {
+          setFormMessage(
+            message,
+            "При ничейном счёте выберите победителя противостояния.",
+            "error",
+          );
+          advancingTeamField.focus();
+          return;
+        }
       }
     }
 
@@ -2768,6 +3178,7 @@ function getSeriesScoreOptions(bestOf) {
 function createMatchPredictionSection(contest, match) {
   const prediction = match.prediction;
   const isSeries = Number.isSafeInteger(match.best_of);
+  const isTwoLegged = isTwoLeggedMatch(match);
   const section = createElement("div", {
     className: "match-prediction-section",
   });
@@ -2783,11 +3194,16 @@ function createMatchPredictionSection(contest, match) {
         ? (
           isSeries
             ? `Ваш прогноз: ${prediction.home_score} : ${prediction.away_score}.`
-            : (
+            : isTwoLegged
+              ? (
+                `Ваш прогноз на счёт после 90 минут: ${prediction.home_score} : `
+                + `${prediction.away_score}.`
+              )
+              : (
               `Ваш прогноз: ${prediction.home_score} : ` +
               `${prediction.away_score}. Победитель противостояния: ` +
               `${getTeamNameById(match, prediction.advancing_team_id)}.`
-            )
+              )
         )
         : contest.is_active === false
           ? "Конкурс завершён. Прогноз не был сохранён."
@@ -2811,18 +3227,26 @@ function createMatchPredictionSection(contest, match) {
     className: "match-prediction-hint",
     text: isSeries
       ? `Выберите итоговый счёт Bo${match.best_of}. Прогноз сохранится автоматически.`
-      : (
+      : isTwoLegged
+        ? (
+          "Прогноз сохраняется автоматически. Укажите счёт после 90 минут: "
+          + "дополнительное время и пенальти на баллы за этот матч не влияют. "
+          + "Прогноз можно изменить до начала матча."
+        )
+        : (
         "Прогноз сохраняется автоматически. Счёт указывайте после 90 или " +
         "120 минут; при ничьей выберите победителя серии пенальти. " +
         "Прогноз можно изменить до начала матча."
-      ),
+        ),
   });
   const form = createElement("form", {
     className: "match-prediction-form",
   });
   const scoreHeading = createElement("p", {
     className: "form-field-label",
-    text: isSeries ? "Итоговый счёт серии" : "Итоговый счёт матча",
+    text: isSeries
+      ? "Итоговый счёт серии"
+      : (isTwoLegged ? "Счёт после 90 минут" : "Итоговый счёт матча"),
   });
   const scoreGrid = createElement("div", {
     className: "match-score-grid",
@@ -2907,16 +3331,18 @@ function createMatchPredictionSection(contest, match) {
   awayScoreInput.value = prediction ? String(prediction.away_score) : "";
   awayScoreInput.required = true;
 
-  const advancingTeamField = createAdvancingTeamField(match, {
-    idPrefix: `match-${match.id}-prediction`,
-    homeScoreInput,
-    awayScoreInput,
-    selectedAdvancingTeamId: prediction ? prediction.advancing_team_id : null,
-    missingDrawSelectionMessage:
-      "Выберите победителя противостояния, чтобы сохранить прогноз.",
-    selectedDrawSelectionMessage: "Победитель противостояния выбран.",
-    highlightMissingDrawSelection: true,
-  });
+  const advancingTeamField = isSeries || isTwoLegged
+    ? null
+    : createAdvancingTeamField(match, {
+      idPrefix: `match-${match.id}-prediction`,
+      homeScoreInput,
+      awayScoreInput,
+      selectedAdvancingTeamId: prediction ? prediction.advancing_team_id : null,
+      missingDrawSelectionMessage:
+        "Выберите победителя противостояния, чтобы сохранить прогноз.",
+      selectedDrawSelectionMessage: "Победитель противостояния выбран.",
+      highlightMissingDrawSelection: true,
+    });
 
   function setSaveStatus(message, state) {
     saveStatus.textContent = message;
@@ -2956,6 +3382,14 @@ function createMatchPredictionSection(contest, match) {
       return {
         isReady: false,
         message: "Укажите неотрицательный целый счёт обеих команд.",
+      };
+    }
+
+    if (isTwoLegged) {
+      return {
+        isReady: true,
+        predicted_home_score: homeScore,
+        predicted_away_score: awayScore,
       };
     }
 
@@ -3014,7 +3448,9 @@ function createMatchPredictionSection(contest, match) {
     seriesScoreInput.disabled = true;
     homeScoreInput.disabled = true;
     awayScoreInput.disabled = true;
-    advancingTeamField.element.disabled = true;
+    if (advancingTeamField) {
+      advancingTeamField.element.disabled = true;
+    }
     form.setAttribute("aria-disabled", "true");
 
     const payload = readPredictionPayload();
@@ -3160,7 +3596,11 @@ function createMatchPredictionSection(contest, match) {
   actions.append(retryButton);
   form.append(
     scoreHeading,
-    ...(isSeries ? [seriesScoreField] : [scoreGrid, advancingTeamField.element]),
+    ...(isSeries
+      ? [seriesScoreField]
+      : isTwoLegged
+        ? [scoreGrid]
+        : [scoreGrid, advancingTeamField.element]),
     saveStatus,
     actions,
   );
@@ -3178,7 +3618,9 @@ function createMatchPredictionSection(contest, match) {
   } else {
     homeScoreInput.addEventListener("input", scheduleSave);
     awayScoreInput.addEventListener("input", scheduleSave);
-    advancingTeamField.element.addEventListener("change", scheduleSave);
+    if (advancingTeamField) {
+      advancingTeamField.element.addEventListener("change", scheduleSave);
+    }
   }
   form.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -3225,28 +3667,363 @@ function createMatchPredictionSection(contest, match) {
   return section;
 }
 
+function createTwoLeggedTiePredictionListItem(contest, tie) {
+  const tieId = getTwoLeggedTieId(tie);
+  const prediction = getTwoLeggedTiePrediction(tie);
+  const result = getTwoLeggedTieResult(tie);
+  const deadlineAt = getTwoLeggedTiePredictionDeadline(contest, tie);
+  const isOpen = tieId !== null && isTwoLeggedTiePredictionOpen(contest, tie);
+  const [firstTeam, secondTeam] = getTwoLeggedTieTeams(contest, tie);
+  const item = createElement("li", {
+    className: "match-list-item two-legged-tie-list-item",
+  });
+  const header = createElement("div", { className: "match-card-header" });
+  const teams = createElement("strong", {
+    className: "match-teams",
+    text: tie?.name || `${firstTeam.name} — ${secondTeam.name}`,
+  });
+  const status = createElement("span", {
+    className: (
+      `match-status match-status--${result ? "finished" : (isOpen ? "scheduled" : "started")}`
+    ),
+    text: result ? "Рассчитан" : (isOpen ? "Открыт" : "Закрыт"),
+  });
+  const meta = createElement("div", { className: "match-card-meta" });
+  const section = createElement("div", {
+    className: "match-prediction-section two-legged-tie-prediction-section",
+  });
+  const heading = createElement("h3", {
+    className: "match-prediction-heading",
+    text: "Кто пройдёт дальше?",
+  });
+
+  header.append(teams, status);
+  meta.append(
+    createElement("p", {
+      className: "match-meta",
+      text: deadlineAt
+        ? `Дедлайн: ${formatMatchStartsAt(deadlineAt)} — начало первого матча.`
+        : "Дедлайн совпадает с началом первого матча.",
+    }),
+  );
+  item.append(header, meta);
+
+  if (contest.is_active === false || !isOpen) {
+    section.append(
+      heading,
+      createElement("p", {
+        className: "match-prediction-closed",
+        text: prediction
+          ? `Ваш прогноз: ${getTwoLeggedTieTeamName(
+            contest,
+            tie,
+            prediction.advancing_team_id,
+          )}.`
+          : contest.is_active === false
+            ? "Конкурс завершён. Прогноз на проход не был сохранён."
+            : "Прогноз на проход закрыт.",
+      }),
+    );
+    if (result) {
+      const resolutionLabel = getTwoLeggedTieResolutionLabel(
+        result.resolution_method,
+      );
+      section.append(
+        createElement("p", {
+          className: "match-prediction-closed",
+          text: (
+            getTwoLeggedTieAggregateText(result)
+            + `Прошла дальше: ${getTwoLeggedTieTeamName(
+              contest,
+              tie,
+              result.advancing_team_id,
+            )}`
+            + (resolutionLabel ? ` ${resolutionLabel}` : "")
+            + "."
+          ),
+        }),
+      );
+    }
+    if (prediction && Number.isSafeInteger(tie?.awarded_points)) {
+      section.append(
+        createPredictionScoreSummary({
+          total_points: tie.awarded_points,
+          awards: tie.awarded_points > 0
+            ? [{ type: "advancing_team", points: tie.awarded_points }]
+            : [],
+        }),
+      );
+    }
+    item.append(section);
+    return item;
+  }
+
+  const hint = createElement("p", {
+    className: "match-prediction-hint",
+    text: (
+      "Выбор сохранится автоматически. Его можно изменить только до начала "
+      + "первого матча; результат первой игры не переоткрывает прогноз."
+    ),
+  });
+  const form = createElement("form", {
+    className: "match-prediction-form two-legged-tie-prediction-form",
+  });
+  const teamField = createTwoLeggedTieTeamField(contest, tie, {
+    idPrefix: `two-legged-tie-${tieId}-prediction`,
+    selectedTeamId: prediction?.advancing_team_id ?? null,
+    hintText: "Выберите команду пары. Точный суммарный счёт прогнозировать не нужно.",
+  });
+  const saveStatus = createElement("p", {
+    className: "form-message match-prediction-save-status",
+  });
+  const actions = createElement("div", { className: "form-actions" });
+  const retryButton = createActionButton(
+    "Повторить сохранение",
+    "secondary-action-button",
+  );
+  saveStatus.setAttribute("role", "status");
+  saveStatus.setAttribute("aria-live", "polite");
+  saveStatus.setAttribute("aria-atomic", "true");
+
+  function setSaveStatus(message, state) {
+    saveStatus.textContent = message;
+    saveStatus.hidden = !message;
+    saveStatus.dataset.saveState = state;
+    saveStatus.classList.toggle("is-error", state === "error");
+    saveStatus.classList.toggle("is-success", state === "saved");
+    retryButton.hidden = state !== "error";
+    updatePredictionProgress(
+      section.closest(".matches-card")?.querySelector(
+        ".match-prediction-progress",
+      ),
+    );
+  }
+
+  function readPredictionPayload() {
+    const advancingTeamId = teamField.getSelectedTeamId();
+    return advancingTeamId === null
+      ? {
+        isReady: false,
+        message: "Выберите команду, которая пройдёт дальше.",
+      }
+      : {
+        isReady: true,
+        predicted_advancing_team_id: advancingTeamId,
+      };
+  }
+
+  let isSaving = false;
+  let lastSavedFingerprint = Number.isSafeInteger(prediction?.advancing_team_id)
+    ? String(prediction.advancing_team_id)
+    : null;
+  let saveTimer = null;
+  let deadlineTimer = null;
+
+  function syncPredictionDeadline() {
+    if (isTwoLeggedTiePredictionOpen(contest, tie)) {
+      return false;
+    }
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    }
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    teamField.element.disabled = true;
+    form.setAttribute("aria-disabled", "true");
+    const payload = readPredictionPayload();
+    const isSaved = (
+      payload.isReady
+      && String(payload.predicted_advancing_team_id) === lastSavedFingerprint
+    );
+    setSaveStatus(
+      isSaved
+        ? "Сохранено. Прогноз на проход закрыт."
+        : "Прогноз на проход закрыт. Последнее изменение не сохранено.",
+      isSaved ? "saved" : "closed",
+    );
+    return true;
+  }
+
+  function schedulePredictionDeadlineSync() {
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    }
+    const deadline = new Date(deadlineAt).getTime();
+    const remaining = deadline - Date.now();
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      syncPredictionDeadline();
+      return;
+    }
+    deadlineTimer = window.setTimeout(() => {
+      deadlineTimer = null;
+      if (!form.isConnected || syncPredictionDeadline()) {
+        return;
+      }
+      schedulePredictionDeadlineSync();
+    }, Math.min(remaining, MAX_TIMER_DELAY_MS));
+  }
+
+  async function savePrediction() {
+    if (syncPredictionDeadline() || isSaving) {
+      return;
+    }
+    const payload = readPredictionPayload();
+    if (!payload.isReady) {
+      setSaveStatus(payload.message, "draft");
+      return;
+    }
+    const fingerprint = String(payload.predicted_advancing_team_id);
+    if (fingerprint === lastSavedFingerprint) {
+      setSaveStatus("Сохранено.", "saved");
+      return;
+    }
+    isSaving = true;
+    setSaveStatus("Сохраняем…", "saving");
+    try {
+      const response = await queueTwoLeggedTiePredictionSave(
+        contest.id,
+        tieId,
+        payload,
+      );
+      const savedPrediction = response?.prediction
+        || response?.two_legged_tie?.prediction
+        || response?.tie?.prediction;
+      if (!savedPrediction) {
+        throw new Error(
+          "Сервер вернул некорректный ответ при сохранении прогноза на проход.",
+        );
+      }
+      tie.prediction = savedPrediction;
+      lastSavedFingerprint = String(savedPrediction.advancing_team_id);
+    } catch (error) {
+      isSaving = false;
+      if (error?.status === 409) {
+        tie.is_prediction_open = false;
+      }
+      if (syncPredictionDeadline()) {
+        return;
+      }
+      const currentPayload = readPredictionPayload();
+      if (
+        currentPayload.isReady
+        && String(currentPayload.predicted_advancing_team_id) !== fingerprint
+      ) {
+        void savePrediction();
+        return;
+      }
+      setSaveStatus(
+        error instanceof Error
+          ? error.message
+          : "Не удалось сохранить прогноз на проход.",
+        "error",
+      );
+      return;
+    }
+    isSaving = false;
+    if (syncPredictionDeadline()) {
+      return;
+    }
+    const currentPayload = readPredictionPayload();
+    if (
+      currentPayload.isReady
+      && String(currentPayload.predicted_advancing_team_id) !== lastSavedFingerprint
+    ) {
+      void savePrediction();
+      return;
+    }
+    setSaveStatus("Сохранено.", "saved");
+  }
+
+  function scheduleSave() {
+    if (syncPredictionDeadline()) {
+      return;
+    }
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+    }
+    const payload = readPredictionPayload();
+    if (!payload.isReady) {
+      setSaveStatus(payload.message, "draft");
+      return;
+    }
+    setSaveStatus("Изменения будут сохранены…", "draft");
+    saveTimer = window.setTimeout(() => {
+      saveTimer = null;
+      void savePrediction();
+    }, 250);
+  }
+
+  actions.append(retryButton);
+  form.append(teamField.element, saveStatus, actions);
+  section.append(heading, hint, form);
+  item.append(section);
+  teamField.element.addEventListener("change", scheduleSave);
+  retryButton.addEventListener("click", () => {
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    void savePrediction();
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void savePrediction();
+  });
+  form.addEventListener(PREDICTION_FLUSH_EVENT, () => {
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    }
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    void savePrediction();
+  });
+  if (deadlineAt) {
+    form.dataset.predictionDeadline = deadlineAt;
+  }
+  form.addEventListener(PREDICTION_DEADLINE_SYNC_EVENT, () => {
+    if (!syncPredictionDeadline()) {
+      schedulePredictionDeadlineSync();
+    }
+  });
+  setSaveStatus(prediction ? "Сохранено." : "", prediction ? "saved" : "draft");
+  if (!syncPredictionDeadline()) {
+    schedulePredictionDeadlineSync();
+  }
+  Promise.resolve().then(() => {
+    ensurePredictionProgressSummary(section);
+  });
+  return item;
+}
+
 
 function getSwissStageCopy(templateKey) {
   if (templateKey === "champions_league_2026_27") {
     return {
-      stageName: "Лиговый этап",
-      stageGenitive: "лигового этапа",
-      predictionTitle: "Прогноз на лиговый этап",
+      stageName: "Общий этап",
+      stageGenitive: "общего этапа",
+      predictionTitle: "Прогноз на общий этап",
       directChoice: "Напрямую",
       playoffChoice: "Стыки",
       eliminationChoice: "Вылет",
       directProgress: "Напрямую в 1/8",
       playoffProgress: "В стыки",
-      eliminationProgress: "Вылетят после лигового этапа",
+      eliminationProgress: "Вылетят после общего этапа",
       directResult: "Вышли напрямую в 1/8",
       playoffResult: "Попали в стыки",
-      eliminationResult: "Вылетели после лигового этапа",
+      eliminationResult: "Вылетели после общего этапа",
       predictedDirect: "выйдет напрямую в 1/8",
       actualDirect: "вышла напрямую в 1/8",
       predictedPlayoff: "попадёт в стыки",
       actualPlayoff: "попала в стыки",
-      predictedElimination: "вылетит после лигового этапа",
-      actualElimination: "вылетела после лигового этапа",
+      predictedElimination: "вылетит после общего этапа",
+      actualElimination: "вылетела после общего этапа",
       actualUnselected: "попала в стыковой раунд",
       scoringRule: "2 балла за точную категорию «Напрямую» или «Вылет». За категорию «Стыки» — 0 баллов. Максимум — 40 баллов.",
     };
@@ -5137,7 +5914,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   const tournamentTeamsHint = createElement("p", {
     className: "form-hint",
     text: hasFixedChampionsLeagueLimits
-      ? `Команды лигового этапа: ${prediction.candidates.length} из 36.`
+      ? `Команды общего этапа: ${prediction.candidates.length} из 36.`
       : `Используются команды турнира: ${prediction.candidates.length}.`,
   });
   const message = createElement("p", { className: "form-message" });
@@ -5588,14 +6365,25 @@ function createMatchStartEditingSection(
   });
   const label = createElement("span", {
     className: "form-field-label",
-    text: "Новая дата и время начала",
+    text: (
+      isTwoLeggedMatch(match) && match.leg_number === 1
+        ? "Новое начало первого матча и дедлайн прогноза на проход"
+        : "Новая дата и время начала"
+    ),
   });
   const input = createElement("input", {
     className: "text-input",
   });
   const hint = createElement("p", {
     className: "form-hint",
-    text: "Время указывается в вашем часовом поясе.",
+    text: (
+      isTwoLeggedMatch(match) && match.leg_number === 1
+        ? (
+          "Время указывается в вашем часовом поясе. После текущего дедлайна "
+          + "перенести его или переоткрыть прогноз нельзя."
+        )
+        : "Время указывается в вашем часовом поясе."
+    ),
   });
   const message = createElement("p", {
     className: "form-message",
@@ -5729,6 +6517,16 @@ function createMatchListItem(
   const sections = [header, meta];
 
   header.append(teams, status);
+  if (isTwoLeggedMatch(match)) {
+    meta.append(
+      createElement("p", {
+        className: "match-meta two-legged-match-leg",
+        text: match.leg_number === 1
+          ? "Первый матч двухматчевой пары"
+          : "Ответный матч двухматчевой пары",
+      }),
+    );
+  }
   meta.append(startsAt);
   if (startsInText) {
     meta.append(
@@ -5775,6 +6573,7 @@ function createMatchListItem(
     showResults
     && contest.is_active !== false
     && onMatchDeletionStateChange
+    && !isTwoLeggedMatch(match)
   ) {
     sections.push(
       createMatchDeletionSection(
@@ -5791,25 +6590,41 @@ function createMatchListItem(
 }
 
 function createMatchPredictionListItems(contest, matches) {
-  return matches
-    .map((match) => ({
-      kind: "match",
-      match,
-      isOpen: isMatchPredictionOpen(match),
-      sortTime: getPredictionSortTime(match.starts_at_utc),
-      sortKey: `match-${String(match.id).padStart(12, "0")}`,
-    }))
+  const items = matches.map((match) => ({
+    kind: "match",
+    match,
+    isOpen: isMatchPredictionOpen(match),
+    sortTime: getPredictionSortTime(match.starts_at_utc),
+    sortKey: `match-${String(match.id).padStart(12, "0")}`,
+  }));
+  for (const tie of getTwoLeggedTies(contest)) {
+    const tieId = getTwoLeggedTieId(tie);
+    items.push({
+      kind: "two-legged-tie",
+      tie,
+      isOpen: isTwoLeggedTiePredictionOpen(contest, tie),
+      sortTime: getPredictionSortTime(
+        getTwoLeggedTiePredictionDeadline(contest, tie),
+      ),
+      sortKey: `two-legged-tie-${String(tieId ?? "").padStart(12, "0")}`,
+    });
+  }
+  return items
     .sort(comparePredictionListItems)
-    .map((item) => createMatchListItem(
-      contest,
-      item.match,
-      {},
-      null,
-      null,
-      {
-        showPredictions: true,
-        showResults: false,
-      },
+    .map((item) => (
+      item.kind === "two-legged-tie"
+        ? createTwoLeggedTiePredictionListItem(contest, item.tie)
+        : createMatchListItem(
+          contest,
+          item.match,
+          {},
+          null,
+          null,
+          {
+            showPredictions: true,
+            showResults: false,
+          },
+        )
     ));
 }
 
@@ -6253,6 +7068,586 @@ function createMatchFormCard(bootstrap, contest, state) {
   return card;
 }
 
+function getTwoLeggedTieCreationTeams(container) {
+  if (Array.isArray(container?.teams)) {
+    return container.teams;
+  }
+  return getTournamentTeams(container).teams;
+}
+
+function getDefaultSecondLegDateTimeLocal(firstLegValue = null) {
+  const firstLeg = firstLegValue ? new Date(firstLegValue) : new Date();
+  const base = Number.isNaN(firstLeg.getTime()) ? new Date() : firstLeg;
+  const secondLeg = new Date(base.getTime());
+  if (!firstLegValue) {
+    secondLeg.setSeconds(0, 0);
+    secondLeg.setMinutes(secondLeg.getMinutes() + 3);
+  }
+  secondLeg.setDate(secondLeg.getDate() + 7);
+  return formatLocalDateTime(secondLeg);
+}
+
+function createTwoLeggedTieFormCard(
+  container,
+  state,
+  {
+    endpoint,
+    onCreated,
+    title = "Добавить двухматчевую пару",
+  },
+) {
+  const teams = getTwoLeggedTieCreationTeams(container);
+  const card = createElement("section", {
+    className: "info-card contest-form-card two-legged-tie-form-card",
+  });
+  const disclosure = document.createElement("details");
+  const summary = document.createElement("summary");
+  const summaryContent = createElement("div", {
+    className: "match-form-summary-content",
+  });
+  const titleElement = createElement("span", {
+    className: "match-form-title",
+    text: title,
+  });
+  const overview = createElement("span", {
+    className: "match-form-overview",
+    text: "Две игры и один прогноз на проход",
+  });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: (
+      "Первая команда играет первый матч дома, в ответном матче хозяином "
+      + "будет вторая команда. Пара и обе игры создаются атомарно."
+    ),
+  });
+  const form = createElement("form", { className: "form-fields" });
+  const firstTeamInput = createChampionTeamSelect(teams, {
+    id: "two-legged-tie-first-team-id",
+    name: "two-legged-tie-first-team-id",
+  });
+  const secondTeamInput = createChampionTeamSelect(teams, {
+    id: "two-legged-tie-second-team-id",
+    name: "two-legged-tie-second-team-id",
+  });
+  const firstLegInput = createElement("input", { className: "text-input" });
+  const secondLegInput = createElement("input", { className: "text-input" });
+  const message = createElement("p", { className: "form-message" });
+  const submitButton = createActionButton(
+    "Добавить пару",
+    "primary-action-button",
+    "submit",
+  );
+  const idempotencyKey = createIdempotencyKey("two-legged-tie");
+
+  disclosure.className = "match-form-disclosure two-legged-tie-form-disclosure";
+  disclosure.open = Boolean(state?.twoLeggedTieMessage);
+  summaryContent.append(titleElement, overview);
+  summary.append(summaryContent);
+  firstTeamInput.required = true;
+  secondTeamInput.required = true;
+  firstLegInput.type = "datetime-local";
+  firstLegInput.step = "60";
+  firstLegInput.required = true;
+  firstLegInput.value = getDefaultDateTimeLocal();
+  secondLegInput.type = "datetime-local";
+  secondLegInput.step = "60";
+  secondLegInput.required = true;
+  secondLegInput.value = getDefaultSecondLegDateTimeLocal(firstLegInput.value);
+  setFormMessage(
+    message,
+    state?.twoLeggedTieMessage || "",
+    state?.twoLeggedTieMessageType || "",
+  );
+  if (teams.length < 2) {
+    firstTeamInput.disabled = true;
+    secondTeamInput.disabled = true;
+    firstLegInput.disabled = true;
+    secondLegInput.disabled = true;
+    submitButton.disabled = true;
+    setFormMessage(
+      message,
+      "Сначала добавьте как минимум две команды турнира.",
+      "error",
+    );
+  }
+  form.append(
+    createLabeledField("Первая команда пары", firstTeamInput),
+    createLabeledField("Вторая команда пары", secondTeamInput),
+    createLabeledField("Первый матч и дедлайн прогноза", firstLegInput),
+    createLabeledField("Ответный матч", secondLegInput),
+    createElement("p", {
+      className: "form-hint",
+      text: "Время указывается в вашем часовом поясе. Ответный матч должен начаться позже первого.",
+    }),
+    message,
+    createElement("div", { className: "form-actions" }),
+  );
+  form.lastElementChild.append(submitButton);
+  disclosure.append(summary, description, form);
+  card.append(disclosure);
+
+  firstLegInput.addEventListener("change", () => {
+    if (!secondLegInput.dataset.touched) {
+      secondLegInput.value = getDefaultSecondLegDateTimeLocal(firstLegInput.value);
+    }
+  });
+  secondLegInput.addEventListener("input", () => {
+    secondLegInput.dataset.touched = "true";
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const firstTeamId = Number(firstTeamInput.value);
+    const secondTeamId = Number(secondTeamInput.value);
+    const firstLegStartsAt = new Date(firstLegInput.value);
+    const secondLegStartsAt = new Date(secondLegInput.value);
+    if (!Number.isSafeInteger(firstTeamId) || firstTeamId <= 0) {
+      setFormMessage(message, "Выберите первую команду пары.", "error");
+      firstTeamInput.focus();
+      return;
+    }
+    if (!Number.isSafeInteger(secondTeamId) || secondTeamId <= 0) {
+      setFormMessage(message, "Выберите вторую команду пары.", "error");
+      secondTeamInput.focus();
+      return;
+    }
+    if (firstTeamId === secondTeamId) {
+      setFormMessage(message, "В паре должны быть две разные команды.", "error");
+      secondTeamInput.focus();
+      return;
+    }
+    if (
+      Number.isNaN(firstLegStartsAt.getTime())
+      || Number.isNaN(secondLegStartsAt.getTime())
+    ) {
+      setFormMessage(message, "Укажите время обеих игр.", "error");
+      firstLegInput.focus();
+      return;
+    }
+    if (secondLegStartsAt.getTime() <= firstLegStartsAt.getTime()) {
+      setFormMessage(
+        message,
+        "Ответный матч должен начаться позже первого.",
+        "error",
+      );
+      secondLegInput.focus();
+      return;
+    }
+    submitButton.disabled = true;
+    submitButton.textContent = "Добавляем…";
+    try {
+      const response = await apiRequestForCurrentView(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [IDEMPOTENCY_KEY_HEADER]: idempotencyKey,
+        },
+        body: JSON.stringify({
+          first_team_id: firstTeamId,
+          second_team_id: secondTeamId,
+          first_leg_starts_at_utc: firstLegStartsAt.toISOString(),
+          second_leg_starts_at_utc: secondLegStartsAt.toISOString(),
+        }),
+      });
+      const savedTie = response?.two_legged_tie
+        || response?.shared_two_legged_tie
+        || response?.tie;
+      if (!savedTie) {
+        throw new Error(
+          "Сервер вернул некорректный ответ при создании двухматчевой пары.",
+        );
+      }
+      onCreated(savedTie, response);
+    } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
+      setFormMessage(
+        message,
+        error instanceof Error
+          ? error.message
+          : "Не удалось создать двухматчевую пару.",
+        "error",
+      );
+      submitButton.disabled = false;
+      submitButton.textContent = "Добавить пару";
+    }
+  });
+  return card;
+}
+
+function isTwoLeggedTieResultAvailable(container, tie) {
+  if (getTwoLeggedTieResult(tie)) {
+    return true;
+  }
+  const { firstLeg, secondLeg } = getTwoLeggedTieMatches(container, tie);
+  return Boolean(firstLeg?.result && secondLeg?.result);
+}
+
+function readOptionalScorePair(firstInput, secondInput, label) {
+  const firstValue = firstInput.value.trim();
+  const secondValue = secondInput.value.trim();
+  if (!firstValue && !secondValue) {
+    return { isValid: true, first: null, second: null };
+  }
+  const first = Number(firstValue);
+  const second = Number(secondValue);
+  if (
+    !firstValue
+    || !secondValue
+    || !Number.isSafeInteger(first)
+    || !Number.isSafeInteger(second)
+    || first < 0
+    || second < 0
+  ) {
+    return {
+      isValid: false,
+      message: `${label}: заполните оба поля неотрицательными целыми числами.`,
+    };
+  }
+  return { isValid: true, first, second };
+}
+
+function createTwoLeggedTieAdministrationItem(
+  container,
+  tie,
+  {
+    resultEndpoint,
+    deleteEndpoint,
+    canManage,
+    useVersion = false,
+    onUpdated,
+  },
+) {
+  const tieId = getTwoLeggedTieId(tie);
+  const [firstTeam, secondTeam] = getTwoLeggedTieTeams(container, tie);
+  const result = getTwoLeggedTieResult(tie);
+  const { firstLeg, secondLeg } = getTwoLeggedTieMatches(container, tie);
+  const secondLegHome = getMatchTeamSummary(secondLeg, "home");
+  const secondLegAway = getMatchTeamSummary(secondLeg, "away");
+  const item = createElement("li", {
+    className: "match-list-item two-legged-tie-administration-item",
+  });
+  const header = createElement("div", { className: "match-card-header" });
+  const teams = createElement("strong", {
+    className: "match-teams",
+    text: tie?.name || `${firstTeam.name} — ${secondTeam.name}`,
+  });
+  const status = createElement("span", {
+    className: `match-status match-status--${result ? "finished" : "scheduled"}`,
+    text: result ? "Результат внесён" : "Двухматчевая пара",
+  });
+  const meta = createElement("div", { className: "match-card-meta" });
+  header.append(teams, status);
+  meta.append(
+    createElement("p", {
+      className: "match-meta",
+      text: (
+        `Первый матч: ${formatMatchStartsAt(firstLeg?.starts_at_utc || tie?.prediction_deadline_at)}`
+        + ` · ответный: ${formatMatchStartsAt(secondLeg?.starts_at_utc || "")}`
+      ),
+    }),
+  );
+  if (Number.isSafeInteger(tie?.linked_contest_count)) {
+    meta.append(
+      createElement("p", {
+        className: "match-meta",
+        text: (
+          `${tie.linked_contest_count} `
+          + `${getRussianPlural(tie.linked_contest_count, "связанный конкурс", "связанных конкурса", "связанных конкурсов")}`
+          + (Number.isSafeInteger(tie?.prediction_count)
+            ? ` · ${tie.prediction_count} ${getRussianPlural(tie.prediction_count, "прогноз", "прогноза", "прогнозов")}`
+            : "")
+        ),
+      }),
+    );
+  }
+  item.append(header, meta);
+
+  const resultSection = createElement("div", {
+    className: "match-result-section two-legged-tie-result-section",
+  });
+  resultSection.append(
+    createElement("h3", {
+      className: "match-prediction-heading",
+      text: "Итог двухматчевой пары",
+    }),
+  );
+  if (result) {
+    const resolutionLabel = getTwoLeggedTieResolutionLabel(
+      result.resolution_method,
+    );
+    resultSection.append(
+      createElement("p", {
+        className: "match-prediction-closed",
+        text: (
+          getTwoLeggedTieAggregateText(result)
+          + "Прошла дальше: "
+          + `${getTwoLeggedTieTeamName(container, tie, result.advancing_team_id)}`
+          + (resolutionLabel ? ` ${resolutionLabel}` : "")
+          + "."
+        ),
+      }),
+    );
+  }
+  if (!canManage) {
+    if (!result) {
+      resultSection.append(
+        createElement("p", {
+          className: "match-prediction-closed",
+          text: "Итог пары пока не определён.",
+        }),
+      );
+    }
+    item.append(resultSection);
+    return item;
+  }
+  if (!isTwoLeggedTieResultAvailable(container, tie)) {
+    resultSection.append(
+      createElement("p", {
+        className: "match-prediction-closed",
+        text: "Итог пары можно внести после сохранения результатов обеих игр.",
+      }),
+    );
+  } else {
+    const disclosure = document.createElement("details");
+    const summary = document.createElement("summary");
+    const summaryTitle = createElement("span", {
+      className: "match-result-summary-title",
+      text: result ? "Исправить итог пары" : "Внести итог пары",
+    });
+    const summaryAction = createElement("span", {
+      className: "match-result-summary-action",
+      text: result ? "Изменить" : "Открыть",
+    });
+    const hint = createElement("p", {
+      className: "match-prediction-hint",
+      text: (
+        "Счёт дополнительного времени — только голы, забитые в дополнительные "
+        + "30 минут ответной игры. Счёт пенальти не входит в результат матча."
+      ),
+    });
+    const form = createElement("form", { className: "match-prediction-form" });
+    const advancingTeam = document.createElement("select");
+    const automaticOption = createElement("option", {
+      text: "Определить по введённым счетам",
+    });
+    advancingTeam.className = "text-input";
+    automaticOption.value = "";
+    advancingTeam.append(automaticOption);
+    for (const team of [firstTeam, secondTeam]) {
+      const option = createElement("option", { text: team.name });
+      option.value = team.id === null ? "" : String(team.id);
+      option.disabled = team.id === null;
+      option.selected = result?.advancing_team_id === team.id;
+      advancingTeam.append(option);
+    }
+    const extraHome = createElement("input", {
+      className: "text-input match-score-input",
+    });
+    const extraAway = createElement("input", {
+      className: "text-input match-score-input",
+    });
+    const penaltyHome = createElement("input", {
+      className: "text-input match-score-input",
+    });
+    const penaltyAway = createElement("input", {
+      className: "text-input match-score-input",
+    });
+    for (const input of [extraHome, extraAway, penaltyHome, penaltyAway]) {
+      input.type = "number";
+      input.min = "0";
+      input.step = "1";
+      input.inputMode = "numeric";
+    }
+    extraHome.value = result?.second_leg_extra_time_home_score ?? "";
+    extraAway.value = result?.second_leg_extra_time_away_score ?? "";
+    penaltyHome.value = result?.second_leg_home_penalty_score ?? "";
+    penaltyAway.value = result?.second_leg_away_penalty_score ?? "";
+    const extraTimeGrid = createElement("div", {
+      className: "match-score-grid two-legged-tie-score-grid",
+    });
+    const penaltyGrid = createElement("div", {
+      className: "match-score-grid two-legged-tie-score-grid",
+    });
+    const createScoreField = (labelText, input) => {
+      const field = createElement("label", { className: "match-score-field" });
+      field.append(
+        createElement("span", {
+          className: "match-score-label",
+          text: labelText,
+        }),
+        input,
+      );
+      return field;
+    };
+    extraTimeGrid.append(
+      createScoreField(secondLegHome.name || firstTeam.name, extraHome),
+      createScoreField(secondLegAway.name || secondTeam.name, extraAway),
+    );
+    penaltyGrid.append(
+      createScoreField(secondLegHome.name || firstTeam.name, penaltyHome),
+      createScoreField(secondLegAway.name || secondTeam.name, penaltyAway),
+    );
+    const message = createElement("p", { className: "form-message" });
+    const submitButton = createActionButton(
+      result ? "Сохранить исправление" : "Сохранить итог пары",
+      "primary-action-button",
+      "submit",
+    );
+    form.append(
+      createLabeledField("Прошла дальше", advancingTeam),
+      createElement("p", {
+        className: "form-field-label two-legged-tie-score-heading",
+        text: "Голы в дополнительное время ответного матча",
+      }),
+      extraTimeGrid,
+      createElement("p", {
+        className: "form-field-label two-legged-tie-score-heading",
+        text: "Счёт серии пенальти",
+      }),
+      penaltyGrid,
+      message,
+      submitButton,
+    );
+    summary.append(summaryTitle, summaryAction);
+    disclosure.className = "match-result-disclosure";
+    disclosure.append(summary, hint, form);
+    resultSection.append(disclosure);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const extraTime = readOptionalScorePair(
+        extraHome,
+        extraAway,
+        "Дополнительное время",
+      );
+      const penalties = readOptionalScorePair(
+        penaltyHome,
+        penaltyAway,
+        "Серия пенальти",
+      );
+      if (!extraTime.isValid || !penalties.isValid) {
+        setFormMessage(
+          message,
+          extraTime.message || penalties.message,
+          "error",
+        );
+        return;
+      }
+      submitButton.disabled = true;
+      try {
+        const payload = {
+          advancing_team_id: advancingTeam.value
+            ? Number(advancingTeam.value)
+            : null,
+          second_leg_extra_time_home_score: extraTime.first,
+          second_leg_extra_time_away_score: extraTime.second,
+          second_leg_home_penalty_score: penalties.first,
+          second_leg_away_penalty_score: penalties.second,
+          ...(useVersion && Number.isSafeInteger(tie?.version)
+            ? { expected_version: tie.version }
+            : {}),
+        };
+        const response = await apiRequestForCurrentView(resultEndpoint(tieId), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (
+          !response?.two_legged_tie
+          && !response?.shared_two_legged_tie
+          && !response?.tie
+          && !response?.result
+        ) {
+          throw new Error("Сервер вернул некорректный итог пары.");
+        }
+        onUpdated(result ? "Итог пары исправлен." : "Итог пары сохранён.");
+      } catch (error) {
+        if (handleManagementRequestError(error)) {
+          return;
+        }
+        setFormMessage(
+          message,
+          error instanceof Error ? error.message : "Не удалось сохранить итог пары.",
+          "error",
+        );
+        submitButton.disabled = false;
+      }
+    });
+  }
+  item.append(resultSection);
+
+  const deletionSection = createElement("div", {
+    className: "match-deletion-section",
+  });
+  const deleteButton = createActionButton(
+    "Удалить двухматчевую пару",
+    "danger-action-button",
+  );
+  deletionSection.append(
+    createElement("h3", {
+      className: "match-prediction-heading",
+      text: "Удаление пары",
+    }),
+    createElement("p", {
+      className: "match-prediction-closed",
+      text: "Будут удалены обе игры, прогнозы на счёт и проход, результаты и баллы.",
+    }),
+    deleteButton,
+  );
+  deleteButton.addEventListener("click", async () => {
+    if (!window.confirm(
+      `Удалить двухматчевую пару «${firstTeam.name} — ${secondTeam.name}» без возможности восстановления?`,
+    )) {
+      return;
+    }
+    deleteButton.disabled = true;
+    try {
+      const versionQuery = useVersion && Number.isSafeInteger(tie?.version)
+        ? `?expected_version=${tie.version}`
+        : "";
+      await apiRequestForCurrentView(`${deleteEndpoint(tieId)}${versionQuery}`, {
+        method: "DELETE",
+      });
+      onUpdated("Двухматчевая пара удалена.");
+    } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
+      const errorMessage = error instanceof Error
+        ? error.message
+        : "Не удалось удалить двухматчевую пару.";
+      deletionSection.append(
+        createElement("p", {
+          className: "form-message is-error",
+          text: errorMessage,
+        }),
+      );
+      deleteButton.disabled = false;
+    }
+  });
+  item.append(deletionSection);
+  return item;
+}
+
+function createTwoLeggedTiesAdministrationCard(container, options) {
+  const ties = getTwoLeggedTies(container);
+  if (ties.length === 0) {
+    return null;
+  }
+  const card = createElement("section", {
+    className: "info-card matches-card two-legged-ties-administration-card",
+  });
+  const list = createElement("ol", { className: "match-list" });
+  for (const tie of ties) {
+    list.append(createTwoLeggedTieAdministrationItem(container, tie, options));
+  }
+  card.append(
+    createElement("h2", { text: "Двухматчевые пары" }),
+    list,
+  );
+  return card;
+}
+
 function renderContestDetailsLoading(bootstrap) {
   const { user, chat } = bootstrap.context;
   const chatTitle = chat.title || "этого чата";
@@ -6327,6 +7722,7 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
         contest.template_key,
         contest.champion_prediction,
         contest.swiss_stage_prediction,
+        getTwoLeggedTies(contest),
       ),
       createMatchesCard(
         contest,
@@ -6504,6 +7900,24 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
   } else {
     if (isActive && !isSharedTournament) {
       cards.push(createMatchFormCard(bootstrap, contest, managementState));
+      if (contest.template_key !== "the_international_2026") {
+        cards.push(
+          createTwoLeggedTieFormCard(
+            contest,
+            managementState,
+            {
+              endpoint: `/api/tma/contests/${contest.id}/two-legged-ties`,
+              onCreated: () => {
+                void openContest(bootstrap, contest.id, {
+                  ...managementState,
+                  matchesMessage: "Двухматчевая пара добавлена.",
+                  matchesMessageType: "success",
+                });
+              },
+            },
+          ),
+        );
+      }
     }
     if (isActive && isSharedTournament) {
       cards.push(
@@ -6545,6 +7959,28 @@ function renderContestManagementScreen(bootstrap, contest, state = {}) {
         },
       ),
     );
+    const twoLeggedTiesCard = createTwoLeggedTiesAdministrationCard(
+      contest,
+      {
+        resultEndpoint: (tieId) => (
+          `/api/tma/contests/${contest.id}/two-legged-ties/${tieId}/result`
+        ),
+        deleteEndpoint: (tieId) => (
+          `/api/tma/contests/${contest.id}/two-legged-ties/${tieId}`
+        ),
+        canManage: isActive && !isSharedTournament,
+        onUpdated: (message) => {
+          void openContest(bootstrap, contest.id, {
+            ...managementState,
+            matchesMessage: message,
+            matchesMessageType: "success",
+          });
+        },
+      },
+    );
+    if (twoLeggedTiesCard) {
+      cards.push(twoLeggedTiesCard);
+    }
   }
 
   replaceAppContent(...cards);
@@ -6631,6 +8067,14 @@ function getAuditEventPresentation(eventType) {
 }
 
 function getAuditEventTitle(event) {
+  if (event.metadata?.result_scope === "two_legged_tie") {
+    if (event.event_type === "match_result_set") {
+      return "Внесён результат двухматчевого противостояния";
+    }
+    if (event.event_type === "match_result_changed") {
+      return "Изменён результат двухматчевого противостояния";
+    }
+  }
   if (event.event_type === "contest_updated") {
     const before = event.before_state || {};
     const after = event.after_state || {};
@@ -6869,6 +8313,52 @@ function buildMatchResultAuditChanges(event) {
       + getAuditMatchStatusLabel(after.status),
     );
   }
+  const beforeTieResult = before.two_legged_tie_result || {};
+  const afterTieResult = after.two_legged_tie_result || {};
+  const isTwoLeggedTieResult = (
+    before.is_two_legged === true
+    || after.is_two_legged === true
+    || event.metadata?.result_scope === "two_legged_tie"
+  );
+  if (isTwoLeggedTieResult) {
+    const beforeResolution = (
+      getTwoLeggedTieResolutionLabel(beforeTieResult.resolution_method)
+      || "не указан"
+    );
+    const afterResolution = (
+      getTwoLeggedTieResolutionLabel(afterTieResult.resolution_method)
+      || "не указан"
+    );
+    if (beforeResolution !== afterResolution) {
+      lines.push(`Способ определения: ${beforeResolution} → ${afterResolution}`);
+    }
+
+    const formatSupplementalScore = (state, homeKey, awayKey) => {
+      if (!Number.isInteger(state[homeKey]) || !Number.isInteger(state[awayKey])) {
+        return "не указан";
+      }
+      return `${state[homeKey]}:${state[awayKey]}`;
+    };
+    const supplementalScores = [
+      {
+        label: "Дополнительное время",
+        homeKey: "second_leg_extra_time_home_score",
+        awayKey: "second_leg_extra_time_away_score",
+      },
+      {
+        label: "Серия пенальти",
+        homeKey: "second_leg_home_penalty_score",
+        awayKey: "second_leg_away_penalty_score",
+      },
+    ];
+    supplementalScores.forEach(({ label, homeKey, awayKey }) => {
+      const beforeValue = formatSupplementalScore(beforeTieResult, homeKey, awayKey);
+      const afterValue = formatSupplementalScore(afterTieResult, homeKey, awayKey);
+      if (beforeValue !== afterValue) {
+        lines.push(`${label}: ${beforeValue} → ${afterValue}`);
+      }
+    });
+  }
   return lines;
 }
 
@@ -7020,7 +8510,7 @@ function getAuditStateFieldLabel(key, event) {
     key === "elimination_qualifier_count"
     && event?.contest?.template_key === "champions_league_2026_27"
   ) {
-    return "Вылетят после лигового этапа";
+    return "Вылетят после общего этапа";
   }
   const labels = {
     id: "ID",
@@ -9176,6 +10666,7 @@ function createLabeledField(labelText, input) {
 }
 
 function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
+  const isTwoLegged = isTwoLeggedMatch(match);
   const card = createElement("section", { className: "info-card" });
   const heading = createElement("h2", {
     text: `${match.home_team.name} — ${match.away_team.name}`,
@@ -9183,7 +10674,8 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
   const impact = createElement("p", {
     className: "subtitle",
     text: (
-      `${formatMatchStartsAt(match.starts_at_utc)} · `
+      `${isTwoLegged ? (match.leg_number === 1 ? "Первый матч" : "Ответный матч") + " · " : ""}`
+      + `${formatMatchStartsAt(match.starts_at_utc)} · `
       + `${match.linked_contest_count} ${getRussianPlural(match.linked_contest_count, "конкурс", "конкурса", "конкурсов")} · `
       + `${match.prediction_count} ${getRussianPlural(match.prediction_count, "прогноз", "прогноза", "прогнозов")}`
     ),
@@ -9198,7 +10690,9 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
     const resultText = match.result
       ? (
           `Итог: ${match.result.home_score}:${match.result.away_score}`
-          + (advancingTeam ? ` · прошла дальше ${advancingTeam.name}` : "")
+          + (!isTwoLegged && advancingTeam
+            ? ` · прошла дальше ${advancingTeam.name}`
+            : "")
         )
       : `Статус: ${match.status}`;
     card.append(createElement("p", { className: "subtitle", text: resultText }));
@@ -9256,16 +10750,18 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
     }
     homeScore.value = match.result?.home_score ?? "";
     awayScore.value = match.result?.away_score ?? "";
-    const advancing = document.createElement("select");
-    advancing.className = "text-input";
-    for (const team of [match.home_team, match.away_team]) {
-      const option = document.createElement("option");
-      option.value = String(team.id);
-      option.textContent = team.name;
-      advancing.append(option);
-    }
-    if (match.result?.advancing_team_id) {
-      advancing.value = String(match.result.advancing_team_id);
+    const advancing = isTwoLegged ? null : document.createElement("select");
+    if (advancing) {
+      advancing.className = "text-input";
+      for (const team of [match.home_team, match.away_team]) {
+        const option = document.createElement("option");
+        option.value = String(team.id);
+        option.textContent = team.name;
+        advancing.append(option);
+      }
+      if (match.result?.advancing_team_id) {
+        advancing.value = String(match.result.advancing_team_id);
+      }
     }
     const saveResultButton = createActionButton(
       match.result ? "Исправить результат во всех чатах" : "Внести результат во все чаты",
@@ -9273,9 +10769,15 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
       "submit",
     );
     resultForm.append(
-      createLabeledField(match.home_team.name, homeScore),
-      createLabeledField(match.away_team.name, awayScore),
-      createLabeledField("Прошла дальше", advancing),
+      createLabeledField(
+        isTwoLegged ? `${match.home_team.name} · после 90 минут` : match.home_team.name,
+        homeScore,
+      ),
+      createLabeledField(
+        isTwoLegged ? `${match.away_team.name} · после 90 минут` : match.away_team.name,
+        awayScore,
+      ),
+      ...(advancing ? [createLabeledField("Прошла дальше", advancing)] : []),
       saveResultButton,
     );
     resultForm.addEventListener("submit", async (event) => {
@@ -9290,7 +10792,9 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
             body: JSON.stringify({
               home_score: Number(homeScore.value),
               away_score: Number(awayScore.value),
-              advancing_team_id: Number(advancing.value),
+              ...(advancing
+                ? { advancing_team_id: Number(advancing.value) }
+                : {}),
               expected_version: match.version,
             }),
           },
@@ -9305,6 +10809,10 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
       }
     });
     card.append(resultForm);
+  }
+
+  if (isTwoLegged) {
+    return card;
   }
 
   const deleteButton = createActionButton(
@@ -9372,9 +10880,50 @@ function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
   );
   if (tournament.is_archived !== true) {
     cards.push(createSharedMatchCreationCard(bootstrap, tournament, state));
+    if (tournament.template_key !== "the_international_2026") {
+      cards.push(
+        createTwoLeggedTieFormCard(
+          tournament,
+          state,
+          {
+            endpoint: (
+              `/api/tma/shared-tournaments/${tournament.id}/two-legged-ties`
+            ),
+            onCreated: () => {
+              void openSharedTournament(bootstrap, tournament.id, {
+                message: "Двухматчевая пара добавлена во все связанные конкурсы.",
+                messageType: "success",
+              });
+            },
+          },
+        ),
+      );
+    }
   }
   for (const match of tournament.matches || []) {
     cards.push(createSharedMatchAdministrationCard(bootstrap, tournament, match));
+  }
+  const twoLeggedTiesCard = createTwoLeggedTiesAdministrationCard(
+    tournament,
+    {
+      resultEndpoint: (tieId) => (
+        `/api/tma/shared-tournaments/${tournament.id}/two-legged-ties/${tieId}/result`
+      ),
+      deleteEndpoint: (tieId) => (
+        `/api/tma/shared-tournaments/${tournament.id}/two-legged-ties/${tieId}`
+      ),
+      canManage: tournament.is_archived !== true,
+      useVersion: true,
+      onUpdated: (message) => {
+        void openSharedTournament(bootstrap, tournament.id, {
+          message,
+          messageType: "success",
+        });
+      },
+    },
+  );
+  if (twoLeggedTiesCard) {
+    cards.push(twoLeggedTiesCard);
   }
   replaceAppContent(...cards);
 }

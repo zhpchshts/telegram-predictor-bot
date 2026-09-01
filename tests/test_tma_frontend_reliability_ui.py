@@ -69,9 +69,12 @@ def test_match_autosaves_are_flushed_and_serialized_across_renders() -> None:
     source = _source()
     replace_source = _function_source("replaceAppContent")
     flush_source = _function_source("flushMatchPredictionForms")
-    queue_source = _function_source("queueMatchPredictionSave")
+    queue_source = _function_source("queuePredictionSave")
+    match_queue_source = _function_source("queueMatchPredictionSave")
+    tie_queue_source = _function_source("queueTwoLeggedTiePredictionSave")
     wait_source = _function_source("waitForMatchPredictionSaves")
     prediction_source = _function_source("createMatchPredictionSection")
+    tie_prediction_source = _function_source("createTwoLeggedTiePredictionListItem")
     open_source = _function_source("openContest")
 
     assert "flushMatchPredictionForms()" in replace_source
@@ -85,6 +88,12 @@ def test_match_autosaves_are_flushed_and_serialized_across_renders() -> None:
     assert ": sendSave()" in queue_source
     assert "matchPredictionSaveQueues.set" in queue_source
     assert "matchPredictionSaveQueues.delete" in queue_source
+    assert "`${contestId}:match:${matchId}`" in match_queue_source
+    assert "`${contestId}:two-legged-tie:${tieId}`" in tie_queue_source
+    assert (
+        "`/api/tma/contests/${contestId}/two-legged-ties/${tieId}/prediction`"
+        in tie_queue_source
+    )
     assert "while (true)" in wait_source
     assert "Promise.allSettled(pendingSaves)" in wait_source
     assert "Promise.race([drainSaves(), timeout])" in wait_source
@@ -99,6 +108,8 @@ def test_match_autosaves_are_flushed_and_serialized_across_renders() -> None:
     assert 0 < int(timeout_match.group(1).replace("_", "")) <= 15_000
     assert "queueMatchPredictionSave(" in prediction_source
     assert "form.addEventListener(PREDICTION_FLUSH_EVENT" in prediction_source
+    assert "queueTwoLeggedTiePredictionSave(" in tie_prediction_source
+    assert "form.addEventListener(PREDICTION_FLUSH_EVENT" in tie_prediction_source
     assert "await waitForMatchPredictionSaves(contestId)" in open_source
 
 

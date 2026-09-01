@@ -176,7 +176,7 @@ def test_champions_league_reminder_calls_swiss_prediction_league_phase(
 
     assert message.reminder_count == 1
     assert message.match_count == 0
-    assert "Прогноз на лиговый этап" in message.html
+    assert "Прогноз на общий этап" in message.html
     assert "швейцарский этап" not in message.html.lower()
 
 

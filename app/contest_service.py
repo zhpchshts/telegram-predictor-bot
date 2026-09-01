@@ -28,8 +28,11 @@ from app.publication_outbox import (
     transition_contest_publications_for_master_switch,
 )
 from app.scoring_service import (
+    TieResolutionMethod,
+    TwoLeggedTieResolution,
     recalculate_match_prediction_scores,
     recalculate_tie_prediction_scores,
+    resolve_two_legged_tie_result,
 )
 from app.shared_tournament_service import attach_shared_tournament
 
@@ -136,6 +139,10 @@ class MatchCreationConflictError(ValueError):
     """Raised when an idempotency key is reused with different request data."""
 
 
+class TwoLeggedTieCreationConflictError(MatchCreationConflictError):
+    """Raised when a two-legged tie idempotency key has conflicting data."""
+
+
 class MatchNotFoundError(ValueError):
     """Raised when a match is unavailable in the current contest."""
 
@@ -150,6 +157,18 @@ class PredictionUnavailableError(ValueError):
 
 class MatchResultUnavailableError(ValueError):
     """Raised when a result cannot be saved for the match."""
+
+
+class TwoLeggedTieNotFoundError(ValueError):
+    """Raised when a two-legged tie is unavailable in the current contest."""
+
+
+class TwoLeggedTiePredictionUnavailableError(PredictionUnavailableError):
+    """Raised when the advancing-team prediction is already closed."""
+
+
+class TwoLeggedTieResultUnavailableError(ValueError):
+    """Raised when the two-legged tie result cannot be saved yet."""
 
 
 class ChampionUnavailableError(ValueError):
@@ -195,14 +214,31 @@ class ContestCreationResult:
 class MatchPrediction:
     home_score: int
     away_score: int
-    advancing_team_id: int
+    advancing_team_id: int | None
 
 
 @dataclass(frozen=True, slots=True)
 class MatchResult:
     home_score: int
     away_score: int
+    advancing_team_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class TwoLeggedTiePrediction:
     advancing_team_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class TwoLeggedTieResult:
+    aggregate_first_team_score: int
+    aggregate_second_team_score: int
+    advancing_team_id: int
+    resolution_method: TieResolutionMethod
+    second_leg_extra_time_home_score: int | None
+    second_leg_extra_time_away_score: int | None
+    second_leg_home_penalty_score: int | None
+    second_leg_away_penalty_score: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +375,7 @@ class ContestLeaderboardEntry:
     participant_username: str | None
     total_points: int
     match_predictions_count: int
+    two_legged_tie_predictions_count: int
     champion_prediction_count: int
     swiss_stage_prediction_count: int
     calculated_predictions_count: int
@@ -352,6 +389,8 @@ class ContestLeaderboardEntry:
 class MatchSummary:
     id: int
     tie_id: int
+    is_two_legged: bool
+    leg_number: int | None
     best_of: int | None
     home_team_id: int
     home_team_name: str
@@ -362,6 +401,23 @@ class MatchSummary:
     result: MatchResult | None
     prediction: MatchPrediction | None
     prediction_score: MatchPredictionScore | None
+
+
+@dataclass(frozen=True, slots=True)
+class TwoLeggedTieSummary:
+    id: int
+    name: str
+    first_team_id: int
+    first_team_name: str
+    second_team_id: int
+    second_team_name: str
+    first_leg_match_id: int
+    second_leg_match_id: int
+    prediction_deadline_at: str
+    is_prediction_open: bool
+    result: TwoLeggedTieResult | None
+    prediction: TwoLeggedTiePrediction | None
+    awarded_points: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,6 +435,7 @@ class ContestDetails:
     champion_prediction: ChampionPredictionDetails
     swiss_stage_prediction: SwissStagePredictionDetails
     leaderboard: tuple[ContestLeaderboardEntry, ...]
+    two_legged_ties: tuple[TwoLeggedTieSummary, ...]
     matches: tuple[MatchSummary, ...]
 
 
@@ -397,6 +454,24 @@ class MatchPredictionSaveResult:
 @dataclass(frozen=True, slots=True)
 class MatchResultSaveResult:
     result: MatchResult
+    was_created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TwoLeggedTieCreationResult:
+    tie: TwoLeggedTieSummary
+    was_created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TwoLeggedTiePredictionSaveResult:
+    prediction: TwoLeggedTiePrediction
+    was_created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TwoLeggedTieResultSaveResult:
+    result: TwoLeggedTieResult
     was_created: bool
 
 
@@ -487,6 +562,8 @@ def get_contest_details(
             SELECT
                 matches.id,
                 matches.tie_id,
+                ties.is_two_legged,
+                matches.leg_number,
                 matches.best_of,
                 home_team.id AS home_team_id,
                 home_team.name AS home_team_name,
@@ -538,6 +615,61 @@ def get_contest_details(
             ORDER BY matches.starts_at_utc ASC, matches.id ASC
             """,
             (telegram_user_id, telegram_user_id, contest_id),
+        ).fetchall()
+
+        two_legged_tie_rows = connection.execute(
+            """
+            SELECT
+                ties.id,
+                ties.name,
+                ties.first_team_id,
+                first_team.name AS first_team_name,
+                ties.second_team_id,
+                second_team.name AS second_team_name,
+                ties.advancing_team_id,
+                ties.resolution_method,
+                ties.second_leg_extra_time_home_score,
+                ties.second_leg_extra_time_away_score,
+                ties.second_leg_home_penalty_score,
+                ties.second_leg_away_penalty_score,
+                first_leg.id AS first_leg_match_id,
+                first_leg.home_team_id AS first_leg_home_team_id,
+                first_leg.away_team_id AS first_leg_away_team_id,
+                first_leg.starts_at_utc AS prediction_deadline_at,
+                first_leg.status AS first_leg_status,
+                first_leg.home_score_final AS first_leg_home_score,
+                first_leg.away_score_final AS first_leg_away_score,
+                second_leg.id AS second_leg_match_id,
+                second_leg.home_team_id AS second_leg_home_team_id,
+                second_leg.away_team_id AS second_leg_away_team_id,
+                second_leg.status AS second_leg_status,
+                second_leg.home_score_final AS second_leg_home_score,
+                second_leg.away_score_final AS second_leg_away_score,
+                tie_predictions.predicted_advancing_team_id,
+                tie_prediction_scores.points AS advancing_team_points
+            FROM ties
+            JOIN stages ON stages.id = ties.stage_id
+            JOIN competitions ON competitions.id = stages.competition_id
+            JOIN teams AS first_team ON first_team.id = ties.first_team_id
+            JOIN teams AS second_team ON second_team.id = ties.second_team_id
+            JOIN matches AS first_leg
+                ON first_leg.tie_id = ties.id AND first_leg.leg_number = 1
+            JOIN matches AS second_leg
+                ON second_leg.tie_id = ties.id AND second_leg.leg_number = 2
+            LEFT JOIN tie_predictions
+                ON tie_predictions.tie_id = ties.id
+                AND tie_predictions.user_id = (
+                    SELECT users.id
+                    FROM users
+                    WHERE users.telegram_user_id = ?
+                )
+            LEFT JOIN tie_prediction_scores
+                ON tie_prediction_scores.tie_prediction_id = tie_predictions.id
+            WHERE competitions.contest_id = ?
+              AND ties.is_two_legged = 1
+            ORDER BY first_leg.starts_at_utc, ties.id
+            """,
+            (telegram_user_id, contest_id),
         ).fetchall()
 
         champion_prediction = _get_champion_prediction_details(
@@ -725,7 +857,10 @@ def get_contest_details(
                 JOIN tie_predictions
                     ON tie_predictions.id =
                     tie_prediction_scores.tie_prediction_id
-                WHERE EXISTS (
+                JOIN ties
+                    ON ties.id = tie_predictions.tie_id
+                WHERE ties.is_two_legged = 0
+                  AND EXISTS (
                     SELECT 1
                     FROM matches
                     JOIN stages
@@ -795,6 +930,19 @@ def get_contest_details(
                         AND matches.status != 'cancelled'
                         AND match_predictions.user_id = users.id
                 ) AS match_predictions_count,
+                (
+                    SELECT COUNT(*)
+                    FROM tie_predictions
+                    JOIN ties
+                        ON ties.id = tie_predictions.tie_id
+                    JOIN stages
+                        ON stages.id = ties.stage_id
+                    JOIN competitions
+                        ON competitions.id = stages.competition_id
+                    WHERE competitions.contest_id = ?
+                        AND ties.is_two_legged = 1
+                        AND tie_predictions.user_id = users.id
+                ) AS two_legged_tie_predictions_count,
                 CASE
                     WHEN EXISTS (
                         SELECT 1
@@ -833,6 +981,19 @@ def get_contest_details(
                     WHERE competitions.contest_id = ?
                         AND matches.status = 'finished'
                         AND match_predictions.user_id = users.id
+                ) + (
+                    SELECT COUNT(*)
+                    FROM tie_predictions
+                    JOIN ties
+                        ON ties.id = tie_predictions.tie_id
+                    JOIN stages
+                        ON stages.id = ties.stage_id
+                    JOIN competitions
+                        ON competitions.id = stages.competition_id
+                    WHERE competitions.contest_id = ?
+                        AND ties.is_two_legged = 1
+                        AND ties.advancing_team_id IS NOT NULL
+                        AND tie_predictions.user_id = users.id
                 ) + CASE
                     WHEN EXISTS (
                         SELECT 1
@@ -893,6 +1054,8 @@ def get_contest_details(
                 contest_id,
                 contest_id,
                 contest_id,
+                contest_id,
+                contest_id,
             ),
         ).fetchall()
 
@@ -902,6 +1065,8 @@ def get_contest_details(
                 match_predictions.user_id,
                 matches.id,
                 matches.tie_id,
+                ties.is_two_legged,
+                matches.leg_number,
                 matches.best_of,
                 home_team.id AS home_team_id,
                 home_team.name AS home_team_name,
@@ -1035,6 +1200,10 @@ def get_contest_details(
                     if not swiss_stage_prediction.is_open
                     else {}
                 ),
+            ),
+            two_legged_ties=tuple(
+                _two_legged_tie_summary_from_row(row, now_utc=resolved_now_utc)
+                for row in two_legged_tie_rows
             ),
             matches=tuple(_match_summary_from_row(row) for row in match_rows),
         )
@@ -1297,7 +1466,7 @@ def save_tournament_teams(
             and len(normalized_team_names) != 36
         ):
             raise ValueError(
-                "Для включённого прогноза на лиговый этап Лиги чемпионов "
+                "Для включённого прогноза на общий этап Лиги чемпионов "
                 "нужно сохранить ровно 36 команд."
             )
         if (
@@ -1639,6 +1808,286 @@ def create_match(
     )
 
 
+def create_two_legged_tie(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    first_team_id: int,
+    second_team_id: int,
+    first_leg_starts_at_utc: str,
+    second_leg_starts_at_utc: str,
+    idempotency_key: str,
+    audit_actor: AuditActor,
+    now_utc: datetime | None = None,
+) -> TwoLeggedTieCreationResult:
+    normalized_first_team_id = _normalize_team_id(
+        first_team_id,
+        field_name="Первая команда",
+    )
+    normalized_second_team_id = _normalize_team_id(
+        second_team_id,
+        field_name="Вторая команда",
+    )
+    if normalized_first_team_id == normalized_second_team_id:
+        raise ValueError("В противостоянии должны участвовать разные команды.")
+
+    normalized_first_start = _normalize_starts_at_utc(first_leg_starts_at_utc)
+    normalized_second_start = _normalize_starts_at_utc(second_leg_starts_at_utc)
+    if _parse_stored_datetime(normalized_first_start) >= _parse_stored_datetime(
+        normalized_second_start
+    ):
+        raise ValueError("Ответный матч должен начинаться позже первого.")
+    normalized_idempotency_key = _normalize_match_idempotency_key(idempotency_key)
+    request_fingerprint = _build_two_legged_tie_request_fingerprint(
+        first_team_id=normalized_first_team_id,
+        second_team_id=normalized_second_team_id,
+        first_leg_starts_at_utc=normalized_first_start,
+        second_leg_starts_at_utc=normalized_second_start,
+    )
+
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        contest_row = _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        _ensure_contest_is_independent(connection, contest_id=contest_id)
+        if contest_row["template_key"] == THE_INTERNATIONAL_2026_TEMPLATE.key:
+            raise ValueError(
+                "Двухматчевые футбольные противостояния недоступны для "
+                "The International."
+            )
+
+        actor_user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+        existing_request = connection.execute(
+            """
+            SELECT request_fingerprint, match_id
+            FROM match_creation_requests
+            WHERE contest_id = ?
+              AND actor_user_id = ?
+              AND idempotency_key = ?
+            """,
+            (contest_id, actor_user_id, normalized_idempotency_key),
+        ).fetchone()
+        if existing_request is not None:
+            if str(existing_request["request_fingerprint"]) != request_fingerprint:
+                raise TwoLeggedTieCreationConflictError(
+                    "Этот запрос на создание противостояния уже использован с "
+                    "другими данными."
+                )
+            first_leg_row = _get_match_row(
+                connection,
+                contest_id=contest_id,
+                match_id=int(existing_request["match_id"]),
+            )
+            if first_leg_row is None or not bool(first_leg_row["is_two_legged"]):
+                raise RuntimeError(
+                    "Не удалось найти противостояние, созданное предыдущим запросом."
+                )
+            tie_row = _get_two_legged_tie_row(
+                connection,
+                contest_id=contest_id,
+                tie_id=int(first_leg_row["tie_id"]),
+                user_id=actor_user_id,
+            )
+            if tie_row is None:
+                raise RuntimeError(
+                    "Не удалось найти противостояние, созданное предыдущим запросом."
+                )
+            return TwoLeggedTieCreationResult(
+                tie=_two_legged_tie_summary_from_row(
+                    tie_row,
+                    now_utc=_resolve_now_utc(now_utc),
+                ),
+                was_created=False,
+            )
+
+        first_team_row = _get_contest_team_row(
+            connection,
+            contest_id=contest_id,
+            team_id=normalized_first_team_id,
+        )
+        second_team_row = _get_contest_team_row(
+            connection,
+            contest_id=contest_id,
+            team_id=normalized_second_team_id,
+        )
+        if first_team_row is None or second_team_row is None:
+            raise ValueError(
+                "Обе команды противостояния должны входить в список команд турнира."
+            )
+
+        competition_row = connection.execute(
+            """
+            SELECT competitions.id AS competition_id,
+                   scoring_rule_sets.id AS scoring_rule_set_id
+            FROM competitions
+            JOIN scoring_rule_sets
+                ON scoring_rule_sets.competition_id = competitions.id
+            WHERE competitions.contest_id = ?
+              AND competitions.is_active = 1
+              AND scoring_rule_sets.is_active = 1
+            ORDER BY competitions.id, scoring_rule_sets.version DESC
+            LIMIT 1
+            """,
+            (contest_id,),
+        ).fetchone()
+        if competition_row is None:
+            raise RuntimeError("Не удалось найти активные правила конкурса.")
+        stage_id, _, _ = _get_or_create_first_stage(
+            connection,
+            competition_id=int(competition_row["competition_id"]),
+        )
+        scoring_rule_set_id = int(competition_row["scoring_rule_set_id"])
+        tie_position = _get_next_tie_position(connection, stage_id=stage_id)
+        tie_name = f"{first_team_row['name']} — {second_team_row['name']}"
+        tie_id = int(
+            connection.execute(
+                """
+                INSERT INTO ties (
+                    stage_id, scoring_rule_set_id, name, position,
+                    is_two_legged, first_team_id, second_team_id
+                )
+                VALUES (?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    stage_id,
+                    scoring_rule_set_id,
+                    tie_name,
+                    tie_position,
+                    normalized_first_team_id,
+                    normalized_second_team_id,
+                ),
+            ).lastrowid
+        )
+        first_leg_match_id = int(
+            connection.execute(
+                """
+                INSERT INTO matches (
+                    stage_id, tie_id, scoring_rule_set_id, home_team_id,
+                    away_team_id, starts_at_utc, leg_number
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    stage_id,
+                    tie_id,
+                    scoring_rule_set_id,
+                    normalized_first_team_id,
+                    normalized_second_team_id,
+                    normalized_first_start,
+                ),
+            ).lastrowid
+        )
+        second_leg_match_id = int(
+            connection.execute(
+                """
+                INSERT INTO matches (
+                    stage_id, tie_id, scoring_rule_set_id, home_team_id,
+                    away_team_id, starts_at_utc, leg_number
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 2)
+                """,
+                (
+                    stage_id,
+                    tie_id,
+                    scoring_rule_set_id,
+                    normalized_second_team_id,
+                    normalized_first_team_id,
+                    normalized_second_start,
+                ),
+            ).lastrowid
+        )
+        connection.execute(
+            """
+            INSERT INTO match_creation_requests (
+                contest_id, actor_user_id, idempotency_key,
+                request_fingerprint, match_id
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                contest_id,
+                actor_user_id,
+                normalized_idempotency_key,
+                request_fingerprint,
+                first_leg_match_id,
+            ),
+        )
+        event_payload = json.dumps(
+            {
+                "first_leg_match_id": first_leg_match_id,
+                "first_leg_starts_at_utc": normalized_first_start,
+                "first_team_id": normalized_first_team_id,
+                "second_leg_match_id": second_leg_match_id,
+                "second_leg_starts_at_utc": normalized_second_start,
+                "second_team_id": normalized_second_team_id,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        connection.execute(
+            """
+            INSERT INTO event_log (
+                contest_id, actor_user_id, event_type, entity_type,
+                entity_id, payload_json
+            )
+            VALUES (?, ?, 'tie.created', 'tie', ?, ?)
+            """,
+            (contest_id, actor_user_id, tie_id, event_payload),
+        )
+
+        for match_id in (first_leg_match_id, second_leg_match_id):
+            match_row = _get_match_row(
+                connection,
+                contest_id=contest_id,
+                match_id=match_id,
+            )
+            if match_row is None:
+                raise RuntimeError("Не удалось повторно прочитать созданный матч.")
+            _record_audit(
+                connection,
+                audit_actor=audit_actor,
+                telegram_chat_id=telegram_chat_id,
+                event_type=AuditEventType.MATCH_CREATED,
+                entity_type=AuditEntityType.MATCH,
+                entity_id=match_id,
+                contest_id=contest_id,
+                before_state=None,
+                after_state=_match_snapshot(match_row),
+            )
+
+        tie_row = _get_two_legged_tie_row(
+            connection,
+            contest_id=contest_id,
+            tie_id=tie_id,
+            user_id=actor_user_id,
+        )
+        if tie_row is None:
+            raise RuntimeError("Не удалось повторно прочитать противостояние.")
+
+    return TwoLeggedTieCreationResult(
+        tie=_two_legged_tie_summary_from_row(
+            tie_row,
+            now_utc=_resolve_now_utc(now_utc),
+        ),
+        was_created=True,
+    )
+
+
 def delete_match(
     *,
     database_path: Path,
@@ -1665,6 +2114,7 @@ def delete_match(
             SELECT
                 matches.id,
                 matches.tie_id,
+                ties.is_two_legged,
                 matches.starts_at_utc,
                 matches.status,
                 home_team.id AS home_team_id,
@@ -1672,6 +2122,7 @@ def delete_match(
                 away_team.id AS away_team_id,
                 away_team.name AS away_team_name
             FROM matches
+            JOIN ties ON ties.id = matches.tie_id
             JOIN stages
             ON stages.id = matches.stage_id
             JOIN competitions
@@ -1688,6 +2139,12 @@ def delete_match(
 
         if match_row is None:
             raise MatchNotFoundError("Матч не найден.")
+
+        if bool(match_row["is_two_legged"]):
+            raise MatchUpdateUnavailableError(
+                "Матч двухматчевого противостояния можно удалить только вместе "
+                "со всей парой."
+            )
 
         tie_id = int(match_row["tie_id"]) if match_row["tie_id"] is not None else None
 
@@ -1790,6 +2247,103 @@ def delete_match(
         )
 
 
+def delete_two_legged_tie(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    tie_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    audit_actor: AuditActor,
+) -> None:
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        _ensure_contest_is_independent(connection, contest_id=contest_id)
+        tie_row = _get_two_legged_tie_row(
+            connection,
+            contest_id=contest_id,
+            tie_id=tie_id,
+            user_id=None,
+        )
+        if tie_row is None:
+            raise TwoLeggedTieNotFoundError("Двухматчевое противостояние не найдено.")
+        actor_user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+        match_rows = connection.execute(
+            """
+            SELECT matches.id
+            FROM matches
+            WHERE matches.tie_id = ?
+            ORDER BY matches.leg_number
+            """,
+            (tie_id,),
+        ).fetchall()
+        for row in match_rows:
+            match_id = int(row["id"])
+            match_row = _get_match_row(
+                connection,
+                contest_id=contest_id,
+                match_id=match_id,
+            )
+            if match_row is None:
+                raise RuntimeError("Не удалось прочитать удаляемый матч.")
+            event = connection.execute(
+                """
+                INSERT INTO event_log (
+                    contest_id, actor_user_id, event_type, entity_type,
+                    entity_id, payload_json
+                )
+                VALUES (?, ?, 'match.deleted', 'match', ?, ?)
+                """,
+                (
+                    contest_id,
+                    actor_user_id,
+                    match_id,
+                    json.dumps(
+                        {"tie_id": tie_id, "leg_number": match_row["leg_number"]},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            if event.lastrowid is None:
+                raise RuntimeError("Не удалось записать событие удаления матча.")
+            handle_match_publication_deletion(
+                connection,
+                contest_id=contest_id,
+                match_id=match_id,
+                event_id=int(event.lastrowid),
+            )
+            _record_audit(
+                connection,
+                audit_actor=audit_actor,
+                telegram_chat_id=telegram_chat_id,
+                event_type=AuditEventType.MATCH_DELETED,
+                entity_type=AuditEntityType.MATCH,
+                entity_id=match_id,
+                contest_id=contest_id,
+                before_state=_match_snapshot(match_row),
+                after_state=None,
+            )
+        connection.execute("DELETE FROM matches WHERE tie_id = ?", (tie_id,))
+        deleted = connection.execute("DELETE FROM ties WHERE id = ?", (tie_id,))
+        if deleted.rowcount != 1:
+            raise TwoLeggedTieNotFoundError("Двухматчевое противостояние не найдено.")
+
+
 def update_match_start(
     *,
     database_path: Path,
@@ -1833,6 +2387,26 @@ def update_match_start(
             raise MatchUpdateUnavailableError(
                 "Новое время начала матча должно быть в будущем."
             )
+        if bool(match_row["is_two_legged"]):
+            other_leg = connection.execute(
+                """
+                SELECT starts_at_utc
+                FROM matches
+                WHERE tie_id = ? AND leg_number != ?
+                """,
+                (int(match_row["tie_id"]), int(match_row["leg_number"])),
+            ).fetchone()
+            if other_leg is None:
+                raise RuntimeError("У двухматчевого противостояния отсутствует матч.")
+            other_start = _parse_stored_datetime(str(other_leg["starts_at_utc"]))
+            if (
+                int(match_row["leg_number"]) == 1 and new_starts_at_utc >= other_start
+            ) or (
+                int(match_row["leg_number"]) == 2 and new_starts_at_utc <= other_start
+            ):
+                raise MatchUpdateUnavailableError(
+                    "Ответный матч должен начинаться позже первого."
+                )
         if normalized_starts_at_utc == str(match_row["starts_at_utc"]):
             return _match_summary_from_row(match_row)
 
@@ -1957,15 +2531,22 @@ def save_match_prediction(
         if match_row["tie_id"] is None:
             raise RuntimeError("У матча не определено противостояние.")
 
-        normalized_advancing_team_id = _resolve_advancing_team_for_score(
-            match_row,
-            advancing_team_id=normalized_advancing_team_id,
-            home_score=normalized_home_score,
-            away_score=normalized_away_score,
-            field_name="Прогноз победителя противостояния",
-        )
-
         tie_id = int(match_row["tie_id"])
+        is_two_legged = bool(match_row["is_two_legged"])
+        if is_two_legged:
+            if predicted_advancing_team_id is not None:
+                raise ValueError(
+                    "Для матча двухматчевой пары сохраните прогноз прохода отдельно."
+                )
+            resolved_advancing_team_id: int | None = None
+        else:
+            resolved_advancing_team_id = _resolve_advancing_team_for_score(
+                match_row,
+                advancing_team_id=normalized_advancing_team_id,
+                home_score=normalized_home_score,
+                away_score=normalized_away_score,
+                field_name="Прогноз победителя противостояния",
+            )
         user_id = _upsert_user(
             connection,
             telegram_user_id=telegram_user_id,
@@ -1983,14 +2564,18 @@ def save_match_prediction(
             (match_id, user_id),
         ).fetchone()
 
-        existing_tie_prediction = connection.execute(
-            """
-            SELECT id
-            FROM tie_predictions
-            WHERE tie_id = ? AND user_id = ?
-            """,
-            (tie_id, user_id),
-        ).fetchone()
+        existing_tie_prediction = (
+            connection.execute(
+                """
+                SELECT id
+                FROM tie_predictions
+                WHERE tie_id = ? AND user_id = ?
+                """,
+                (tie_id, user_id),
+            ).fetchone()
+            if not is_two_legged
+            else None
+        )
 
         connection.execute(
             """
@@ -2014,34 +2599,118 @@ def save_match_prediction(
             ),
         )
 
+        if not is_two_legged:
+            connection.execute(
+                """
+                INSERT INTO tie_predictions (
+                    tie_id,
+                    user_id,
+                    predicted_advancing_team_id
+                )
+                VALUES (?, ?, ?)
+                ON CONFLICT(tie_id, user_id) DO UPDATE SET
+                    predicted_advancing_team_id = excluded.predicted_advancing_team_id,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    tie_id,
+                    user_id,
+                    resolved_advancing_team_id,
+                ),
+            )
+
+        return MatchPredictionSaveResult(
+            prediction=MatchPrediction(
+                home_score=normalized_home_score,
+                away_score=normalized_away_score,
+                advancing_team_id=resolved_advancing_team_id,
+            ),
+            was_created=(
+                existing_match_prediction is None
+                and (is_two_legged or existing_tie_prediction is None)
+            ),
+        )
+
+
+def save_two_legged_tie_prediction(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    tie_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    predicted_advancing_team_id: int,
+    now_utc: datetime | None = None,
+) -> TwoLeggedTiePredictionSaveResult:
+    normalized_team_id = _normalize_team_id(
+        predicted_advancing_team_id,
+        field_name="Прогноз команды, которая пройдёт дальше",
+    )
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        resolved_now_utc = _resolve_now_utc(now_utc)
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        tie_row = _get_two_legged_tie_row(
+            connection,
+            contest_id=contest_id,
+            tie_id=tie_id,
+            user_id=None,
+        )
+        if tie_row is None:
+            raise TwoLeggedTieNotFoundError("Двухматчевое противостояние не найдено.")
+        if not _is_two_legged_tie_prediction_open(
+            tie_row,
+            now_utc=resolved_now_utc,
+        ):
+            raise TwoLeggedTiePredictionUnavailableError(
+                "Прогноз на проход уже закрыт."
+            )
+        if normalized_team_id not in {
+            int(tie_row["first_team_id"]),
+            int(tie_row["second_team_id"]),
+        }:
+            raise ValueError(
+                "Прогнозируемая команда должна участвовать в противостоянии."
+            )
+        user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+        existing = connection.execute(
+            """
+            SELECT id
+            FROM tie_predictions
+            WHERE tie_id = ? AND user_id = ?
+            """,
+            (tie_id, user_id),
+        ).fetchone()
         connection.execute(
             """
             INSERT INTO tie_predictions (
-                tie_id,
-                user_id,
-                predicted_advancing_team_id
+                tie_id, user_id, predicted_advancing_team_id
             )
             VALUES (?, ?, ?)
             ON CONFLICT(tie_id, user_id) DO UPDATE SET
                 predicted_advancing_team_id = excluded.predicted_advancing_team_id,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (
-                tie_id,
-                user_id,
-                normalized_advancing_team_id,
-            ),
+            (tie_id, user_id, normalized_team_id),
         )
-
-        return MatchPredictionSaveResult(
-            prediction=MatchPrediction(
-                home_score=normalized_home_score,
-                away_score=normalized_away_score,
-                advancing_team_id=normalized_advancing_team_id,
+        return TwoLeggedTiePredictionSaveResult(
+            prediction=TwoLeggedTiePrediction(
+                advancing_team_id=normalized_team_id,
             ),
-            was_created=(
-                existing_match_prediction is None and existing_tie_prediction is None
-            ),
+            was_created=existing is None,
         )
 
 
@@ -2107,15 +2776,23 @@ def save_match_result(
         if match_row["tie_id"] is None:
             raise RuntimeError("У матча не определено противостояние.")
 
-        normalized_advancing_team_id = _resolve_advancing_team_for_score(
-            match_row,
-            advancing_team_id=normalized_advancing_team_id,
-            home_score=normalized_home_score,
-            away_score=normalized_away_score,
-            field_name="Победитель противостояния",
-        )
-
         tie_id = int(match_row["tie_id"])
+        is_two_legged = bool(match_row["is_two_legged"])
+        if is_two_legged:
+            if advancing_team_id is not None:
+                raise ValueError(
+                    "Для матча двухматчевой пары укажите только счёт после 90 "
+                    "минут. Результат противостояния сохраняется отдельно."
+                )
+            resolved_advancing_team_id: int | None = None
+        else:
+            resolved_advancing_team_id = _resolve_advancing_team_for_score(
+                match_row,
+                advancing_team_id=normalized_advancing_team_id,
+                home_score=normalized_home_score,
+                away_score=normalized_away_score,
+                field_name="Победитель противостояния",
+            )
         actor_user_id = _upsert_user(
             connection,
             telegram_user_id=telegram_user_id,
@@ -2127,7 +2804,7 @@ def save_match_result(
         saved_result = MatchResult(
             home_score=normalized_home_score,
             away_score=normalized_away_score,
-            advancing_team_id=normalized_advancing_team_id,
+            advancing_team_id=resolved_advancing_team_id,
         )
         if str(match_row["status"]) == "finished" and previous_result == saved_result:
             return MatchResultSaveResult(
@@ -2151,22 +2828,28 @@ def save_match_result(
             ),
         )
 
-        connection.execute(
-            """
-            UPDATE ties
-            SET advancing_team_id = ?
-            WHERE id = ?
-            """,
-            (
-                normalized_advancing_team_id,
-                tie_id,
-            ),
-        )
+        if not is_two_legged:
+            connection.execute(
+                """
+                UPDATE ties
+                SET advancing_team_id = ?
+                WHERE id = ?
+                """,
+                (
+                    resolved_advancing_team_id,
+                    tie_id,
+                ),
+            )
 
         recalculate_match_prediction_scores(
             connection,
             match_id=match_id,
         )
+        if is_two_legged:
+            _reconcile_two_legged_tie_after_match_result(
+                connection,
+                tie_id=tie_id,
+            )
         recalculate_tie_prediction_scores(
             connection,
             tie_id=tie_id,
@@ -2184,7 +2867,7 @@ def save_match_result(
                     else None
                 ),
                 "result": {
-                    "advancing_team_id": normalized_advancing_team_id,
+                    "advancing_team_id": resolved_advancing_team_id,
                     "away_score": normalized_away_score,
                     "home_score": normalized_home_score,
                 },
@@ -2256,6 +2939,187 @@ def save_match_result(
             )
 
         return MatchResultSaveResult(
+            result=saved_result,
+            was_created=previous_result is None,
+        )
+
+
+def save_two_legged_tie_result(
+    *,
+    database_path: Path,
+    telegram_chat_id: int,
+    contest_id: int,
+    tie_id: int,
+    telegram_user_id: int,
+    first_name: str,
+    last_name: str | None,
+    username: str | None,
+    advancing_team_id: int | None,
+    second_leg_extra_time_home_score: int | None = None,
+    second_leg_extra_time_away_score: int | None = None,
+    second_leg_home_penalty_score: int | None = None,
+    second_leg_away_penalty_score: int | None = None,
+    audit_actor: AuditActor,
+    now_utc: datetime | None = None,
+) -> TwoLeggedTieResultSaveResult:
+    del now_utc
+    normalized_advancing_team_id = (
+        _normalize_team_id(
+            advancing_team_id,
+            field_name="Прошедшая команда",
+        )
+        if advancing_team_id is not None
+        else None
+    )
+    extra_time_home_score, extra_time_away_score = _normalize_optional_result_pair(
+        home_score=second_leg_extra_time_home_score,
+        away_score=second_leg_extra_time_away_score,
+        field_name="Счёт дополнительного времени",
+    )
+    penalty_home_score, penalty_away_score = _normalize_optional_result_pair(
+        home_score=second_leg_home_penalty_score,
+        away_score=second_leg_away_penalty_score,
+        field_name="Счёт серии пенальти",
+    )
+
+    with database_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        _get_active_contest_row(
+            connection,
+            telegram_chat_id=telegram_chat_id,
+            contest_id=contest_id,
+        )
+        _ensure_contest_is_independent(connection, contest_id=contest_id)
+        tie_row = _get_two_legged_tie_row(
+            connection,
+            contest_id=contest_id,
+            tie_id=tie_id,
+            user_id=None,
+        )
+        if tie_row is None:
+            raise TwoLeggedTieNotFoundError("Двухматчевое противостояние не найдено.")
+        second_leg_match_id = int(tie_row["second_leg_match_id"])
+        before_match_row = _get_match_row(
+            connection,
+            contest_id=contest_id,
+            match_id=second_leg_match_id,
+        )
+        if before_match_row is None:
+            raise RuntimeError("Не удалось прочитать ответный матч противостояния.")
+        if not _two_legged_tie_has_both_match_results(tie_row):
+            raise TwoLeggedTieResultUnavailableError(
+                "Сначала сохраните результаты обоих матчей после 90 минут."
+            )
+        resolution = _resolve_two_legged_tie_row(
+            tie_row,
+            second_leg_extra_time_home_score=extra_time_home_score,
+            second_leg_extra_time_away_score=extra_time_away_score,
+            second_leg_home_penalty_score=penalty_home_score,
+            second_leg_away_penalty_score=penalty_away_score,
+            advancing_team_id=normalized_advancing_team_id,
+        )
+        previous_result = _two_legged_tie_result_from_row(tie_row)
+        saved_result = _two_legged_tie_result_from_resolution(
+            resolution,
+            second_leg_extra_time_home_score=extra_time_home_score,
+            second_leg_extra_time_away_score=extra_time_away_score,
+            second_leg_home_penalty_score=penalty_home_score,
+            second_leg_away_penalty_score=penalty_away_score,
+        )
+        if previous_result == saved_result:
+            return TwoLeggedTieResultSaveResult(
+                result=saved_result,
+                was_created=False,
+            )
+
+        actor_user_id = _upsert_user(
+            connection,
+            telegram_user_id=telegram_user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+        connection.execute(
+            """
+            UPDATE ties
+            SET advancing_team_id = ?,
+                resolution_method = ?,
+                second_leg_extra_time_home_score = ?,
+                second_leg_extra_time_away_score = ?,
+                second_leg_home_penalty_score = ?,
+                second_leg_away_penalty_score = ?
+            WHERE id = ?
+            """,
+            (
+                saved_result.advancing_team_id,
+                saved_result.resolution_method,
+                saved_result.second_leg_extra_time_home_score,
+                saved_result.second_leg_extra_time_away_score,
+                saved_result.second_leg_home_penalty_score,
+                saved_result.second_leg_away_penalty_score,
+                tie_id,
+            ),
+        )
+        recalculate_tie_prediction_scores(connection, tie_id=tie_id)
+        connection.execute(
+            """
+            INSERT INTO event_log (
+                contest_id, actor_user_id, event_type, entity_type,
+                entity_id, payload_json
+            )
+            VALUES (?, ?, ?, 'tie', ?, ?)
+            """,
+            (
+                contest_id,
+                actor_user_id,
+                (
+                    "tie.result_recorded"
+                    if previous_result is None
+                    else "tie.result_corrected"
+                ),
+                tie_id,
+                json.dumps(
+                    {
+                        "previous_result": (
+                            _two_legged_tie_result_snapshot(previous_result)
+                            if previous_result is not None
+                            else None
+                        ),
+                        "result": _two_legged_tie_result_snapshot(saved_result),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            ),
+        )
+        after_match_row = _get_match_row(
+            connection,
+            contest_id=contest_id,
+            match_id=second_leg_match_id,
+        )
+        if after_match_row is None:
+            raise RuntimeError("Не удалось повторно прочитать ответный матч.")
+        _record_audit(
+            connection,
+            audit_actor=audit_actor,
+            telegram_chat_id=telegram_chat_id,
+            event_type=(
+                AuditEventType.MATCH_RESULT_SET
+                if previous_result is None
+                else AuditEventType.MATCH_RESULT_CHANGED
+            ),
+            entity_type=AuditEntityType.MATCH,
+            entity_id=second_leg_match_id,
+            contest_id=contest_id,
+            before_state=_match_snapshot(before_match_row),
+            after_state=_match_snapshot(after_match_row),
+            metadata={
+                "result_scope": "two_legged_tie",
+                "two_legged_tie_id": tie_id,
+            },
+        )
+        return TwoLeggedTieResultSaveResult(
             result=saved_result,
             was_created=previous_result is None,
         )
@@ -2827,7 +3691,7 @@ def save_swiss_stage_prediction_settings(
         ):
             raise ValueError(
                 "Для Лиги чемпионов выберите 8 команд напрямую в 1/8 "
-                "и 12 команд, которые вылетят после лигового этапа."
+                "и 12 команд, которые вылетят после общего этапа."
             )
         previous_row = _get_swiss_stage_configuration_row(
             connection,
@@ -2885,7 +3749,7 @@ def save_swiss_stage_prediction_settings(
             and tournament_team_count != 36
         ):
             raise ValueError(
-                "Для лигового этапа Лиги чемпионов добавьте ровно 36 команд."
+                "Для общего этапа Лиги чемпионов добавьте ровно 36 команд."
             )
         if (
             normalized_enabled
@@ -3774,7 +4638,7 @@ def _contest_snapshot(row) -> dict[str, object]:
 
 def _match_snapshot(row) -> dict[str, object]:
     keys = set(row.keys())
-    return {
+    snapshot: dict[str, object] = {
         "advancing_team_id": (
             int(row["advancing_team_id"])
             if "advancing_team_id" in keys and row["advancing_team_id"] is not None
@@ -3808,9 +4672,24 @@ def _match_snapshot(row) -> dict[str, object]:
         "status": str(row["status"]),
         "tie_id": int(row["tie_id"]) if row["tie_id"] is not None else None,
     }
+    if "is_two_legged" in keys and bool(row["is_two_legged"]):
+        snapshot["is_two_legged"] = True
+        snapshot["leg_number"] = (
+            int(row["leg_number"]) if row["leg_number"] is not None else None
+        )
+        snapshot["two_legged_tie_result"] = {
+            "resolution_method": row["resolution_method"],
+            "second_leg_extra_time_home_score": row["second_leg_extra_time_home_score"],
+            "second_leg_extra_time_away_score": row["second_leg_extra_time_away_score"],
+            "second_leg_home_penalty_score": row["second_leg_home_penalty_score"],
+            "second_leg_away_penalty_score": row["second_leg_away_penalty_score"],
+        }
+    return snapshot
 
 
-def _match_result_snapshot(result: MatchResult | None) -> dict[str, int] | None:
+def _match_result_snapshot(
+    result: MatchResult | None,
+) -> dict[str, int | None] | None:
     if result is None:
         return None
     return {
@@ -3867,6 +4746,8 @@ def _get_match_row(
         SELECT
             matches.id,
             matches.tie_id,
+            ties.is_two_legged,
+            matches.leg_number,
             matches.best_of,
             contests.template_key,
             home_team.id AS home_team_id,
@@ -3877,7 +4758,14 @@ def _get_match_row(
             matches.status,
             matches.home_score_final,
             matches.away_score_final,
-            ties.advancing_team_id
+            ties.first_team_id,
+            ties.second_team_id,
+            ties.advancing_team_id,
+            ties.resolution_method,
+            ties.second_leg_extra_time_home_score,
+            ties.second_leg_extra_time_away_score,
+            ties.second_leg_home_penalty_score,
+            ties.second_leg_away_penalty_score
         FROM matches
         JOIN ties
             ON ties.id = matches.tie_id
@@ -3895,6 +4783,65 @@ def _get_match_row(
             AND matches.id = ?
         """,
         (contest_id, match_id),
+    ).fetchone()
+
+
+def _get_two_legged_tie_row(
+    connection,
+    *,
+    contest_id: int | None,
+    tie_id: int,
+    user_id: int | None,
+):
+    return connection.execute(
+        """
+        SELECT
+            ties.id,
+            ties.name,
+            ties.first_team_id,
+            first_team.name AS first_team_name,
+            ties.second_team_id,
+            second_team.name AS second_team_name,
+            ties.advancing_team_id,
+            ties.resolution_method,
+            ties.second_leg_extra_time_home_score,
+            ties.second_leg_extra_time_away_score,
+            ties.second_leg_home_penalty_score,
+            ties.second_leg_away_penalty_score,
+            first_leg.id AS first_leg_match_id,
+            first_leg.home_team_id AS first_leg_home_team_id,
+            first_leg.away_team_id AS first_leg_away_team_id,
+            first_leg.starts_at_utc AS prediction_deadline_at,
+            first_leg.status AS first_leg_status,
+            first_leg.home_score_final AS first_leg_home_score,
+            first_leg.away_score_final AS first_leg_away_score,
+            second_leg.id AS second_leg_match_id,
+            second_leg.home_team_id AS second_leg_home_team_id,
+            second_leg.away_team_id AS second_leg_away_team_id,
+            second_leg.status AS second_leg_status,
+            second_leg.home_score_final AS second_leg_home_score,
+            second_leg.away_score_final AS second_leg_away_score,
+            tie_predictions.predicted_advancing_team_id,
+            tie_prediction_scores.points AS advancing_team_points
+        FROM ties
+        JOIN stages ON stages.id = ties.stage_id
+        JOIN competitions ON competitions.id = stages.competition_id
+        JOIN teams AS first_team ON first_team.id = ties.first_team_id
+        JOIN teams AS second_team ON second_team.id = ties.second_team_id
+        JOIN matches AS first_leg
+            ON first_leg.tie_id = ties.id AND first_leg.leg_number = 1
+        JOIN matches AS second_leg
+            ON second_leg.tie_id = ties.id AND second_leg.leg_number = 2
+        LEFT JOIN tie_predictions
+            ON tie_predictions.tie_id = ties.id
+            AND tie_predictions.user_id = ?
+        LEFT JOIN tie_prediction_scores
+            ON tie_prediction_scores.tie_prediction_id = tie_predictions.id
+        WHERE ties.id = ?
+          AND ties.is_two_legged = 1
+          AND (? IS NULL OR competitions.contest_id = ?)
+        """,
+        (user_id, tie_id, contest_id, contest_id),
     ).fetchone()
 
 
@@ -4468,7 +5415,7 @@ def _validate_swiss_stage_selection(
         )
     if len(elimination_team_ids) != elimination_qualifier_count:
         elimination_category = (
-            "вылета после лигового этапа"
+            "вылета после общего этапа"
             if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key
             else "элиминейшн-раунда"
         )
@@ -4857,7 +5804,7 @@ def _normalize_swiss_stage_team_ids(
 
 def _swiss_stage_terms(template_key: str) -> tuple[str, str, str]:
     if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key:
-        return "лиговый этап", "лигового этапа", "лиговом этапе"
+        return "общий этап", "общего этапа", "общем этапе"
     return "швейцарский этап", "швейцарского этапа", "швейцарском этапе"
 
 
@@ -5176,21 +6123,280 @@ def _build_match_request_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _build_two_legged_tie_request_fingerprint(
+    *,
+    first_team_id: int,
+    second_team_id: int,
+    first_leg_starts_at_utc: str,
+    second_leg_starts_at_utc: str,
+) -> str:
+    payload = json.dumps(
+        {
+            "kind": "two_legged_tie",
+            "first_leg_starts_at_utc": first_leg_starts_at_utc,
+            "first_team_id": first_team_id,
+            "second_leg_starts_at_utc": second_leg_starts_at_utc,
+            "second_team_id": second_team_id,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _two_legged_tie_summary_from_row(
+    row,
+    *,
+    now_utc: datetime,
+) -> TwoLeggedTieSummary:
+    result = _two_legged_tie_result_from_row(row)
+    prediction = (
+        TwoLeggedTiePrediction(
+            advancing_team_id=int(row["predicted_advancing_team_id"]),
+        )
+        if row["predicted_advancing_team_id"] is not None
+        else None
+    )
+    awarded_points = None
+    if result is not None and prediction is not None:
+        awarded_points = (
+            int(row["advancing_team_points"])
+            if row["advancing_team_points"] is not None
+            else 0
+        )
+    return TwoLeggedTieSummary(
+        id=int(row["id"]),
+        name=str(row["name"]),
+        first_team_id=int(row["first_team_id"]),
+        first_team_name=str(row["first_team_name"]),
+        second_team_id=int(row["second_team_id"]),
+        second_team_name=str(row["second_team_name"]),
+        first_leg_match_id=int(row["first_leg_match_id"]),
+        second_leg_match_id=int(row["second_leg_match_id"]),
+        prediction_deadline_at=str(row["prediction_deadline_at"]),
+        is_prediction_open=_is_two_legged_tie_prediction_open(
+            row,
+            now_utc=now_utc,
+        ),
+        result=result,
+        prediction=prediction,
+        awarded_points=awarded_points,
+    )
+
+
+def _two_legged_tie_result_from_row(row) -> TwoLeggedTieResult | None:
+    if row["advancing_team_id"] is None or row["resolution_method"] is None:
+        return None
+    if not _two_legged_tie_has_both_match_results(row):
+        return None
+    resolution = _resolve_two_legged_tie_row(
+        row,
+        second_leg_extra_time_home_score=row["second_leg_extra_time_home_score"],
+        second_leg_extra_time_away_score=row["second_leg_extra_time_away_score"],
+        second_leg_home_penalty_score=row["second_leg_home_penalty_score"],
+        second_leg_away_penalty_score=row["second_leg_away_penalty_score"],
+        advancing_team_id=int(row["advancing_team_id"]),
+    )
+    if resolution.resolution_method != str(row["resolution_method"]):
+        raise RuntimeError("Способ определения победителя противостояния повреждён.")
+    return _two_legged_tie_result_from_resolution(
+        resolution,
+        second_leg_extra_time_home_score=row["second_leg_extra_time_home_score"],
+        second_leg_extra_time_away_score=row["second_leg_extra_time_away_score"],
+        second_leg_home_penalty_score=row["second_leg_home_penalty_score"],
+        second_leg_away_penalty_score=row["second_leg_away_penalty_score"],
+    )
+
+
+def _resolve_two_legged_tie_row(
+    row,
+    *,
+    second_leg_extra_time_home_score: int | None,
+    second_leg_extra_time_away_score: int | None,
+    second_leg_home_penalty_score: int | None,
+    second_leg_away_penalty_score: int | None,
+    advancing_team_id: int | None,
+) -> TwoLeggedTieResolution:
+    return resolve_two_legged_tie_result(
+        first_team_id=int(row["first_team_id"]),
+        second_team_id=int(row["second_team_id"]),
+        first_leg_home_team_id=int(row["first_leg_home_team_id"]),
+        first_leg_away_team_id=int(row["first_leg_away_team_id"]),
+        first_leg_home_score=int(row["first_leg_home_score"]),
+        first_leg_away_score=int(row["first_leg_away_score"]),
+        second_leg_home_team_id=int(row["second_leg_home_team_id"]),
+        second_leg_away_team_id=int(row["second_leg_away_team_id"]),
+        second_leg_home_score=int(row["second_leg_home_score"]),
+        second_leg_away_score=int(row["second_leg_away_score"]),
+        second_leg_extra_time_home_score=second_leg_extra_time_home_score,
+        second_leg_extra_time_away_score=second_leg_extra_time_away_score,
+        second_leg_home_penalty_score=second_leg_home_penalty_score,
+        second_leg_away_penalty_score=second_leg_away_penalty_score,
+        advancing_team_id=advancing_team_id,
+    )
+
+
+def _two_legged_tie_result_from_resolution(
+    resolution: TwoLeggedTieResolution,
+    *,
+    second_leg_extra_time_home_score: int | None,
+    second_leg_extra_time_away_score: int | None,
+    second_leg_home_penalty_score: int | None,
+    second_leg_away_penalty_score: int | None,
+) -> TwoLeggedTieResult:
+    return TwoLeggedTieResult(
+        aggregate_first_team_score=resolution.aggregate_first_team_score,
+        aggregate_second_team_score=resolution.aggregate_second_team_score,
+        advancing_team_id=resolution.advancing_team_id,
+        resolution_method=resolution.resolution_method,
+        second_leg_extra_time_home_score=second_leg_extra_time_home_score,
+        second_leg_extra_time_away_score=second_leg_extra_time_away_score,
+        second_leg_home_penalty_score=second_leg_home_penalty_score,
+        second_leg_away_penalty_score=second_leg_away_penalty_score,
+    )
+
+
+def _two_legged_tie_has_both_match_results(row) -> bool:
+    return all(
+        row[key] is not None
+        for key in (
+            "first_leg_home_score",
+            "first_leg_away_score",
+            "second_leg_home_score",
+            "second_leg_away_score",
+        )
+    )
+
+
+def _reconcile_two_legged_tie_after_match_result(
+    connection,
+    *,
+    tie_id: int,
+) -> None:
+    row = _get_two_legged_tie_row(
+        connection,
+        contest_id=None,
+        tie_id=tie_id,
+        user_id=None,
+    )
+    if row is None:
+        raise RuntimeError("Не удалось найти двухматчевое противостояние.")
+    if not _two_legged_tie_has_both_match_results(row):
+        _clear_two_legged_tie_result(connection, tie_id=tie_id)
+        return
+
+    aggregate_first, aggregate_second = _two_legged_aggregate_scores(row)
+    if aggregate_first == aggregate_second:
+        if row["second_leg_extra_time_home_score"] is None:
+            _clear_two_legged_tie_result(connection, tie_id=tie_id)
+            return
+        resolution = _resolve_two_legged_tie_row(
+            row,
+            second_leg_extra_time_home_score=row["second_leg_extra_time_home_score"],
+            second_leg_extra_time_away_score=row["second_leg_extra_time_away_score"],
+            second_leg_home_penalty_score=row["second_leg_home_penalty_score"],
+            second_leg_away_penalty_score=row["second_leg_away_penalty_score"],
+            advancing_team_id=None,
+        )
+        connection.execute(
+            """
+            UPDATE ties
+            SET advancing_team_id = ?, resolution_method = ?
+            WHERE id = ?
+            """,
+            (resolution.advancing_team_id, resolution.resolution_method, tie_id),
+        )
+        return
+
+    resolution = _resolve_two_legged_tie_row(
+        row,
+        second_leg_extra_time_home_score=None,
+        second_leg_extra_time_away_score=None,
+        second_leg_home_penalty_score=None,
+        second_leg_away_penalty_score=None,
+        advancing_team_id=None,
+    )
+    connection.execute(
+        """
+        UPDATE ties
+        SET advancing_team_id = ?, resolution_method = 'aggregate',
+            second_leg_extra_time_home_score = NULL,
+            second_leg_extra_time_away_score = NULL,
+            second_leg_home_penalty_score = NULL,
+            second_leg_away_penalty_score = NULL
+        WHERE id = ?
+        """,
+        (resolution.advancing_team_id, tie_id),
+    )
+
+
+def _clear_two_legged_tie_result(connection, *, tie_id: int) -> None:
+    connection.execute(
+        """
+        UPDATE ties
+        SET advancing_team_id = NULL, resolution_method = NULL,
+            second_leg_extra_time_home_score = NULL,
+            second_leg_extra_time_away_score = NULL,
+            second_leg_home_penalty_score = NULL,
+            second_leg_away_penalty_score = NULL
+        WHERE id = ?
+        """,
+        (tie_id,),
+    )
+
+
+def _two_legged_aggregate_scores(row) -> tuple[int, int]:
+    first_team_id = int(row["first_team_id"])
+    second_team_id = int(row["second_team_id"])
+
+    def score_for(team_id: int, *, leg_prefix: str) -> int:
+        return int(
+            row[f"{leg_prefix}_home_score"]
+            if int(row[f"{leg_prefix}_home_team_id"]) == team_id
+            else row[f"{leg_prefix}_away_score"]
+        )
+
+    return (
+        score_for(first_team_id, leg_prefix="first_leg")
+        + score_for(first_team_id, leg_prefix="second_leg"),
+        score_for(second_team_id, leg_prefix="first_leg")
+        + score_for(second_team_id, leg_prefix="second_leg"),
+    )
+
+
+def _two_legged_tie_result_snapshot(result: TwoLeggedTieResult) -> dict[str, object]:
+    return {
+        "aggregate_first_team_score": result.aggregate_first_team_score,
+        "aggregate_second_team_score": result.aggregate_second_team_score,
+        "advancing_team_id": result.advancing_team_id,
+        "resolution_method": result.resolution_method,
+        "second_leg_extra_time_home_score": (result.second_leg_extra_time_home_score),
+        "second_leg_extra_time_away_score": (result.second_leg_extra_time_away_score),
+        "second_leg_home_penalty_score": result.second_leg_home_penalty_score,
+        "second_leg_away_penalty_score": result.second_leg_away_penalty_score,
+    }
+
+
 def _match_result_from_row(row) -> MatchResult | None:
     if (
         "home_score_final" not in row.keys()
         or "away_score_final" not in row.keys()
-        or "advancing_team_id" not in row.keys()
         or row["home_score_final"] is None
         or row["away_score_final"] is None
-        or row["advancing_team_id"] is None
+    ):
+        return None
+
+    is_two_legged = "is_two_legged" in row.keys() and bool(row["is_two_legged"])
+    if not is_two_legged and (
+        "advancing_team_id" not in row.keys() or row["advancing_team_id"] is None
     ):
         return None
 
     return MatchResult(
         home_score=int(row["home_score_final"]),
         away_score=int(row["away_score_final"]),
-        advancing_team_id=int(row["advancing_team_id"]),
+        advancing_team_id=(None if is_two_legged else int(row["advancing_team_id"])),
     )
 
 
@@ -5201,16 +6407,21 @@ def _match_summary_from_row(row) -> MatchSummary:
     if (
         "predicted_home_score" in row.keys()
         and "predicted_away_score" in row.keys()
-        and "predicted_advancing_team_id" in row.keys()
         and row["predicted_home_score"] is not None
         and row["predicted_away_score"] is not None
-        and row["predicted_advancing_team_id"] is not None
     ):
-        prediction = MatchPrediction(
-            home_score=int(row["predicted_home_score"]),
-            away_score=int(row["predicted_away_score"]),
-            advancing_team_id=int(row["predicted_advancing_team_id"]),
-        )
+        is_two_legged = "is_two_legged" in row.keys() and bool(row["is_two_legged"])
+        if is_two_legged or (
+            "predicted_advancing_team_id" in row.keys()
+            and row["predicted_advancing_team_id"] is not None
+        ):
+            prediction = MatchPrediction(
+                home_score=int(row["predicted_home_score"]),
+                away_score=int(row["predicted_away_score"]),
+                advancing_team_id=(
+                    None if is_two_legged else int(row["predicted_advancing_team_id"])
+                ),
+            )
 
     prediction_score = _match_prediction_score_from_row(
         row,
@@ -5221,6 +6432,14 @@ def _match_summary_from_row(row) -> MatchSummary:
     return MatchSummary(
         id=int(row["id"]),
         tie_id=int(row["tie_id"]),
+        is_two_legged=(
+            bool(row["is_two_legged"]) if "is_two_legged" in row.keys() else False
+        ),
+        leg_number=(
+            int(row["leg_number"])
+            if "leg_number" in row.keys() and row["leg_number"] is not None
+            else None
+        ),
         best_of=(
             int(row["best_of"])
             if "best_of" in row.keys() and row["best_of"] is not None
@@ -5263,7 +6482,8 @@ def _match_prediction_score_from_row(
         )
 
     if (
-        "advancing_team_points" in row.keys()
+        not ("is_two_legged" in row.keys() and bool(row["is_two_legged"]))
+        and "advancing_team_points" in row.keys()
         and row["advancing_team_points"] is not None
     ):
         awards.append(
@@ -5467,6 +6687,11 @@ def _contest_leaderboard_from_rows(
                 ),
                 total_points=total_points,
                 match_predictions_count=int(row["match_predictions_count"]),
+                two_legged_tie_predictions_count=(
+                    int(row["two_legged_tie_predictions_count"])
+                    if "two_legged_tie_predictions_count" in row.keys()
+                    else 0
+                ),
                 champion_prediction_count=int(row["champion_prediction_count"]),
                 swiss_stage_prediction_count=int(row["swiss_stage_prediction_count"]),
                 calculated_predictions_count=int(row["calculated_predictions_count"]),
@@ -5565,6 +6790,28 @@ def _normalize_match_result_score(
     return value
 
 
+def _normalize_optional_result_pair(
+    *,
+    home_score: int | None,
+    away_score: int | None,
+    field_name: str,
+) -> tuple[int | None, int | None]:
+    if home_score is None and away_score is None:
+        return None, None
+    if home_score is None or away_score is None:
+        raise ValueError(f"{field_name} нужно указать полностью.")
+    return (
+        _normalize_match_result_score(
+            home_score,
+            field_name=f"{field_name} первой команды",
+        ),
+        _normalize_match_result_score(
+            away_score,
+            field_name=f"{field_name} второй команды",
+        ),
+    )
+
+
 def _normalize_advancing_team_id(
     value: int | None,
     *,
@@ -5640,6 +6887,26 @@ def _resolve_now_utc(now_utc: datetime | None) -> datetime:
 
 def _serialize_datetime_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_stored_datetime(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RuntimeError("Сохранена некорректная дата начала.") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RuntimeError("Сохранена дата начала без часового пояса.")
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_two_legged_tie_prediction_open(
+    tie_row,
+    *,
+    now_utc: datetime,
+) -> bool:
+    if str(tie_row["first_leg_status"]) != "scheduled":
+        return False
+    return _parse_stored_datetime(str(tie_row["prediction_deadline_at"])) > now_utc
 
 
 def _is_prediction_open(

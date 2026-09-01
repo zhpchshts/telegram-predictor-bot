@@ -82,6 +82,10 @@ def test_audit_ui_builds_human_readable_change_summaries() -> None:
     assert "Результат: ${beforeScore} → ${afterScore}" in result_source
     assert "Прошла дальше:" in result_source
     assert "Статус:" in result_source
+    assert "Способ определения:" in result_source
+    assert 'label: "Дополнительное время"' in result_source
+    assert 'label: "Серия пенальти"' in result_source
+    assert 'event.metadata?.result_scope === "two_legged_tie"' in result_source
     assert "Публикация прогнозов" in contest_source
     assert "Прогноз на чемпиона" in contest_source
     assert "Дедлайн прогноза на чемпиона" in contest_source
@@ -96,6 +100,8 @@ def test_audit_ui_builds_human_readable_change_summaries() -> None:
     assert 'case "intermediate_leaderboard_publication_requested"' in summary_source
     assert "Включена публикация прогнозов" in title_source
     assert "Выключена публикация прогнозов" in title_source
+    assert "Внесён результат двухматчевого противостояния" in title_source
+    assert "Изменён результат двухматчевого противостояния" in title_source
 
 
 def test_audit_ui_renders_structured_before_and_after_details() -> None:

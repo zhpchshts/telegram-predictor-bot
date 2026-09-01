@@ -144,7 +144,7 @@ def build_prediction_reminder_message(
     tournament_lines: list[str] = []
     if swiss_deadline is not None:
         swiss_stage_name = (
-            "лиговый этап"
+            "общий этап"
             if contest["template_key"] == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY
             else "швейцарский этап"
         )

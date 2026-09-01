@@ -5,12 +5,184 @@ from dataclasses import dataclass
 from typing import Literal
 
 MatchScoreType = Literal["exact_score", "goal_difference", "outcome"]
+TieResolutionMethod = Literal["aggregate", "extra_time", "penalties"]
 
 
 @dataclass(frozen=True, slots=True)
 class MatchScoreAward:
     score_type: MatchScoreType
     points: int
+
+
+@dataclass(frozen=True, slots=True)
+class TwoLeggedTieResolution:
+    aggregate_first_team_score: int
+    aggregate_second_team_score: int
+    advancing_team_id: int
+    resolution_method: TieResolutionMethod
+
+
+def resolve_two_legged_tie_result(
+    *,
+    first_team_id: int,
+    second_team_id: int,
+    first_leg_home_team_id: int,
+    first_leg_away_team_id: int,
+    first_leg_home_score: int,
+    first_leg_away_score: int,
+    second_leg_home_team_id: int,
+    second_leg_away_team_id: int,
+    second_leg_home_score: int,
+    second_leg_away_score: int,
+    second_leg_extra_time_home_score: int | None = None,
+    second_leg_extra_time_away_score: int | None = None,
+    second_leg_home_penalty_score: int | None = None,
+    second_leg_away_penalty_score: int | None = None,
+    advancing_team_id: int | None = None,
+) -> TwoLeggedTieResolution:
+    """Resolve a two-legged football tie without applying the away-goals rule.
+
+    Match scores are the scores after 90 minutes. Extra-time values are goals
+    scored during extra time in the second leg, while penalty values are the
+    shootout score. The optional advancing team is validation-only; the winner
+    is always derived from the supplied results.
+    """
+
+    if first_team_id == second_team_id:
+        raise ValueError("В противостоянии должны участвовать разные команды.")
+
+    expected_teams = {first_team_id, second_team_id}
+    if {
+        first_leg_home_team_id,
+        first_leg_away_team_id,
+    } != expected_teams or {
+        second_leg_home_team_id,
+        second_leg_away_team_id,
+    } != expected_teams:
+        raise ValueError(
+            "Оба матча противостояния должны состоять из одних и тех же команд."
+        )
+
+    score_values = (
+        first_leg_home_score,
+        first_leg_away_score,
+        second_leg_home_score,
+        second_leg_away_score,
+    )
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in score_values
+    ):
+        raise ValueError("Счёт каждого матча должен быть неотрицательным целым числом.")
+
+    extra_time_scores = _normalize_optional_score_pair(
+        home_score=second_leg_extra_time_home_score,
+        away_score=second_leg_extra_time_away_score,
+        label="Счёт дополнительного времени",
+    )
+    penalty_scores = _normalize_optional_score_pair(
+        home_score=second_leg_home_penalty_score,
+        away_score=second_leg_away_penalty_score,
+        label="Счёт серии пенальти",
+    )
+
+    aggregate_first_team_score = _team_score_from_leg(
+        team_id=first_team_id,
+        home_team_id=first_leg_home_team_id,
+        home_score=first_leg_home_score,
+        away_score=first_leg_away_score,
+    ) + _team_score_from_leg(
+        team_id=first_team_id,
+        home_team_id=second_leg_home_team_id,
+        home_score=second_leg_home_score,
+        away_score=second_leg_away_score,
+    )
+    aggregate_second_team_score = _team_score_from_leg(
+        team_id=second_team_id,
+        home_team_id=first_leg_home_team_id,
+        home_score=first_leg_home_score,
+        away_score=first_leg_away_score,
+    ) + _team_score_from_leg(
+        team_id=second_team_id,
+        home_team_id=second_leg_home_team_id,
+        home_score=second_leg_home_score,
+        away_score=second_leg_away_score,
+    )
+
+    if aggregate_first_team_score != aggregate_second_team_score:
+        if extra_time_scores is not None or penalty_scores is not None:
+            raise ValueError(
+                "Дополнительное время и пенальти недоступны при неравном общем счёте."
+            )
+        resolved_advancing_team_id = (
+            first_team_id
+            if aggregate_first_team_score > aggregate_second_team_score
+            else second_team_id
+        )
+        resolution_method: TieResolutionMethod = "aggregate"
+    else:
+        if extra_time_scores is None:
+            raise ValueError(
+                "При равном общем счёте укажите счёт дополнительного времени."
+            )
+
+        extra_time_home_score, extra_time_away_score = extra_time_scores
+        extra_time_first_team_score = _team_score_from_leg(
+            team_id=first_team_id,
+            home_team_id=second_leg_home_team_id,
+            home_score=extra_time_home_score,
+            away_score=extra_time_away_score,
+        )
+        extra_time_second_team_score = _team_score_from_leg(
+            team_id=second_team_id,
+            home_team_id=second_leg_home_team_id,
+            home_score=extra_time_home_score,
+            away_score=extra_time_away_score,
+        )
+
+        if extra_time_first_team_score != extra_time_second_team_score:
+            if penalty_scores is not None:
+                raise ValueError(
+                    "Серия пенальти недоступна, если дополнительное время выявило "
+                    "победителя."
+                )
+            resolved_advancing_team_id = (
+                first_team_id
+                if extra_time_first_team_score > extra_time_second_team_score
+                else second_team_id
+            )
+            resolution_method = "extra_time"
+        else:
+            if penalty_scores is None:
+                raise ValueError(
+                    "Если дополнительное время не выявило победителя, укажите счёт "
+                    "серии пенальти."
+                )
+            penalty_home_score, penalty_away_score = penalty_scores
+            if penalty_home_score == penalty_away_score:
+                raise ValueError("Серия пенальти не может завершиться вничью.")
+            resolved_advancing_team_id = (
+                second_leg_home_team_id
+                if penalty_home_score > penalty_away_score
+                else second_leg_away_team_id
+            )
+            resolution_method = "penalties"
+
+    if advancing_team_id is not None:
+        if advancing_team_id not in expected_teams:
+            raise ValueError("Прошедшая команда должна участвовать в противостоянии.")
+        if advancing_team_id != resolved_advancing_team_id:
+            raise ValueError(
+                "Прошедшая команда не совпадает с победителем по результатам "
+                "противостояния."
+            )
+
+    return TwoLeggedTieResolution(
+        aggregate_first_team_score=aggregate_first_team_score,
+        aggregate_second_team_score=aggregate_second_team_score,
+        advancing_team_id=resolved_advancing_team_id,
+        resolution_method=resolution_method,
+    )
 
 
 def calculate_match_score_award(
@@ -262,6 +434,38 @@ def recalculate_tie_prediction_scores(
         """,
         score_rows,
     )
+
+
+def _normalize_optional_score_pair(
+    *,
+    home_score: int | None,
+    away_score: int | None,
+    label: str,
+) -> tuple[int, int] | None:
+    if home_score is None and away_score is None:
+        return None
+    if home_score is None or away_score is None:
+        raise ValueError(f"{label} нужно указать полностью.")
+    if (
+        isinstance(home_score, bool)
+        or not isinstance(home_score, int)
+        or home_score < 0
+        or isinstance(away_score, bool)
+        or not isinstance(away_score, int)
+        or away_score < 0
+    ):
+        raise ValueError(f"{label} должен состоять из неотрицательных целых чисел.")
+    return home_score, away_score
+
+
+def _team_score_from_leg(
+    *,
+    team_id: int,
+    home_team_id: int,
+    home_score: int,
+    away_score: int,
+) -> int:
+    return home_score if team_id == home_team_id else away_score
 
 
 def _match_outcome(*, home_score: int, away_score: int) -> int:

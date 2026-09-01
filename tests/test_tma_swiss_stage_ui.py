@@ -120,7 +120,7 @@ def test_tma_formats_swiss_stage_audit_result_with_team_names() -> None:
     assert 'event?.contest?.template_key === "champions_league_2026_27"' in (
         state_label_source
     )
-    assert 'return "Вылетят после лигового этапа"' in state_label_source
+    assert 'return "Вылетят после общего этапа"' in state_label_source
     assert 'return "Напрямую в 1/8"' in state_label_source
     assert 'case "swiss_stage_result_set"' in summary_source
     assert 'case "swiss_stage_result_changed"' in summary_source
@@ -213,16 +213,19 @@ def test_champions_league_uses_league_phase_copy_and_fixed_limits() -> None:
     history_source = _function_source("createLeaderboardSwissStagePredictionHistory")
 
     assert 'templateKey === "champions_league_2026_27"' in copy_source
-    assert 'stageName: "Лиговый этап"' in copy_source
-    assert 'predictionTitle: "Прогноз на лиговый этап"' in copy_source
+    assert 'stageName: "Общий этап"' in copy_source
+    assert 'stageGenitive: "общего этапа"' in copy_source
+    assert 'predictionTitle: "Прогноз на общий этап"' in copy_source
     assert 'directChoice: "Напрямую"' in copy_source
     assert 'playoffChoice: "Стыки"' in copy_source
     assert 'eliminationChoice: "Вылет"' in copy_source
     assert 'playoffProgress: "В стыки"' in copy_source
-    assert 'eliminationProgress: "Вылетят после лигового этапа"' in copy_source
+    assert 'eliminationProgress: "Вылетят после общего этапа"' in copy_source
     assert 'directResult: "Вышли напрямую в 1/8"' in copy_source
     assert 'playoffResult: "Попали в стыки"' in copy_source
-    assert 'eliminationResult: "Вылетели после лигового этапа"' in copy_source
+    assert 'eliminationResult: "Вылетели после общего этапа"' in copy_source
+    assert 'predictedElimination: "вылетит после общего этапа"' in copy_source
+    assert 'actualElimination: "вылетела после общего этапа"' in copy_source
     assert 'predictedPlayoff: "попадёт в стыки"' in copy_source
     assert 'actualPlayoff: "попала в стыки"' in copy_source
     assert 'actualUnselected: "попала в стыковой раунд"' in copy_source
@@ -257,7 +260,7 @@ def test_champions_league_uses_league_phase_copy_and_fixed_limits() -> None:
     assert "За категорию «Стыки» — 0 баллов" in copy_source
     assert "Максимум — 40 баллов" in copy_source
     assert 'contest.template_key === "champions_league_2026_27"' in (settings_source)
-    assert "Команды лигового этапа:" in settings_source
+    assert "Команды общего этапа:" in settings_source
     assert "8 напрямую в 1/8, 16 в стыки и 12 в вылет" in settings_source
     assert "getChampionsLeaguePlayoffTeams(selection, candidates)" in readonly_source
     assert "copy.playoffResult" in readonly_source
