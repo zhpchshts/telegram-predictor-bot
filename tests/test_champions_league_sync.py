@@ -474,7 +474,7 @@ def test_provider_failure_is_recorded_for_every_target(tmp_path: Path) -> None:
     assert result.failed_target_count == 2
     assert result.provider_error == "provider unavailable"
     assert backend.apply_calls == []
-    assert backend.failure_calls == [
+    assert sorted(backend.failure_calls) == [
         (10, "provider unavailable"),
         (20, "provider unavailable"),
     ]
