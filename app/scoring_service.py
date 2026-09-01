@@ -22,6 +22,33 @@ class TwoLeggedTieResolution:
     resolution_method: TieResolutionMethod
 
 
+def calculate_swiss_stage_selection_points(
+    *,
+    predicted_category: str,
+    actual_category: str | None,
+    direct_correct_points: int,
+    elimination_correct_points: int,
+    cross_category_points: int,
+) -> int:
+    """Return the points for one explicitly selected stage category.
+
+    Only the two explicitly predicted categories are scoreable. A team in the
+    implicit middle category therefore always awards zero points. The separate
+    cross-category value preserves the legacy Swiss-stage rule while allowing
+    general-stage contests to configure mismatches as zero.
+    """
+
+    if predicted_category not in {"direct", "elimination"}:
+        return 0
+    if actual_category not in {"direct", "elimination"}:
+        return 0
+    if predicted_category != actual_category:
+        return cross_category_points
+    if predicted_category == "direct":
+        return direct_correct_points
+    return elimination_correct_points
+
+
 def resolve_two_legged_tie_result(
     *,
     first_team_id: int,

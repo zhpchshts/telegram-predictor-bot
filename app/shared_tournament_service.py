@@ -26,6 +26,14 @@ from app.scoring_service import (
 CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY = "champions_league_2026_27"
 CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT = 8
 CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT = 12
+DEFAULT_SWISS_SELECTION_MODE = "exact"
+DEFAULT_SWISS_DIRECT_CORRECT_POINTS = 2
+DEFAULT_SWISS_ELIMINATION_CORRECT_POINTS = 2
+DEFAULT_SWISS_CROSS_CATEGORY_POINTS = 1
+CHAMPIONS_LEAGUE_2026_27_SWISS_SELECTION_MODE = "up_to_limits"
+CHAMPIONS_LEAGUE_2026_27_DIRECT_CORRECT_POINTS = 2
+CHAMPIONS_LEAGUE_2026_27_ELIMINATION_CORRECT_POINTS = 1
+CHAMPIONS_LEAGUE_2026_27_CROSS_CATEGORY_POINTS = 0
 SUPPORTED_TEMPLATE_KEYS = frozenset(
     {
         "world_cup_2026",
@@ -163,6 +171,11 @@ class SharedSwissStageSettings:
     deadline_at: str | None
     direct_qualifier_count: int
     elimination_qualifier_count: int
+    selection_mode: str
+    direct_correct_points: int
+    elimination_correct_points: int
+    cross_category_points: int
+    maximum_points: int
     direct_qualifier_team_ids: tuple[int, ...]
     playoff_team_ids: tuple[int, ...]
     elimination_qualifier_team_ids: tuple[int, ...]
@@ -268,21 +281,35 @@ def create_shared_tournament(
         champion_points, swiss_direct_count, swiss_elimination_count = (
             _shared_template_defaults(normalized_template_key)
         )
+        (
+            swiss_selection_mode,
+            swiss_direct_correct_points,
+            swiss_elimination_correct_points,
+            swiss_cross_category_points,
+        ) = _shared_swiss_scoring_defaults(normalized_template_key)
         connection.execute(
             """
             INSERT INTO shared_tournament_settings (
                 shared_tournament_id,
                 champion_prediction_points,
                 swiss_direct_qualifier_count,
-                swiss_elimination_qualifier_count
+                swiss_elimination_qualifier_count,
+                swiss_selection_mode,
+                swiss_direct_correct_points,
+                swiss_elimination_correct_points,
+                swiss_cross_category_points
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 tournament_id,
                 champion_points,
                 swiss_direct_count,
                 swiss_elimination_count,
+                swiss_selection_mode,
+                swiss_direct_correct_points,
+                swiss_elimination_correct_points,
+                swiss_cross_category_points,
             ),
         )
         _record_event(
@@ -1961,9 +1988,8 @@ def save_shared_swiss_settings(
         tournament_row = _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
         )
-        stage_name, stage_genitive = _shared_stage_terms(
-            str(tournament_row["template_key"])
-        )
+        template_key = str(tournament_row["template_key"])
+        stage_name, stage_genitive = _shared_stage_terms(template_key)
         normalized_deadline = _normalize_optional_deadline(
             deadline_at,
             enabled=enabled,
@@ -1980,6 +2006,10 @@ def save_shared_swiss_settings(
         settings = _get_shared_settings_row(
             connection, shared_tournament_id=shared_tournament_id
         )
+        selection_mode = str(settings["swiss_selection_mode"])
+        direct_correct_points = int(settings["swiss_direct_correct_points"])
+        elimination_correct_points = int(settings["swiss_elimination_correct_points"])
+        cross_category_points = int(settings["swiss_cross_category_points"])
         team_count = _shared_team_count(
             connection, shared_tournament_id=shared_tournament_id
         )
@@ -2046,6 +2076,10 @@ def save_shared_swiss_settings(
                 swiss_stage_prediction_deadline_at = ?,
                 swiss_direct_qualifier_count = ?,
                 swiss_elimination_qualifier_count = ?,
+                swiss_selection_mode = ?,
+                swiss_direct_correct_points = ?,
+                swiss_elimination_correct_points = ?,
+                swiss_cross_category_points = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE shared_tournament_id = ?
             """,
@@ -2054,6 +2088,10 @@ def save_shared_swiss_settings(
                 normalized_deadline,
                 direct_count,
                 elimination_count,
+                selection_mode,
+                direct_correct_points,
+                elimination_correct_points,
+                cross_category_points,
                 shared_tournament_id,
             ),
         )
@@ -2072,13 +2110,19 @@ def save_shared_swiss_settings(
                 """
                 INSERT INTO swiss_stage_prediction_settings (
                     contest_id, enabled, deadline_at,
-                    direct_qualifier_count, elimination_qualifier_count
-                ) VALUES (?, ?, ?, ?, ?)
+                    direct_qualifier_count, elimination_qualifier_count,
+                    selection_mode, direct_correct_points,
+                    elimination_correct_points, cross_category_points
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(contest_id) DO UPDATE SET
                     enabled = excluded.enabled,
                     deadline_at = excluded.deadline_at,
                     direct_qualifier_count = excluded.direct_qualifier_count,
                     elimination_qualifier_count = excluded.elimination_qualifier_count,
+                    selection_mode = excluded.selection_mode,
+                    direct_correct_points = excluded.direct_correct_points,
+                    elimination_correct_points = excluded.elimination_correct_points,
+                    cross_category_points = excluded.cross_category_points,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
@@ -2087,6 +2131,10 @@ def save_shared_swiss_settings(
                     normalized_deadline,
                     direct_count,
                     elimination_count,
+                    selection_mode,
+                    direct_correct_points,
+                    elimination_correct_points,
+                    cross_category_points,
                 ),
             )
             event_id = _write_contest_sync_event(
@@ -2100,6 +2148,10 @@ def save_shared_swiss_settings(
                     "deadline_at": normalized_deadline,
                     "direct_qualifier_count": direct_count,
                     "elimination_qualifier_count": elimination_count,
+                    "selection_mode": selection_mode,
+                    "direct_correct_points": direct_correct_points,
+                    "elimination_correct_points": elimination_correct_points,
+                    "cross_category_points": cross_category_points,
                 },
             )
             if bool(contest_row["match_prediction_publication_enabled"]):
@@ -2617,8 +2669,10 @@ def attach_shared_tournament(
         """
         INSERT INTO swiss_stage_prediction_settings (
             contest_id, enabled, deadline_at,
-            direct_qualifier_count, elimination_qualifier_count
-        ) VALUES (?, ?, ?, ?, ?)
+            direct_qualifier_count, elimination_qualifier_count,
+            selection_mode, direct_correct_points,
+            elimination_correct_points, cross_category_points
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             contest_id,
@@ -2626,6 +2680,10 @@ def attach_shared_tournament(
             settings["swiss_stage_prediction_deadline_at"],
             int(settings["swiss_direct_qualifier_count"]),
             int(settings["swiss_elimination_qualifier_count"]),
+            str(settings["swiss_selection_mode"]),
+            int(settings["swiss_direct_correct_points"]),
+            int(settings["swiss_elimination_correct_points"]),
+            int(settings["swiss_cross_category_points"]),
         ),
     )
     direct_ids, elimination_ids = _get_shared_swiss_result_ids(
@@ -3281,6 +3339,18 @@ def _get_shared_tournament_details(
             elimination_qualifier_count=int(
                 settings["swiss_elimination_qualifier_count"]
             ),
+            selection_mode=str(settings["swiss_selection_mode"]),
+            direct_correct_points=int(settings["swiss_direct_correct_points"]),
+            elimination_correct_points=int(
+                settings["swiss_elimination_correct_points"]
+            ),
+            cross_category_points=int(settings["swiss_cross_category_points"]),
+            maximum_points=(
+                int(settings["swiss_direct_qualifier_count"])
+                * int(settings["swiss_direct_correct_points"])
+                + int(settings["swiss_elimination_qualifier_count"])
+                * int(settings["swiss_elimination_correct_points"])
+            ),
             direct_qualifier_team_ids=direct_ids,
             playoff_team_ids=playoff_ids,
             elimination_qualifier_team_ids=elimination_ids,
@@ -3891,20 +3961,34 @@ def _get_shared_settings_row(
     champion_points, swiss_direct_count, swiss_elimination_count = (
         _shared_template_defaults(str(tournament["template_key"]))
     )
+    (
+        swiss_selection_mode,
+        swiss_direct_correct_points,
+        swiss_elimination_correct_points,
+        swiss_cross_category_points,
+    ) = _shared_swiss_scoring_defaults(str(tournament["template_key"]))
     connection.execute(
         """
         INSERT INTO shared_tournament_settings (
             shared_tournament_id,
             champion_prediction_points,
             swiss_direct_qualifier_count,
-            swiss_elimination_qualifier_count
-        ) VALUES (?, ?, ?, ?)
+            swiss_elimination_qualifier_count,
+            swiss_selection_mode,
+            swiss_direct_correct_points,
+            swiss_elimination_correct_points,
+            swiss_cross_category_points
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             shared_tournament_id,
             champion_points,
             swiss_direct_count,
             swiss_elimination_count,
+            swiss_selection_mode,
+            swiss_direct_correct_points,
+            swiss_elimination_correct_points,
+            swiss_cross_category_points,
         ),
     )
     row = connection.execute(
@@ -3928,6 +4012,12 @@ def _shared_settings_snapshot(row: sqlite3.Row) -> dict[str, object]:
         "swiss_elimination_qualifier_count": int(
             row["swiss_elimination_qualifier_count"]
         ),
+        "swiss_selection_mode": str(row["swiss_selection_mode"]),
+        "swiss_direct_correct_points": int(row["swiss_direct_correct_points"]),
+        "swiss_elimination_correct_points": int(
+            row["swiss_elimination_correct_points"]
+        ),
+        "swiss_cross_category_points": int(row["swiss_cross_category_points"]),
     }
 
 
@@ -4318,6 +4408,22 @@ def _shared_template_defaults(template_key: str) -> tuple[int, int, int]:
             CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT,
         )
     return champion_points, 3, 5
+
+
+def _shared_swiss_scoring_defaults(template_key: str) -> tuple[str, int, int, int]:
+    if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
+        return (
+            CHAMPIONS_LEAGUE_2026_27_SWISS_SELECTION_MODE,
+            CHAMPIONS_LEAGUE_2026_27_DIRECT_CORRECT_POINTS,
+            CHAMPIONS_LEAGUE_2026_27_ELIMINATION_CORRECT_POINTS,
+            CHAMPIONS_LEAGUE_2026_27_CROSS_CATEGORY_POINTS,
+        )
+    return (
+        DEFAULT_SWISS_SELECTION_MODE,
+        DEFAULT_SWISS_DIRECT_CORRECT_POINTS,
+        DEFAULT_SWISS_ELIMINATION_CORRECT_POINTS,
+        DEFAULT_SWISS_CROSS_CATEGORY_POINTS,
+    )
 
 
 def _shared_stage_terms(template_key: str) -> tuple[str, str]:

@@ -226,7 +226,7 @@ async function waitForMatchPredictionSaves(contestId) {
 
 function syncVisiblePredictionDeadlines() {
   for (const form of appContentElement.querySelectorAll(
-    ".match-prediction-form[data-prediction-deadline]",
+    "form[data-prediction-deadline]",
   )) {
     form.dispatchEvent(new Event(PREDICTION_DEADLINE_SYNC_EVENT));
   }
@@ -819,7 +819,7 @@ function createContestFormCard(bootstrap, state) {
     } else if (isWorldCup) {
       hint.textContent = "3 очка за точный счёт, 2 — за разницу голов, 1 — за исход.";
     } else if (isChampionsLeague) {
-      hint.textContent = "Общий этап без матчей: распределите все 36 команд — 8 напрямую в 1/8, 16 в стыки и 12 в вылет. Баллы начисляются только за точно угаданные категории «Напрямую» и «Вылет».";
+      hint.textContent = "Общий этап без матчей: выберите 8 команд напрямую в 1/8 и 12 команд на вылет. Остальные неявно относятся к стыкам. За прямой выход начисляется 2 балла, за вылет — 1; максимум — 28 баллов.";
     } else {
       hint.textContent = "Параметры матчей и начисления зависят от выбранного шаблона.";
     }
@@ -920,7 +920,7 @@ function createContestConfirmationCard(bootstrap, state) {
   } else if (state.draftTemplateKey === "world_cup_2026") {
     details.textContent = "Будет создан конкурс Чемпионата мира 2026 со стандартными футбольными правилами.";
   } else if (state.draftTemplateKey === "champions_league_2026_27") {
-    details.textContent = "Будет создан конкурс Лиги чемпионов 2026/27 без матчей общего этапа: один прогноз с распределением всех 36 команд — 8 напрямую в 1/8, 16 в стыки и 12 в вылет. Баллы начисляются только за категории «Напрямую» и «Вылет».";
+    details.textContent = "Будет создан конкурс Лиги чемпионов 2026/27 без матчей общего этапа: один прогноз с выбором 8 команд напрямую в 1/8 и 12 команд на вылет. Остальные команды неявно относятся к стыкам. Максимум — 28 баллов.";
   } else {
     details.textContent = `Будет создан конкурс по шаблону «${selectedTemplate.label}».`;
   }
@@ -1896,7 +1896,6 @@ function getLeaderboardChampionPredictionPoints(championPrediction) {
 
 function createLeaderboardSwissStagePredictionHistory(prediction, templateKey) {
   const copy = getSwissStageCopy(templateKey);
-  const isChampionsLeague = templateKey === "champions_league_2026_27";
   const item = createElement("li", {
     className: "leaderboard-history-match",
   });
@@ -1922,32 +1921,38 @@ function createLeaderboardSwissStagePredictionHistory(prediction, templateKey) {
         ?.map((team) => team.name)
         .join(", ") || "—",
     ),
-  ];
-  if (isChampionsLeague) {
-    predictionRows.push(
-      createLeaderboardHistoryRow(
-        copy.playoffChoice,
-        getChampionsLeaguePlayoffTeams(
-          prediction?.prediction,
-          prediction?.candidates,
-        ).map((team) => team.name).join(", ") || "—",
-      ),
-    );
-  }
-  predictionRows.push(
     createLeaderboardHistoryRow(
       copy.eliminationChoice,
       prediction?.prediction?.elimination_teams
         ?.map((team) => team.name)
         .join(", ") || "—",
     ),
-  );
+  ];
+  if (prediction?.prediction?.is_complete === false) {
+    predictionRows.push(
+      createLeaderboardHistoryRow("Статус", "Черновик не заполнен полностью"),
+    );
+  }
   item.append(header, ...predictionRows);
   if (!prediction?.actual_result) {
     item.append(
       createLeaderboardHistoryRow("Баллы", "Ожидает результата"),
     );
-  } else if (Array.isArray(prediction.awards) && prediction.awards.length > 0) {
+  } else {
+    const scoreSummary = createSwissStageScoreSummary(
+      prediction.score_breakdown,
+      prediction,
+      templateKey,
+    );
+    if (scoreSummary) {
+      item.append(scoreSummary);
+    }
+  }
+  if (
+    prediction?.actual_result &&
+    Array.isArray(prediction.awards) &&
+    prediction.awards.length > 0
+  ) {
     item.append(createSwissStageAwardsBreakdown(prediction.awards, templateKey));
   }
   return item;
@@ -1982,6 +1987,10 @@ function createContestRulesCard(
   const isSeriesContest = templateKey === "the_international_2026";
   const isChampionsLeague = templateKey === "champions_league_2026_27";
   const swissStageCopy = getSwissStageCopy(templateKey);
+  const swissStageScoringRule = getSwissStageScoringRule(
+    swissStagePrediction,
+    templateKey,
+  );
   const isSwissStagePredictionEnabled =
     swissStagePrediction?.is_enabled === true;
   const hasTwoLeggedTies = Array.isArray(twoLeggedTies)
@@ -2008,7 +2017,7 @@ function createContestRulesCard(
       ? `${footballOverview} · +${championPoints} — чемпион`
       : footballOverview;
     overviewText = isChampionsLeague && isSwissStagePredictionEnabled
-      ? `${swissStageCopy.stageName} 2/0 · ${footballAndChampionOverview}`
+      ? `${swissStageCopy.stageName} 2/1 · ${footballAndChampionOverview}`
       : footballAndChampionOverview;
   }
   const overview = createElement("span", {
@@ -2027,7 +2036,7 @@ function createContestRulesCard(
     if (isSwissStagePredictionEnabled) {
       body.append(
         createElement("p", {
-          text: `${swissStageCopy.stageName}: ${swissStageCopy.scoringRule}`,
+          text: `${swissStageCopy.stageName}: ${swissStageScoringRule}`,
         }),
       );
     }
@@ -2072,7 +2081,7 @@ function createContestRulesCard(
     if (isSwissStagePredictionEnabled) {
       body.append(
         createElement("p", {
-          text: `${swissStageCopy.stageName}: ${swissStageCopy.scoringRule}`,
+          text: `${swissStageCopy.stageName}: ${swissStageScoringRule}`,
         }),
       );
     }
@@ -4025,7 +4034,7 @@ function getSwissStageCopy(templateKey) {
       predictedElimination: "вылетит после общего этапа",
       actualElimination: "вылетела после общего этапа",
       actualUnselected: "попала в стыковой раунд",
-      scoringRule: "2 балла за точную категорию «Напрямую» или «Вылет». За категорию «Стыки» — 0 баллов. Максимум — 40 баллов.",
+      scoringRule: "2 балла за команду, вышедшую напрямую в 1/8, и 1 балл за вылетевшую команду. За стыки баллы не начисляются. Максимум — 28 баллов.",
     };
   }
   return {
@@ -4047,6 +4056,53 @@ function getSwissStageCopy(templateKey) {
   };
 }
 
+function getSwissStageScoringRule(prediction, templateKey = "") {
+  const copy = getSwissStageCopy(templateKey);
+  const directPoints = Number.isSafeInteger(prediction?.direct_correct_points)
+    ? prediction.direct_correct_points
+    : null;
+  const eliminationPoints = Number.isSafeInteger(
+    prediction?.elimination_correct_points,
+  )
+    ? prediction.elimination_correct_points
+    : null;
+  const crossCategoryPoints = Number.isSafeInteger(
+    prediction?.cross_category_points,
+  )
+    ? prediction.cross_category_points
+    : null;
+  const maximumPoints = Number.isSafeInteger(prediction?.maximum_points)
+    ? prediction.maximum_points
+    : null;
+  if (
+    prediction?.selection_mode === "up_to_limits" &&
+    directPoints !== null &&
+    eliminationPoints !== null
+  ) {
+    const maximumCopy = maximumPoints === null
+      ? ""
+      : ` Максимум — ${maximumPoints} ${getPointsLabel(maximumPoints)}.`;
+    return (
+      `${directPoints} ${getPointsLabel(directPoints)} за команду, ` +
+      `вышедшую напрямую, и ${eliminationPoints} ` +
+      `${getPointsLabel(eliminationPoints)} за вылетевшую команду. ` +
+      `За стыки и ошибки — 0 баллов.${maximumCopy}`
+    );
+  }
+  if (
+    directPoints !== null &&
+    eliminationPoints !== null &&
+    crossCategoryPoints !== null
+  ) {
+    return (
+      `${directPoints} ${getPointsLabel(directPoints)} за точную категорию, ` +
+      `${crossCategoryPoints} ${getPointsLabel(crossCategoryPoints)} — ` +
+      "если способ прохода перепутан."
+    );
+  }
+  return copy.scoringRule;
+}
+
 function getSwissStagePrediction(contest) {
   const prediction = contest?.swiss_stage_prediction;
 
@@ -4056,6 +4112,11 @@ function getSwissStagePrediction(contest) {
       deadline_at: null,
       direct_qualifier_count: 3,
       elimination_qualifier_count: 5,
+      selection_mode: "exact",
+      direct_correct_points: 2,
+      elimination_correct_points: 2,
+      cross_category_points: 1,
+      maximum_points: null,
       candidates: [],
       prediction: null,
       actual_result: null,
@@ -4063,6 +4124,7 @@ function getSwissStagePrediction(contest) {
       settings_locked: false,
       awarded_points: null,
       awards: [],
+      score_breakdown: null,
     };
   }
 
@@ -4081,6 +4143,27 @@ function getSwissStagePrediction(contest) {
     )
       ? prediction.elimination_qualifier_count
       : 5,
+    selection_mode: prediction.selection_mode === "up_to_limits"
+      ? "up_to_limits"
+      : "exact",
+    direct_correct_points: Number.isSafeInteger(
+      prediction.direct_correct_points,
+    )
+      ? prediction.direct_correct_points
+      : 2,
+    elimination_correct_points: Number.isSafeInteger(
+      prediction.elimination_correct_points,
+    )
+      ? prediction.elimination_correct_points
+      : 2,
+    cross_category_points: Number.isSafeInteger(
+      prediction.cross_category_points,
+    )
+      ? prediction.cross_category_points
+      : 1,
+    maximum_points: Number.isSafeInteger(prediction.maximum_points)
+      ? prediction.maximum_points
+      : null,
     candidates: Array.isArray(prediction.candidates)
       ? prediction.candidates
       : [],
@@ -4092,6 +4175,7 @@ function getSwissStagePrediction(contest) {
       ? prediction.awarded_points
       : null,
     awards: Array.isArray(prediction.awards) ? prediction.awards : [],
+    score_breakdown: prediction.score_breakdown || null,
   };
 }
 
@@ -4101,24 +4185,6 @@ function getSwissStageSelectionIds(selection, key) {
     teams
       .map((team) => team?.id)
       .filter((teamId) => Number.isSafeInteger(teamId) && teamId > 0),
-  );
-}
-
-function getChampionsLeaguePlayoffTeams(selection, candidates = []) {
-  if (Array.isArray(selection?.playoff_teams)) {
-    return selection.playoff_teams;
-  }
-  const directIds = getSwissStageSelectionIds(selection, "direct_teams");
-  const eliminationIds = getSwissStageSelectionIds(
-    selection,
-    "elimination_teams",
-  );
-  if (directIds.size === 0 && eliminationIds.size === 0) {
-    return [];
-  }
-  const candidateTeams = Array.isArray(candidates) ? candidates : [];
-  return candidateTeams.filter(
-    (team) => !directIds.has(team.id) && !eliminationIds.has(team.id),
   );
 }
 
@@ -4144,7 +4210,9 @@ function createSwissStageStatus(prediction) {
 
 function createSwissStageMeta(prediction, templateKey) {
   const copy = getSwissStageCopy(templateKey);
-  const isChampionsLeague = templateKey === "champions_league_2026_27";
+  const usesImplicitMiddleCategory = (
+    prediction.selection_mode === "up_to_limits"
+  );
   const meta = createElement("div", {
     className: "champion-card-meta",
   });
@@ -4152,16 +4220,21 @@ function createSwissStageMeta(prediction, templateKey) {
     createElement("p", {
       className: "match-meta",
       text: prediction.deadline_at
-        ? `Прогноз закрывается: ${formatMatchStartsAt(prediction.deadline_at)}`
+        ? usesImplicitMiddleCategory
+          ? (
+            "Прогноз закрывается с началом первого матча общего этапа: " +
+            formatMatchStartsAt(prediction.deadline_at)
+          )
+          : `Прогноз закрывается: ${formatMatchStartsAt(prediction.deadline_at)}`
         : "Время закрытия прогноза не задано.",
     }),
     createElement("p", {
       className: "match-meta",
-      text: isChampionsLeague
+      text: usesImplicitMiddleCategory
         ? (
           `${copy.directProgress}: ${prediction.direct_qualifier_count}; ` +
-          `${copy.playoffProgress}: 16; ${copy.eliminationProgress}: ` +
-          `${prediction.elimination_qualifier_count}.`
+          `${copy.eliminationProgress}: ${prediction.elimination_qualifier_count}. ` +
+          "Остальные команды неявно относятся к стыкам."
         )
         : (
           `${copy.directChoice}: ${prediction.direct_qualifier_count}; ` +
@@ -4188,12 +4261,10 @@ function createSwissStageTeamSelector(
   },
 ) {
   const copy = getSwissStageCopy(templateKey);
-  const isChampionsLeague = templateKey === "champions_league_2026_27";
-  const playoffCount = isChampionsLeague ? 16 : 0;
+  const allowPartial = (
+    !resultMode && prediction.selection_mode === "up_to_limits"
+  );
   const directActionLabel = resultMode ? copy.directResult : copy.directChoice;
-  const playoffActionLabel = resultMode
-    ? copy.playoffResult
-    : copy.playoffChoice;
   const eliminationActionLabel = resultMode
     ? copy.eliminationResult
     : copy.eliminationChoice;
@@ -4203,9 +4274,6 @@ function createSwissStageTeamSelector(
   const eliminationProgressLabel = resultMode
     ? copy.eliminationResult
     : copy.eliminationProgress;
-  const playoffProgressLabel = resultMode
-    ? copy.playoffResult
-    : copy.playoffProgress;
   const form = createElement("form", {
     className: "swiss-stage-selection-form",
   });
@@ -4213,7 +4281,6 @@ function createSwissStageTeamSelector(
     className: "swiss-stage-progress",
   });
   const directProgress = createElement("strong");
-  const playoffProgress = createElement("strong");
   const eliminationProgress = createElement("strong");
   const list = createElement("ul", {
     className: "swiss-stage-team-list",
@@ -4237,43 +4304,69 @@ function createSwissStageTeamSelector(
     initialSelection,
     "elimination_teams",
   );
-  const playoffIds = new Set(
-    getChampionsLeaguePlayoffTeams(
-      initialSelection,
-      prediction.candidates,
-    ).map((team) => team.id),
-  );
-  if (isChampionsLeague) {
-    for (const team of prediction.candidates) {
-      if (!directIds.has(team.id) && !eliminationIds.has(team.id)) {
-        playoffIds.add(team.id);
-      }
+  let deadlineTimer = null;
+
+  function isPredictionDeadlineReached() {
+    if (resultMode) {
+      return false;
     }
+    if (!prediction.is_open) {
+      return true;
+    }
+    const deadline = new Date(prediction.deadline_at).getTime();
+    return Number.isFinite(deadline) && deadline <= Date.now();
+  }
+
+  function syncPredictionDeadline() {
+    if (!isPredictionDeadlineReached()) {
+      return false;
+    }
+    prediction.is_open = false;
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    }
+    form.setAttribute("aria-disabled", "true");
+    sync();
+    setFormMessage(message, "Приём прогнозов завершён.");
+    return true;
+  }
+
+  function schedulePredictionDeadlineSync() {
+    if (resultMode) {
+      return;
+    }
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    }
+    const deadline = new Date(prediction.deadline_at).getTime();
+    const remaining = deadline - Date.now();
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      syncPredictionDeadline();
+      return;
+    }
+    deadlineTimer = window.setTimeout(() => {
+      deadlineTimer = null;
+      if (!form.isConnected || syncPredictionDeadline()) {
+        return;
+      }
+      schedulePredictionDeadlineSync();
+    }, Math.min(remaining, MAX_TIMER_DELAY_MS));
   }
 
   function removeFromEveryCategory(teamId) {
     directIds.delete(teamId);
-    playoffIds.delete(teamId);
     eliminationIds.delete(teamId);
   }
 
   function setCategory(teamId, category) {
     const categoryIds = category === "direct"
       ? directIds
-      : category === "playoff"
-        ? playoffIds
-        : eliminationIds;
-    if (isChampionsLeague) {
-      removeFromEveryCategory(teamId);
-      categoryIds.add(teamId);
-      sync();
-      return;
-    }
+      : eliminationIds;
     const categoryLimit = category === "direct"
       ? prediction.direct_qualifier_count
-      : category === "playoff"
-        ? playoffCount
-        : prediction.elimination_qualifier_count;
+      : prediction.elimination_qualifier_count;
     if (categoryIds.has(teamId)) {
       categoryIds.delete(teamId);
     } else if (categoryIds.size < categoryLimit) {
@@ -4284,21 +4377,22 @@ function createSwissStageTeamSelector(
   }
 
   function sync() {
+    const isClosed = isPredictionDeadlineReached();
     directProgress.textContent = (
       `${directProgressLabel}: ${directIds.size} из ` +
       `${prediction.direct_qualifier_count}`
-    );
-    playoffProgress.textContent = (
-      `${playoffProgressLabel}: ${playoffIds.size} из ${playoffCount}`
     );
     eliminationProgress.textContent = (
       `${eliminationProgressLabel}: ${eliminationIds.size} из ` +
       `${prediction.elimination_qualifier_count}`
     );
     submitButton.disabled = (
-      directIds.size !== prediction.direct_qualifier_count ||
-      eliminationIds.size !== prediction.elimination_qualifier_count ||
-      (isChampionsLeague && playoffIds.size !== playoffCount)
+      isClosed || (
+        !allowPartial && (
+          directIds.size !== prediction.direct_qualifier_count ||
+          eliminationIds.size !== prediction.elimination_qualifier_count
+        )
+      )
     );
     for (const row of list.children) {
       const teamId = Number(row.dataset.teamId);
@@ -4306,9 +4400,7 @@ function createSwissStageTeamSelector(
       const eliminationButton = row.querySelector(
         "[data-category='elimination']",
       );
-      const playoffButton = row.querySelector("[data-category='playoff']");
       directButton.classList.toggle("is-selected", directIds.has(teamId));
-      playoffButton?.classList.toggle("is-selected", playoffIds.has(teamId));
       eliminationButton.classList.toggle(
         "is-selected",
         eliminationIds.has(teamId),
@@ -4317,13 +4409,21 @@ function createSwissStageTeamSelector(
         "aria-pressed",
         directIds.has(teamId) ? "true" : "false",
       );
-      playoffButton?.setAttribute(
-        "aria-pressed",
-        playoffIds.has(teamId) ? "true" : "false",
-      );
       eliminationButton.setAttribute(
         "aria-pressed",
         eliminationIds.has(teamId) ? "true" : "false",
+      );
+      directButton.disabled = (
+        isClosed || (
+          !directIds.has(teamId) &&
+          directIds.size >= prediction.direct_qualifier_count
+        )
+      );
+      eliminationButton.disabled = (
+        isClosed || (
+          !eliminationIds.has(teamId) &&
+          eliminationIds.size >= prediction.elimination_qualifier_count
+        )
       );
     }
   }
@@ -4340,17 +4440,10 @@ function createSwissStageTeamSelector(
     const choices = createElement("div", {
       className: "swiss-stage-team-actions",
     });
-    choices.classList.toggle(
-      "swiss-stage-team-actions--three",
-      isChampionsLeague,
-    );
     const directButton = createActionButton(
       directActionLabel,
       "swiss-stage-choice",
     );
-    const playoffButton = isChampionsLeague
-      ? createActionButton(playoffActionLabel, "swiss-stage-choice")
-      : null;
     const eliminationButton = createActionButton(
       eliminationActionLabel,
       "swiss-stage-choice",
@@ -4359,31 +4452,20 @@ function createSwissStageTeamSelector(
     eliminationButton.type = "button";
     directButton.dataset.category = "direct";
     eliminationButton.dataset.category = "elimination";
-    if (playoffButton) {
-      playoffButton.type = "button";
-      playoffButton.dataset.category = "playoff";
-    }
     directButton.addEventListener("click", () => {
       setCategory(team.id, "direct");
-    });
-    playoffButton?.addEventListener("click", () => {
-      setCategory(team.id, "playoff");
     });
     eliminationButton.addEventListener("click", () => {
       setCategory(team.id, "elimination");
     });
-    choices.append(
-      directButton,
-      ...(playoffButton ? [playoffButton] : []),
-      eliminationButton,
-    );
+    choices.append(directButton, eliminationButton);
     row.append(name, choices);
     list.append(row);
   }
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (submitButton.disabled) {
+    if (syncPredictionDeadline() || submitButton.disabled) {
       return;
     }
     if (
@@ -4408,13 +4490,27 @@ function createSwissStageTeamSelector(
       if (!result?.swiss_stage_prediction) {
         throw new Error("Сервер вернул некорректный ответ.");
       }
+      prediction.is_open = result.swiss_stage_prediction.is_open === true;
       onSaved(result.swiss_stage_prediction);
       if (successMessage) {
-        setFormMessage(message, successMessage, "success");
+        const isComplete = (
+          directIds.size === prediction.direct_qualifier_count &&
+          eliminationIds.size === prediction.elimination_qualifier_count
+        );
+        setFormMessage(
+          message,
+          allowPartial && !isComplete ? "Черновик сохранён." : successMessage,
+          "success",
+        );
         submitButton.textContent = savedSubmitLabel;
         sync();
       }
     } catch (error) {
+      if (!resultMode && error?.status === 409) {
+        prediction.is_open = false;
+        syncPredictionDeadline();
+        return;
+      }
       if (handleManagementRequestError(error)) {
         return;
       }
@@ -4430,14 +4526,21 @@ function createSwissStageTeamSelector(
     }
   });
 
-  progress.append(
-    directProgress,
-    ...(isChampionsLeague ? [playoffProgress] : []),
-    eliminationProgress,
-  );
+  progress.append(directProgress, eliminationProgress);
   actions.append(submitButton);
   form.append(progress, list, message, actions);
+  if (!resultMode && prediction.deadline_at) {
+    form.dataset.predictionDeadline = prediction.deadline_at;
+  }
+  form.addEventListener(PREDICTION_DEADLINE_SYNC_EVENT, () => {
+    if (!syncPredictionDeadline()) {
+      schedulePredictionDeadlineSync();
+    }
+  });
   sync();
+  if (!resultMode && !syncPredictionDeadline()) {
+    schedulePredictionDeadlineSync();
+  }
   return form;
 }
 
@@ -4445,10 +4548,8 @@ function createSwissStageReadonlySelection(
   title,
   selection,
   templateKey,
-  candidates = [],
 ) {
   const copy = getSwissStageCopy(templateKey);
-  const isChampionsLeague = templateKey === "champions_league_2026_27";
   const section = createElement("div", {
     className: "swiss-stage-readonly",
   });
@@ -4460,20 +4561,6 @@ function createSwissStageReadonlySelection(
       ),
     }),
   ];
-  if (isChampionsLeague) {
-    selectionRows.push(
-      createElement("p", {
-        text: (
-          `${copy.playoffResult}: ` +
-          (
-            getChampionsLeaguePlayoffTeams(selection, candidates)
-              .map((team) => team.name)
-              .join(", ") || "—"
-          )
-        ),
-      }),
-    );
-  }
   selectionRows.push(
     createElement("p", {
       text: (
@@ -4486,6 +4573,11 @@ function createSwissStageReadonlySelection(
       ),
     }),
   );
+  if (selection?.is_complete === false) {
+    selectionRows.push(
+      createElement("p", { text: "Черновик не заполнен полностью." }),
+    );
+  }
   section.append(createElement("strong", { text: title }), ...selectionRows);
   return section;
 }
@@ -4515,6 +4607,65 @@ function formatSwissStageAwardPoints(points) {
     return "—";
   }
   return points > 0 ? `+${points}` : "0";
+}
+
+function createSwissStageScoreSummary(
+  scoreBreakdown,
+  prediction,
+  templateKey = "",
+) {
+  if (!scoreBreakdown || typeof scoreBreakdown !== "object") {
+    return null;
+  }
+  const correctDirectCount = scoreBreakdown.correct_direct_count;
+  const directPoints = scoreBreakdown.direct_points;
+  const correctEliminationCount = scoreBreakdown.correct_elimination_count;
+  const eliminationPoints = scoreBreakdown.elimination_points;
+  const totalPoints = scoreBreakdown.total_points;
+  if (
+    !Number.isSafeInteger(correctDirectCount) ||
+    !Number.isSafeInteger(directPoints) ||
+    !Number.isSafeInteger(correctEliminationCount) ||
+    !Number.isSafeInteger(eliminationPoints) ||
+    !Number.isSafeInteger(totalPoints)
+  ) {
+    return null;
+  }
+  const copy = getSwissStageCopy(templateKey);
+  const directQualifierCount = Number.isSafeInteger(
+    prediction?.direct_qualifier_count,
+  )
+    ? prediction.direct_qualifier_count
+    : Array.isArray(prediction?.actual_result?.direct_teams)
+      ? prediction.actual_result.direct_teams.length
+      : 0;
+  const eliminationQualifierCount = Number.isSafeInteger(
+    prediction?.elimination_qualifier_count,
+  )
+    ? prediction.elimination_qualifier_count
+    : Array.isArray(prediction?.actual_result?.elimination_teams)
+      ? prediction.actual_result.elimination_teams.length
+      : 0;
+  const section = createElement("div", {
+    className: "swiss-stage-readonly",
+  });
+  section.append(
+    createElement("strong", { text: "Итог за этап" }),
+    createElement("p", {
+      text: (
+        `${copy.directProgress}: ${correctDirectCount}/` +
+        `${directQualifierCount} — ${directPoints}`
+      ),
+    }),
+    createElement("p", {
+      text: (
+        `${copy.eliminationChoice}: ${correctEliminationCount}/` +
+        `${eliminationQualifierCount} — ${eliminationPoints}`
+      ),
+    }),
+    createElement("p", { text: `Итого: ${totalPoints}` }),
+  );
+  return section;
 }
 
 function createSwissStageAwardsBreakdown(awards, templateKey = "") {
@@ -4629,6 +4780,16 @@ function createSwissStagePredictionCard(contest) {
           }.`,
         }),
       );
+    }
+    if (prediction.actual_result) {
+      const scoreSummary = createSwissStageScoreSummary(
+        prediction.score_breakdown,
+        prediction,
+        contest.template_key,
+      );
+      if (scoreSummary) {
+        item.append(scoreSummary);
+      }
     }
     if (
       prediction.actual_result &&
@@ -5836,7 +5997,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
     text: prediction.settings_locked
       ? "До наступления текущего дедлайна его можно изменить. Остальные настройки зафиксированы."
       : hasFixedChampionsLeagueLimits
-        ? "Добавьте 36 команд, затем задайте дедлайн. Участник распределит их все: 8 напрямую в 1/8, 16 в стыки и 12 в вылет. Баллы начисляются только за категории «Напрямую» и «Вылет»."
+        ? "Добавьте 36 команд и задайте начало первого матча общего этапа. Участник выбирает до 8 команд напрямую в 1/8 и до 12 на вылет; остальные неявно относятся к стыкам."
         : (
         "Укажите, до какого времени можно выбрать команды и сколько команд пройдёт " +
         "напрямую и через стыковой раунд."
@@ -5867,7 +6028,9 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   deadlineField.append(
     createElement("span", {
       className: "form-field-label",
-      text: "Прогноз закрывается",
+      text: hasFixedChampionsLeagueLimits
+        ? "Начало первого матча общего этапа"
+        : "Прогноз закрывается",
     }),
     deadlineInput,
   );
@@ -8175,14 +8338,8 @@ function getAuditTeamName(event, teamId) {
 
 function formatAuditSwissStageResult(value, event) {
   const copy = getSwissStageCopy(event?.contest?.template_key);
-  const isChampionsLeague = (
-    event?.contest?.template_key === "champions_league_2026_27"
-  );
   const directTeamIds = Array.isArray(value?.direct_team_ids)
     ? value.direct_team_ids
-    : [];
-  const playoffTeamIds = Array.isArray(value?.playoff_team_ids)
-    ? value.playoff_team_ids
     : [];
   const eliminationTeamIds = Array.isArray(value?.elimination_team_ids)
     ? value.elimination_team_ids
@@ -8191,11 +8348,6 @@ function formatAuditSwissStageResult(value, event) {
     teamIds.map((teamId) => getAuditTeamName(event, teamId)).join(", ") || "—"
   );
   const resultParts = [`${copy.directResult}: ${formatTeams(directTeamIds)}`];
-  if (isChampionsLeague) {
-    resultParts.push(
-      `${copy.playoffResult}: ${formatTeams(playoffTeamIds)}`,
-    );
-  }
   resultParts.push(
     `${copy.eliminationResult}: ${formatTeams(eliminationTeamIds)}`,
   );
@@ -10327,24 +10479,7 @@ function createSharedSwissStageCard(bootstrap, tournament) {
     );
     const directTeamIds = settings.direct_qualifier_team_ids || [];
     const eliminationTeamIds = settings.elimination_qualifier_team_ids || [];
-    const playoffTeamIds = Array.isArray(settings.playoff_team_ids)
-      ? settings.playoff_team_ids
-      : hasFixedChampionsLeagueLimits && (
-        directTeamIds.length > 0 || eliminationTeamIds.length > 0
-      )
-        ? tournament.teams
-          .map((team) => team.id)
-          .filter(
-            (teamId) => (
-              !directTeamIds.includes(teamId) &&
-              !eliminationTeamIds.includes(teamId)
-            ),
-          )
-        : [];
     const directNames = directTeamIds
-      .map((teamId) => teamsById.get(teamId) || `#${teamId}`)
-      .join(", ");
-    const playoffNames = playoffTeamIds
       .map((teamId) => teamsById.get(teamId) || `#${teamId}`)
       .join(", ");
     const eliminationNames = eliminationTeamIds
@@ -10354,11 +10489,6 @@ function createSharedSwissStageCard(bootstrap, tournament) {
       `Дедлайн: ${formatMatchStartsAt(settings.deadline_at)}`,
       `${copy.directResult}: ${directNames || "не указаны"}`,
     ];
-    if (hasFixedChampionsLeagueLimits) {
-      resultLines.push(
-        `${copy.playoffResult}: ${playoffNames || "не указаны"}`,
-      );
-    }
     resultLines.push(
       `${copy.eliminationResult}: ${eliminationNames || "не указаны"}`,
     );
@@ -10390,13 +10520,18 @@ function createSharedSwissStageCard(bootstrap, tournament) {
   const saveButton = createActionButton("Сохранить общие настройки", "primary-action-button", "submit");
   form.append(
     createLabeledField("Включить прогноз", enabled),
-    createLabeledField("Дедлайн", deadline),
+    createLabeledField(
+      hasFixedChampionsLeagueLimits
+        ? "Начало первого матча общего этапа"
+        : "Дедлайн",
+      deadline,
+    ),
     createLabeledField(copy.directChoice, directCount),
     createLabeledField(copy.eliminationProgress, eliminationCount),
     ...(hasFixedChampionsLeagueLimits
       ? [createElement("p", {
         className: "form-hint",
-        text: `Добавьте ровно 36 команд. Категории зафиксированы: ${copy.directChoice} — 8, ${copy.playoffChoice} — 16, ${copy.eliminationChoice} — 12. За категорию «Стыки» баллы не начисляются.`,
+        text: `Добавьте ровно 36 команд. Участник выбирает до 8 команд в категории «${copy.directChoice}» и до 12 в категории «${copy.eliminationChoice}». Остальные неявно относятся к стыкам. Формула: +2 за прямой выход, +1 за вылет; максимум — 28 баллов.`,
       })]
       : []),
     saveButton,
@@ -10435,15 +10570,8 @@ function createSharedSwissStageCard(bootstrap, tournament) {
   if (settings.is_enabled && deadlinePassed && tournament.teams.length) {
     const resultForm = createElement("form", { className: "form-fields" });
     const direct = document.createElement("select");
-    const playoff = hasFixedChampionsLeagueLimits
-      ? document.createElement("select")
-      : null;
     const elimination = document.createElement("select");
-    const resultSelects = [
-      direct,
-      ...(playoff ? [playoff] : []),
-      elimination,
-    ];
+    const resultSelects = [direct, elimination];
     for (const select of resultSelects) {
       select.className = "text-input";
       select.multiple = true;
@@ -10457,24 +10585,7 @@ function createSharedSwissStageCard(bootstrap, tournament) {
     }
     const directIds = new Set(settings.direct_qualifier_team_ids || []);
     const eliminationIds = new Set(settings.elimination_qualifier_team_ids || []);
-    const playoffIds = new Set(
-      Array.isArray(settings.playoff_team_ids)
-        ? settings.playoff_team_ids
-        : [],
-    );
-    if (playoff && playoffIds.size === 0) {
-      for (const team of tournament.teams) {
-        if (!directIds.has(team.id) && !eliminationIds.has(team.id)) {
-          playoffIds.add(team.id);
-        }
-      }
-    }
     for (const option of direct.options) option.selected = directIds.has(Number(option.value));
-    if (playoff) {
-      for (const option of playoff.options) {
-        option.selected = playoffIds.has(Number(option.value));
-      }
-    }
     for (const option of elimination.options) option.selected = eliminationIds.has(Number(option.value));
     const resultButton = createActionButton("Сохранить итоги во всех чатах", "secondary-action-button", "submit");
     const resultProgress = createElement("p", { className: "form-hint" });
@@ -10498,29 +10609,20 @@ function createSharedSwissStageCard(bootstrap, tournament) {
           }
         }
       }
-      if (!playoff) return;
-      const assignedIds = new Set([
-        ...getSelectedTeamIds(direct),
-        ...getSelectedTeamIds(playoff),
-        ...getSelectedTeamIds(elimination),
-      ]);
-      for (const option of playoff.options) {
-        if (!assignedIds.has(Number(option.value))) {
-          option.selected = true;
-        }
-      }
       const selectedDirectCount = direct.selectedOptions.length;
-      const selectedPlayoffCount = playoff.selectedOptions.length;
       const selectedEliminationCount = elimination.selectedOptions.length;
+      const requiredDirectCount = settings.direct_qualifier_count ?? 3;
+      const requiredEliminationCount = (
+        settings.elimination_qualifier_count ?? 5
+      );
       resultProgress.textContent = (
-        `${copy.directChoice}: ${selectedDirectCount} из 8; ` +
-        `${copy.playoffChoice}: ${selectedPlayoffCount} из 16; ` +
-        `${copy.eliminationChoice}: ${selectedEliminationCount} из 12.`
+        `${copy.directChoice}: ${selectedDirectCount} из ` +
+        `${requiredDirectCount}; ${copy.eliminationChoice}: ` +
+        `${selectedEliminationCount} из ${requiredEliminationCount}.`
       );
       resultButton.disabled = (
-        selectedDirectCount !== 8 ||
-        selectedPlayoffCount !== 16 ||
-        selectedEliminationCount !== 12
+        selectedDirectCount !== requiredDirectCount ||
+        selectedEliminationCount !== requiredEliminationCount
       );
     }
     for (const select of resultSelects) {
@@ -10530,11 +10632,8 @@ function createSharedSwissStageCard(bootstrap, tournament) {
     }
     resultForm.append(
       createLabeledField(copy.directResult, direct),
-      ...(playoff
-        ? [createLabeledField(copy.playoffResult, playoff)]
-        : []),
       createLabeledField(copy.eliminationResult, elimination),
-      ...(playoff ? [resultProgress] : []),
+      resultProgress,
       resultButton,
     );
     resultForm.addEventListener("submit", async (event) => {

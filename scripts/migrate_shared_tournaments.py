@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.database import create_connection, initialize_database
+from app.database import SCHEMA, create_connection
 from app.scoring_service import (
     recalculate_match_prediction_scores,
     recalculate_tie_prediction_scores,
@@ -19,6 +19,37 @@ TOURNAMENT_NAMES = {
     "world_cup_2026": "Чемпионат мира 2026",
     "the_international_2026": "The International 2026",
     "champions_league_2026_27": "Лига чемпионов 2026/27",
+}
+CHAMPIONS_LEAGUE_TEMPLATE_KEY = "champions_league_2026_27"
+_LOCAL_SWISS_POLICY_COLUMNS = {
+    "selection_mode": (
+        "TEXT NOT NULL DEFAULT 'exact' "
+        "CHECK (selection_mode IN ('exact', 'up_to_limits'))"
+    ),
+    "direct_correct_points": (
+        "INTEGER NOT NULL DEFAULT 2 CHECK (direct_correct_points >= 0)"
+    ),
+    "elimination_correct_points": (
+        "INTEGER NOT NULL DEFAULT 2 CHECK (elimination_correct_points >= 0)"
+    ),
+    "cross_category_points": (
+        "INTEGER NOT NULL DEFAULT 1 CHECK (cross_category_points >= 0)"
+    ),
+}
+_SHARED_SWISS_POLICY_COLUMNS = {
+    "swiss_selection_mode": (
+        "TEXT NOT NULL DEFAULT 'exact' "
+        "CHECK (swiss_selection_mode IN ('exact', 'up_to_limits'))"
+    ),
+    "swiss_direct_correct_points": (
+        "INTEGER NOT NULL DEFAULT 2 CHECK (swiss_direct_correct_points >= 0)"
+    ),
+    "swiss_elimination_correct_points": (
+        "INTEGER NOT NULL DEFAULT 2 CHECK (swiss_elimination_correct_points >= 0)"
+    ),
+    "swiss_cross_category_points": (
+        "INTEGER NOT NULL DEFAULT 1 CHECK (swiss_cross_category_points >= 0)"
+    ),
 }
 
 
@@ -51,6 +82,8 @@ def analyze_database(
 ) -> MigrationPlan:
     _resolve_now(now_utc)
     with create_connection(database_path) as connection:
+        _local_swiss_policy_schema_state(connection)
+        _shared_swiss_policy_schema_state(connection)
         contest_rows = connection.execute(
             """
             SELECT id, template_key, name
@@ -160,10 +193,12 @@ def migrate_database(
     if plan.conflicts:
         raise SharedTournamentMigrationConflictError("\n".join(plan.conflicts))
 
-    initialize_database(database_path)
     resolved_now = _resolve_now(now_utc)
     with create_connection(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        _initialize_schema_in_transaction(connection)
+        _ensure_local_swiss_policy_schema(connection)
+        _ensure_shared_swiss_policy_schema(connection)
         existing_links = connection.execute(
             "SELECT COUNT(*) FROM contest_shared_tournaments"
         ).fetchone()[0]
@@ -218,8 +253,12 @@ def migrate_database(
                     swiss_stage_prediction_enabled,
                     swiss_stage_prediction_deadline_at,
                     swiss_direct_qualifier_count,
-                    swiss_elimination_qualifier_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    swiss_elimination_qualifier_count,
+                    swiss_selection_mode,
+                    swiss_direct_correct_points,
+                    swiss_elimination_correct_points,
+                    swiss_cross_category_points
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     tournament_id,
@@ -231,6 +270,10 @@ def migrate_database(
                     common_settings["swiss_stage_prediction_deadline_at"],
                     common_settings["swiss_direct_qualifier_count"],
                     common_settings["swiss_elimination_qualifier_count"],
+                    common_settings["swiss_selection_mode"],
+                    common_settings["swiss_direct_correct_points"],
+                    common_settings["swiss_elimination_correct_points"],
+                    common_settings["swiss_cross_category_points"],
                 ),
             )
             connection.executemany(
@@ -319,14 +362,21 @@ def migrate_database(
                         """
                         INSERT INTO swiss_stage_prediction_settings (
                             contest_id, enabled, deadline_at,
-                            direct_qualifier_count, elimination_qualifier_count
-                        ) VALUES (?, ?, ?, ?, ?)
+                            direct_qualifier_count, elimination_qualifier_count,
+                            selection_mode, direct_correct_points,
+                            elimination_correct_points, cross_category_points
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(contest_id) DO UPDATE SET
                             enabled = excluded.enabled,
                             deadline_at = excluded.deadline_at,
                             direct_qualifier_count = excluded.direct_qualifier_count,
                             elimination_qualifier_count =
                                 excluded.elimination_qualifier_count,
+                            selection_mode = excluded.selection_mode,
+                            direct_correct_points = excluded.direct_correct_points,
+                            elimination_correct_points =
+                                excluded.elimination_correct_points,
+                            cross_category_points = excluded.cross_category_points,
                             updated_at = CURRENT_TIMESTAMP
                         """,
                         (
@@ -335,6 +385,10 @@ def migrate_database(
                             common_settings["swiss_stage_prediction_deadline_at"],
                             common_settings["swiss_direct_qualifier_count"],
                             common_settings["swiss_elimination_qualifier_count"],
+                            common_settings["swiss_selection_mode"],
+                            common_settings["swiss_direct_correct_points"],
+                            common_settings["swiss_elimination_correct_points"],
+                            common_settings["swiss_cross_category_points"],
                         ),
                     )
                 swiss_result = common_settings["swiss_stage_result_selections"]
@@ -561,6 +615,16 @@ def _analyze_tournament_consistency(
             conflicts.append(f"{template_key}: лимиты прямого прохода различаются.")
         if len({item["swiss_elimination_qualifier_count"] for item in snapshots}) > 1:
             conflicts.append(f"{template_key}: лимиты второй категории различаются.")
+        if len({item["swiss_selection_mode"] for item in snapshots}) > 1:
+            conflicts.append(f"{template_key}: режим выбора команд различается.")
+        if len({item["swiss_direct_correct_points"] for item in snapshots}) > 1:
+            conflicts.append(f"{template_key}: баллы за прямой проход различаются.")
+        if len({item["swiss_elimination_correct_points"] for item in snapshots}) > 1:
+            conflicts.append(f"{template_key}: баллы за вылет различаются.")
+        if len({item["swiss_cross_category_points"] for item in snapshots}) > 1:
+            conflicts.append(
+                f"{template_key}: баллы за перепутанную категорию различаются."
+            )
         swiss_results = {
             item["swiss_stage_result_selections"]
             for item in snapshots
@@ -618,6 +682,10 @@ def _read_common_tournament_settings(
         ),
         "swiss_direct_qualifier_count": first["swiss_direct_qualifier_count"],
         "swiss_elimination_qualifier_count": first["swiss_elimination_qualifier_count"],
+        "swiss_selection_mode": first["swiss_selection_mode"],
+        "swiss_direct_correct_points": first["swiss_direct_correct_points"],
+        "swiss_elimination_correct_points": first["swiss_elimination_correct_points"],
+        "swiss_cross_category_points": first["swiss_cross_category_points"],
         "swiss_stage_result_selections": swiss_results[0] if swiss_results else (),
     }
 
@@ -627,7 +695,8 @@ def _read_tournament_settings(
 ) -> dict[str, object]:
     contest = connection.execute(
         """
-        SELECT champion_prediction_enabled, champion_prediction_deadline_at,
+        SELECT template_key, champion_prediction_enabled,
+               champion_prediction_deadline_at,
                champion_prediction_points, champion_team_id
         FROM contests WHERE id = ?
         """,
@@ -635,14 +704,28 @@ def _read_tournament_settings(
     ).fetchone()
     if contest is None:
         raise RuntimeError("Contest disappeared during migration analysis.")
+    policy_state = _local_swiss_policy_schema_state(connection)
+    policy_columns = (
+        ", selection_mode, direct_correct_points, "
+        "elimination_correct_points, cross_category_points"
+        if policy_state == "current"
+        else ""
+    )
     swiss = connection.execute(
         """
         SELECT enabled, deadline_at, direct_qualifier_count,
                elimination_qualifier_count
-        FROM swiss_stage_prediction_settings WHERE contest_id = ?
-        """,
+        """
+        + policy_columns
+        + " FROM swiss_stage_prediction_settings WHERE contest_id = ?",
         (contest_id,),
     ).fetchone()
+    (
+        default_selection_mode,
+        default_direct_correct_points,
+        default_elimination_correct_points,
+        default_cross_category_points,
+    ) = _legacy_swiss_policy_defaults(str(contest["template_key"]))
     result_rows = connection.execute(
         """
         SELECT team_id, category FROM swiss_stage_result_selections
@@ -664,10 +747,149 @@ def _read_tournament_settings(
         "swiss_elimination_qualifier_count": (
             int(swiss["elimination_qualifier_count"]) if swiss else 5
         ),
+        "swiss_selection_mode": (
+            str(swiss["selection_mode"])
+            if swiss is not None and policy_state == "current"
+            else default_selection_mode
+        ),
+        "swiss_direct_correct_points": (
+            int(swiss["direct_correct_points"])
+            if swiss is not None and policy_state == "current"
+            else default_direct_correct_points
+        ),
+        "swiss_elimination_correct_points": (
+            int(swiss["elimination_correct_points"])
+            if swiss is not None and policy_state == "current"
+            else default_elimination_correct_points
+        ),
+        "swiss_cross_category_points": (
+            int(swiss["cross_category_points"])
+            if swiss is not None and policy_state == "current"
+            else default_cross_category_points
+        ),
         "swiss_stage_result_selections": tuple(
             (int(row["team_id"]), str(row["category"])) for row in result_rows
         ),
     }
+
+
+def _local_swiss_policy_schema_state(connection: sqlite3.Connection) -> str:
+    existing_columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(swiss_stage_prediction_settings)"
+        ).fetchall()
+    }
+    present_columns = existing_columns.intersection(_LOCAL_SWISS_POLICY_COLUMNS)
+    if not present_columns:
+        return "legacy"
+    if present_columns == set(_LOCAL_SWISS_POLICY_COLUMNS):
+        return "current"
+    raise SharedTournamentMigrationConflictError(
+        "Partially applied general-stage policy schema; migration was not applied."
+    )
+
+
+def _shared_swiss_policy_schema_state(connection: sqlite3.Connection) -> str:
+    table_exists = connection.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'shared_tournament_settings'
+        """
+    ).fetchone()
+    if table_exists is None:
+        return "absent"
+    existing_columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(shared_tournament_settings)"
+        ).fetchall()
+    }
+    present_columns = existing_columns.intersection(_SHARED_SWISS_POLICY_COLUMNS)
+    if not present_columns:
+        return "legacy"
+    if present_columns == set(_SHARED_SWISS_POLICY_COLUMNS):
+        return "current"
+    raise SharedTournamentMigrationConflictError(
+        "Partially applied shared general-stage policy schema; "
+        "migration was not applied."
+    )
+
+
+def _initialize_schema_in_transaction(connection: sqlite3.Connection) -> None:
+    pending = ""
+    for line in SCHEMA.splitlines(keepends=True):
+        pending += line
+        if not sqlite3.complete_statement(pending):
+            continue
+        statement = pending.strip()
+        pending = ""
+        transaction_control = statement.rstrip(";").strip().upper()
+        if statement and transaction_control not in {
+            "BEGIN",
+            "BEGIN IMMEDIATE",
+            "COMMIT",
+        }:
+            connection.execute(statement)
+    if pending.strip():
+        raise RuntimeError("Application schema contains an incomplete SQL statement.")
+
+
+def _ensure_local_swiss_policy_schema(connection: sqlite3.Connection) -> None:
+    if _local_swiss_policy_schema_state(connection) == "current":
+        return
+    for column_name, definition in _LOCAL_SWISS_POLICY_COLUMNS.items():
+        connection.execute(
+            "ALTER TABLE swiss_stage_prediction_settings "
+            f'ADD COLUMN "{column_name}" {definition}'
+        )
+    connection.execute(
+        """
+        UPDATE swiss_stage_prediction_settings
+        SET selection_mode = 'up_to_limits',
+            direct_correct_points = 2,
+            elimination_correct_points = 1,
+            cross_category_points = 0
+        WHERE contest_id IN (
+            SELECT id FROM contests WHERE template_key = ?
+        )
+        """,
+        (CHAMPIONS_LEAGUE_TEMPLATE_KEY,),
+    )
+
+
+def _ensure_shared_swiss_policy_schema(connection: sqlite3.Connection) -> None:
+    state = _shared_swiss_policy_schema_state(connection)
+    if state == "current":
+        return
+    if state == "absent":
+        raise RuntimeError(
+            "Application schema did not create shared_tournament_settings."
+        )
+    for column_name, definition in _SHARED_SWISS_POLICY_COLUMNS.items():
+        connection.execute(
+            "ALTER TABLE shared_tournament_settings "
+            f'ADD COLUMN "{column_name}" {definition}'
+        )
+    connection.execute(
+        """
+        UPDATE shared_tournament_settings
+        SET swiss_selection_mode = 'up_to_limits',
+            swiss_direct_correct_points = 2,
+            swiss_elimination_correct_points = 1,
+            swiss_cross_category_points = 0
+        WHERE shared_tournament_id IN (
+            SELECT id FROM shared_tournaments WHERE template_key = ?
+        )
+        """,
+        (CHAMPIONS_LEAGUE_TEMPLATE_KEY,),
+    )
+
+
+def _legacy_swiss_policy_defaults(template_key: str) -> tuple[str, int, int, int]:
+    if template_key == CHAMPIONS_LEAGUE_TEMPLATE_KEY:
+        return "up_to_limits", 2, 1, 0
+    return "exact", 2, 2, 1
 
 
 def _read_local_match_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:

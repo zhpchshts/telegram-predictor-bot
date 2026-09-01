@@ -30,6 +30,7 @@ from app.publication_outbox import (
 from app.scoring_service import (
     TieResolutionMethod,
     TwoLeggedTieResolution,
+    calculate_swiss_stage_selection_points,
     recalculate_match_prediction_scores,
     recalculate_tie_prediction_scores,
     resolve_two_legged_tie_result,
@@ -55,6 +56,7 @@ CHAMPIONS_LEAGUE_2026_27_SEASON = "2026/27"
 CHAMPIONS_LEAGUE_2026_27_COMPETITION_TYPE = "champions_league"
 CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT = 8
 CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT = 12
+SwissStageSelectionMode = Literal["exact", "up_to_limits"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +73,10 @@ class _ContestTemplate:
     champion_prediction_points: int
     swiss_direct_qualifier_count: int
     swiss_elimination_qualifier_count: int
+    swiss_selection_mode: SwissStageSelectionMode
+    swiss_direct_correct_points: int
+    swiss_elimination_correct_points: int
+    swiss_cross_category_points: int
 
 
 WORLD_CUP_2026_TEMPLATE = _ContestTemplate(
@@ -86,6 +92,10 @@ WORLD_CUP_2026_TEMPLATE = _ContestTemplate(
     champion_prediction_points=5,
     swiss_direct_qualifier_count=3,
     swiss_elimination_qualifier_count=5,
+    swiss_selection_mode="exact",
+    swiss_direct_correct_points=2,
+    swiss_elimination_correct_points=2,
+    swiss_cross_category_points=1,
 )
 
 THE_INTERNATIONAL_2026_TEMPLATE = _ContestTemplate(
@@ -101,6 +111,10 @@ THE_INTERNATIONAL_2026_TEMPLATE = _ContestTemplate(
     champion_prediction_points=4,
     swiss_direct_qualifier_count=3,
     swiss_elimination_qualifier_count=5,
+    swiss_selection_mode="exact",
+    swiss_direct_correct_points=2,
+    swiss_elimination_correct_points=2,
+    swiss_cross_category_points=1,
 )
 
 CHAMPIONS_LEAGUE_2026_27_TEMPLATE = _ContestTemplate(
@@ -116,6 +130,10 @@ CHAMPIONS_LEAGUE_2026_27_TEMPLATE = _ContestTemplate(
     champion_prediction_points=5,
     swiss_direct_qualifier_count=CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT,
     swiss_elimination_qualifier_count=CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT,
+    swiss_selection_mode="up_to_limits",
+    swiss_direct_correct_points=2,
+    swiss_elimination_correct_points=1,
+    swiss_cross_category_points=0,
 )
 
 
@@ -308,6 +326,7 @@ class SwissStageSelection:
     direct_teams: tuple[TeamSummary, ...]
     playoff_teams: tuple[TeamSummary, ...]
     elimination_teams: tuple[TeamSummary, ...]
+    is_complete: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,11 +338,25 @@ class SwissStageTeamAward:
 
 
 @dataclass(frozen=True, slots=True)
+class SwissStageScoreBreakdown:
+    correct_direct_count: int
+    direct_points: int
+    correct_elimination_count: int
+    elimination_points: int
+    total_points: int
+
+
+@dataclass(frozen=True, slots=True)
 class SwissStagePredictionDetails:
     is_enabled: bool
     deadline_at: str | None
     direct_qualifier_count: int
     elimination_qualifier_count: int
+    selection_mode: SwissStageSelectionMode
+    direct_correct_points: int
+    elimination_correct_points: int
+    cross_category_points: int
+    maximum_points: int
     candidates: tuple[TeamSummary, ...]
     prediction: SwissStageSelection | None
     actual_result: SwissStageSelection | None
@@ -331,6 +364,7 @@ class SwissStagePredictionDetails:
     settings_locked: bool
     awarded_points: int | None
     awards: tuple[SwissStageTeamAward, ...]
+    score_breakdown: SwissStageScoreBreakdown | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +373,7 @@ class SwissStagePredictionHistory:
     actual_result: SwissStageSelection | None
     awarded_points: int | None
     awards: tuple[SwissStageTeamAward, ...]
+    score_breakdown: SwissStageScoreBreakdown | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -784,18 +819,22 @@ def get_contest_details(
                     CASE
                         WHEN swiss_stage_prediction_selections.category =
                             swiss_stage_result_selections.category
-                        THEN 2
-                        WHEN contests.template_key =
-                            'champions_league_2026_27'
-                        THEN 0
-                        ELSE 1
+                            AND swiss_stage_prediction_selections.category =
+                                'direct'
+                        THEN swiss_stage_prediction_settings.direct_correct_points
+                        WHEN swiss_stage_prediction_selections.category =
+                            swiss_stage_result_selections.category
+                        THEN
+                            swiss_stage_prediction_settings.elimination_correct_points
+                        ELSE swiss_stage_prediction_settings.cross_category_points
                     END AS points
                 FROM swiss_stage_prediction_selections
                 JOIN swiss_stage_predictions
                     ON swiss_stage_predictions.id =
                     swiss_stage_prediction_selections.prediction_id
-                JOIN contests
-                    ON contests.id = swiss_stage_predictions.contest_id
+                JOIN swiss_stage_prediction_settings
+                    ON swiss_stage_prediction_settings.contest_id =
+                    swiss_stage_predictions.contest_id
                 JOIN swiss_stage_result_selections
                     ON swiss_stage_result_selections.contest_id =
                     swiss_stage_prediction_selections.contest_id
@@ -966,6 +1005,23 @@ def get_contest_details(
                         WHERE swiss_stage_predictions.contest_id = ?
                             AND swiss_stage_predictions.user_id = users.id
                             AND swiss_stage_prediction_settings.enabled = 1
+                            AND (
+                                SELECT COUNT(*)
+                                FROM swiss_stage_prediction_selections
+                                WHERE swiss_stage_prediction_selections.prediction_id =
+                                    swiss_stage_predictions.id
+                                  AND swiss_stage_prediction_selections.category =
+                                    'direct'
+                            ) = swiss_stage_prediction_settings.direct_qualifier_count
+                            AND (
+                                SELECT COUNT(*)
+                                FROM swiss_stage_prediction_selections
+                                WHERE swiss_stage_prediction_selections.prediction_id =
+                                    swiss_stage_predictions.id
+                                  AND swiss_stage_prediction_selections.category =
+                                    'elimination'
+                            ) =
+                                swiss_stage_prediction_settings.elimination_qualifier_count
                     ) THEN 1
                     ELSE 0
                 END AS swiss_stage_prediction_count,
@@ -1019,6 +1075,23 @@ def get_contest_details(
                         WHERE swiss_stage_predictions.contest_id = ?
                             AND swiss_stage_predictions.user_id = users.id
                             AND swiss_stage_prediction_settings.enabled = 1
+                            AND (
+                                SELECT COUNT(*)
+                                FROM swiss_stage_prediction_selections
+                                WHERE swiss_stage_prediction_selections.prediction_id =
+                                    swiss_stage_predictions.id
+                                  AND swiss_stage_prediction_selections.category =
+                                    'direct'
+                            ) = swiss_stage_prediction_settings.direct_qualifier_count
+                            AND (
+                                SELECT COUNT(*)
+                                FROM swiss_stage_prediction_selections
+                                WHERE swiss_stage_prediction_selections.prediction_id =
+                                    swiss_stage_predictions.id
+                                  AND swiss_stage_prediction_selections.category =
+                                    'elimination'
+                            ) =
+                                swiss_stage_prediction_settings.elimination_qualifier_count
                     ) THEN 1
                     ELSE 0
                 END AS calculated_predictions_count
@@ -1195,7 +1268,22 @@ def get_contest_details(
                 swiss_stage_prediction_history_by_user=(
                     _leaderboard_swiss_stage_prediction_history_by_user(
                         leaderboard_swiss_stage_prediction_rows,
-                        template_key=str(contest_row["template_key"]),
+                        selection_mode=swiss_stage_prediction.selection_mode,
+                        direct_qualifier_count=(
+                            swiss_stage_prediction.direct_qualifier_count
+                        ),
+                        elimination_qualifier_count=(
+                            swiss_stage_prediction.elimination_qualifier_count
+                        ),
+                        direct_correct_points=(
+                            swiss_stage_prediction.direct_correct_points
+                        ),
+                        elimination_correct_points=(
+                            swiss_stage_prediction.elimination_correct_points
+                        ),
+                        cross_category_points=(
+                            swiss_stage_prediction.cross_category_points
+                        ),
                     )
                     if not swiss_stage_prediction.is_open
                     else {}
@@ -3868,6 +3956,8 @@ def save_swiss_stage_prediction(
             elimination_qualifier_count=int(
                 configuration_row["elimination_qualifier_count"]
             ),
+            selection_mode=str(configuration_row["selection_mode"]),
+            require_complete=False,
             template_key=str(contest_row["template_key"]),
         )
 
@@ -3878,15 +3968,6 @@ def save_swiss_stage_prediction(
             last_name=last_name,
             username=username,
         )
-        connection.execute(
-            """
-            INSERT INTO swiss_stage_predictions (contest_id, user_id)
-            VALUES (?, ?)
-            ON CONFLICT(contest_id, user_id) DO UPDATE SET
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (contest_id, user_id),
-        )
         prediction_row = connection.execute(
             """
             SELECT id
@@ -3895,6 +3976,66 @@ def save_swiss_stage_prediction(
             """,
             (contest_id, user_id),
         ).fetchone()
+        if prediction_row is not None:
+            existing_selection_rows = connection.execute(
+                """
+                SELECT team_id, category
+                FROM swiss_stage_prediction_selections
+                WHERE prediction_id = ?
+                ORDER BY category, team_id
+                """,
+                (int(prediction_row["id"]),),
+            ).fetchall()
+            existing_direct_ids = {
+                int(row["team_id"])
+                for row in existing_selection_rows
+                if row["category"] == "direct"
+            }
+            existing_elimination_ids = {
+                int(row["team_id"])
+                for row in existing_selection_rows
+                if row["category"] == "elimination"
+            }
+            if existing_direct_ids == set(
+                normalized_direct_ids
+            ) and existing_elimination_ids == set(normalized_elimination_ids):
+                return _swiss_stage_selection_from_ids(
+                    connection,
+                    contest_id=contest_id,
+                    selection_mode=str(configuration_row["selection_mode"]),
+                    direct_qualifier_count=int(
+                        configuration_row["direct_qualifier_count"]
+                    ),
+                    elimination_qualifier_count=int(
+                        configuration_row["elimination_qualifier_count"]
+                    ),
+                    direct_team_ids=normalized_direct_ids,
+                    elimination_team_ids=normalized_elimination_ids,
+                )
+            connection.execute(
+                """
+                UPDATE swiss_stage_predictions
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (int(prediction_row["id"]),),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO swiss_stage_predictions (contest_id, user_id)
+                VALUES (?, ?)
+                """,
+                (contest_id, user_id),
+            )
+            prediction_row = connection.execute(
+                """
+                SELECT id
+                FROM swiss_stage_predictions
+                WHERE contest_id = ? AND user_id = ?
+                """,
+                (contest_id, user_id),
+            ).fetchone()
         if prediction_row is None:
             raise RuntimeError(f"Не удалось сохранить прогноз на {stage_name}.")
         prediction_id = int(prediction_row["id"])
@@ -3917,7 +4058,11 @@ def save_swiss_stage_prediction(
         return _swiss_stage_selection_from_ids(
             connection,
             contest_id=contest_id,
-            template_key=str(contest_row["template_key"]),
+            selection_mode=str(configuration_row["selection_mode"]),
+            direct_qualifier_count=int(configuration_row["direct_qualifier_count"]),
+            elimination_qualifier_count=int(
+                configuration_row["elimination_qualifier_count"]
+            ),
             direct_team_ids=normalized_direct_ids,
             elimination_team_ids=normalized_elimination_ids,
         )
@@ -3978,6 +4123,8 @@ def save_swiss_stage_result(
             elimination_qualifier_count=int(
                 configuration_row["elimination_qualifier_count"]
             ),
+            selection_mode=str(configuration_row["selection_mode"]),
+            require_complete=True,
             template_key=str(contest_row["template_key"]),
         )
 
@@ -4016,7 +4163,11 @@ def save_swiss_stage_result(
             return _swiss_stage_selection_from_ids(
                 connection,
                 contest_id=contest_id,
-                template_key=str(contest_row["template_key"]),
+                selection_mode=str(configuration_row["selection_mode"]),
+                direct_qualifier_count=int(configuration_row["direct_qualifier_count"]),
+                elimination_qualifier_count=int(
+                    configuration_row["elimination_qualifier_count"]
+                ),
                 direct_team_ids=existing_direct_ids,
                 elimination_team_ids=existing_elimination_ids,
             )
@@ -4082,7 +4233,11 @@ def save_swiss_stage_result(
         return _swiss_stage_selection_from_ids(
             connection,
             contest_id=contest_id,
-            template_key=str(contest_row["template_key"]),
+            selection_mode=str(configuration_row["selection_mode"]),
+            direct_qualifier_count=int(configuration_row["direct_qualifier_count"]),
+            elimination_qualifier_count=int(
+                configuration_row["elimination_qualifier_count"]
+            ),
             direct_team_ids=normalized_direct_ids,
             elimination_team_ids=normalized_elimination_ids,
         )
@@ -4328,14 +4483,22 @@ def _create_contest_from_template(
                 INSERT INTO swiss_stage_prediction_settings (
                     contest_id,
                     direct_qualifier_count,
-                    elimination_qualifier_count
+                    elimination_qualifier_count,
+                    selection_mode,
+                    direct_correct_points,
+                    elimination_correct_points,
+                    cross_category_points
                 )
-                VALUES (?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     contest_id,
                     template.swiss_direct_qualifier_count,
                     template.swiss_elimination_qualifier_count,
+                    template.swiss_selection_mode,
+                    template.swiss_direct_correct_points,
+                    template.swiss_elimination_correct_points,
+                    template.swiss_cross_category_points,
                 ),
             )
 
@@ -5069,7 +5232,23 @@ def _get_swiss_stage_prediction_details(
             COALESCE(
                 swiss_stage_prediction_settings.elimination_qualifier_count,
                 5
-            ) AS elimination_qualifier_count
+            ) AS elimination_qualifier_count,
+            COALESCE(
+                swiss_stage_prediction_settings.selection_mode,
+                'exact'
+            ) AS selection_mode,
+            COALESCE(
+                swiss_stage_prediction_settings.direct_correct_points,
+                2
+            ) AS direct_correct_points,
+            COALESCE(
+                swiss_stage_prediction_settings.elimination_correct_points,
+                2
+            ) AS elimination_correct_points,
+            COALESCE(
+                swiss_stage_prediction_settings.cross_category_points,
+                1
+            ) AS cross_category_points
         FROM contests
         LEFT JOIN swiss_stage_prediction_settings
             ON swiss_stage_prediction_settings.contest_id = contests.id
@@ -5087,6 +5266,16 @@ def _get_swiss_stage_prediction_details(
             contest_id=contest_id,
         )
     )
+    prediction_row = connection.execute(
+        """
+        SELECT swiss_stage_predictions.id
+        FROM swiss_stage_predictions
+        JOIN users ON users.id = swiss_stage_predictions.user_id
+        WHERE swiss_stage_predictions.contest_id = ?
+            AND users.telegram_user_id = ?
+        """,
+        (contest_id, telegram_user_id),
+    ).fetchone()
     prediction_rows = connection.execute(
         """
         SELECT
@@ -5127,21 +5316,47 @@ def _get_swiss_stage_prediction_details(
         """,
         (contest_id,),
     ).fetchall()
-    template_key = str(configuration_row["template_key"])
+    result_exists = (
+        connection.execute(
+            "SELECT 1 FROM swiss_stage_results WHERE contest_id = ?",
+            (contest_id,),
+        ).fetchone()
+        is not None
+    )
+    selection_mode = str(configuration_row["selection_mode"])
+    direct_qualifier_count = int(configuration_row["direct_qualifier_count"])
+    elimination_qualifier_count = int(configuration_row["elimination_qualifier_count"])
+    direct_correct_points = int(configuration_row["direct_correct_points"])
+    elimination_correct_points = int(configuration_row["elimination_correct_points"])
+    cross_category_points = int(configuration_row["cross_category_points"])
     prediction = _swiss_stage_selection_from_rows(
         prediction_rows,
         candidates=candidates,
-        template_key=template_key,
+        selection_exists=prediction_row is not None,
+        selection_mode=selection_mode,
+        direct_qualifier_count=direct_qualifier_count,
+        elimination_qualifier_count=elimination_qualifier_count,
     )
     actual_result = _swiss_stage_selection_from_rows(
         result_rows,
         candidates=candidates,
-        template_key=template_key,
+        selection_exists=result_exists,
+        selection_mode=selection_mode,
+        direct_qualifier_count=direct_qualifier_count,
+        elimination_qualifier_count=elimination_qualifier_count,
     )
     awards = _swiss_stage_awards_from_rows(
         prediction_rows,
         result_rows=result_rows,
-        template_key=template_key,
+        selection_mode=selection_mode,
+        direct_correct_points=direct_correct_points,
+        elimination_correct_points=elimination_correct_points,
+        cross_category_points=cross_category_points,
+    )
+    score_breakdown = (
+        _swiss_stage_score_breakdown(awards)
+        if prediction is not None and actual_result is not None
+        else None
     )
     deadline_at = configuration_row["deadline_at"]
     deadline_at_value = str(deadline_at) if deadline_at is not None else None
@@ -5150,9 +5365,15 @@ def _get_swiss_stage_prediction_details(
     return SwissStagePredictionDetails(
         is_enabled=is_enabled,
         deadline_at=deadline_at_value,
-        direct_qualifier_count=int(configuration_row["direct_qualifier_count"]),
-        elimination_qualifier_count=int(
-            configuration_row["elimination_qualifier_count"]
+        direct_qualifier_count=direct_qualifier_count,
+        elimination_qualifier_count=elimination_qualifier_count,
+        selection_mode=selection_mode,
+        direct_correct_points=direct_correct_points,
+        elimination_correct_points=elimination_correct_points,
+        cross_category_points=cross_category_points,
+        maximum_points=(
+            direct_qualifier_count * direct_correct_points
+            + elimination_qualifier_count * elimination_correct_points
         ),
         candidates=candidates,
         prediction=prediction,
@@ -5170,12 +5391,9 @@ def _get_swiss_stage_prediction_details(
             connection,
             contest_id=contest_id,
         ),
-        awarded_points=(
-            sum(award.points or 0 for award in awards)
-            if prediction is not None and actual_result is not None
-            else None
-        ),
+        awarded_points=(score_breakdown.total_points if score_breakdown else None),
         awards=awards if actual_result is not None else (),
+        score_breakdown=score_breakdown,
     )
 
 
@@ -5271,7 +5489,11 @@ def _get_swiss_stage_configuration_row(
             enabled,
             deadline_at,
             direct_qualifier_count,
-            elimination_qualifier_count
+            elimination_qualifier_count,
+            selection_mode,
+            direct_correct_points,
+            elimination_correct_points,
+            cross_category_points
         FROM swiss_stage_prediction_settings
         WHERE contest_id = ?
         """,
@@ -5366,6 +5588,12 @@ def _swiss_stage_snapshot(
         "elimination_qualifier_count": int(
             configuration_row["elimination_qualifier_count"]
         ),
+        "selection_mode": str(configuration_row["selection_mode"]),
+        "direct_correct_points": int(configuration_row["direct_correct_points"]),
+        "elimination_correct_points": int(
+            configuration_row["elimination_correct_points"]
+        ),
+        "cross_category_points": int(configuration_row["cross_category_points"]),
         "teams": [
             {"id": team.id, "name": team.name}
             for team in (
@@ -5401,29 +5629,46 @@ def _validate_swiss_stage_selection(
     elimination_team_ids: tuple[int, ...],
     direct_qualifier_count: int,
     elimination_qualifier_count: int,
+    selection_mode: SwissStageSelectionMode,
+    require_complete: bool,
     template_key: str,
 ) -> None:
     _stage_name, _stage_genitive, stage_prepositional = _swiss_stage_terms(template_key)
-    if len(direct_team_ids) != direct_qualifier_count:
+    exact_selection_required = require_complete or selection_mode == "exact"
+    direct_count_is_invalid = (
+        len(direct_team_ids) != direct_qualifier_count
+        if exact_selection_required
+        else len(direct_team_ids) > direct_qualifier_count
+    )
+    if direct_count_is_invalid:
         direct_category = (
             "выхода напрямую в 1/8"
             if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key
             else "прямого прохода"
         )
+        quantity = "ровно" if exact_selection_required else "не более"
         raise ValueError(
-            f"Выберите ровно {direct_qualifier_count} команд для {direct_category}."
+            f"Выберите {quantity} {direct_qualifier_count} команд для {direct_category}."
         )
-    if len(elimination_team_ids) != elimination_qualifier_count:
+    elimination_count_is_invalid = (
+        len(elimination_team_ids) != elimination_qualifier_count
+        if exact_selection_required
+        else len(elimination_team_ids) > elimination_qualifier_count
+    )
+    if elimination_count_is_invalid:
         elimination_category = (
             "вылета после общего этапа"
             if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key
             else "элиминейшн-раунда"
         )
+        quantity = "ровно" if exact_selection_required else "не более"
         raise ValueError(
-            "Выберите ровно "
-            f"{elimination_qualifier_count} команд для {elimination_category}."
+            f"Выберите {quantity} {elimination_qualifier_count} команд "
+            f"для {elimination_category}."
         )
     selected_ids = (*direct_team_ids, *elimination_team_ids)
+    if not selected_ids:
+        return
     placeholders = ", ".join("?" for _ in selected_ids)
     candidate_count = connection.execute(
         f"""
@@ -5492,21 +5737,32 @@ def _swiss_stage_selection_from_ids(
     connection,
     *,
     contest_id: int,
-    template_key: str,
+    selection_mode: str,
+    direct_qualifier_count: int,
+    elimination_qualifier_count: int,
     direct_team_ids: tuple[int, ...],
     elimination_team_ids: tuple[int, ...],
 ) -> SwissStageSelection:
     selected_ids = (*direct_team_ids, *elimination_team_ids)
-    placeholders = ", ".join("?" for _ in selected_ids)
-    rows = connection.execute(
-        f"""
-        SELECT id, name
-        FROM teams
-        WHERE id IN ({placeholders})
-        """,
-        selected_ids,
-    ).fetchall()
+    if selected_ids:
+        placeholders = ", ".join("?" for _ in selected_ids)
+        rows = connection.execute(
+            f"""
+            SELECT id, name
+            FROM teams
+            WHERE id IN ({placeholders})
+            """,
+            selected_ids,
+        ).fetchall()
+    else:
+        rows = ()
     teams_by_id = {int(row["id"]): _team_summary_from_row(row) for row in rows}
+    is_complete = _is_swiss_stage_selection_complete(
+        direct_team_ids=direct_team_ids,
+        elimination_team_ids=elimination_team_ids,
+        direct_qualifier_count=direct_qualifier_count,
+        elimination_qualifier_count=elimination_qualifier_count,
+    )
     playoff_teams = _swiss_stage_playoff_teams(
         tuple(
             _team_summary_from_row(row)
@@ -5517,7 +5773,8 @@ def _swiss_stage_selection_from_ids(
         ),
         direct_team_ids=direct_team_ids,
         elimination_team_ids=elimination_team_ids,
-        template_key=template_key,
+        selection_mode=selection_mode,
+        is_complete=is_complete,
     )
     return SwissStageSelection(
         direct_teams=tuple(teams_by_id[team_id] for team_id in direct_team_ids),
@@ -5525,6 +5782,7 @@ def _swiss_stage_selection_from_ids(
         elimination_teams=tuple(
             teams_by_id[team_id] for team_id in elimination_team_ids
         ),
+        is_complete=is_complete,
     )
 
 
@@ -5532,9 +5790,12 @@ def _swiss_stage_selection_from_rows(
     rows,
     *,
     candidates: tuple[TeamSummary, ...],
-    template_key: str,
+    selection_exists: bool,
+    selection_mode: str,
+    direct_qualifier_count: int,
+    elimination_qualifier_count: int,
 ) -> SwissStageSelection | None:
-    if not rows:
+    if not selection_exists:
         return None
     direct_teams: list[TeamSummary] = []
     elimination_teams: list[TeamSummary] = []
@@ -5544,15 +5805,38 @@ def _swiss_stage_selection_from_rows(
             direct_teams.append(team)
         else:
             elimination_teams.append(team)
+    direct_team_ids = tuple(team.id for team in direct_teams)
+    elimination_team_ids = tuple(team.id for team in elimination_teams)
+    is_complete = _is_swiss_stage_selection_complete(
+        direct_team_ids=direct_team_ids,
+        elimination_team_ids=elimination_team_ids,
+        direct_qualifier_count=direct_qualifier_count,
+        elimination_qualifier_count=elimination_qualifier_count,
+    )
     return SwissStageSelection(
         direct_teams=tuple(direct_teams),
         playoff_teams=_swiss_stage_playoff_teams(
             candidates,
-            direct_team_ids=tuple(team.id for team in direct_teams),
-            elimination_team_ids=tuple(team.id for team in elimination_teams),
-            template_key=template_key,
+            direct_team_ids=direct_team_ids,
+            elimination_team_ids=elimination_team_ids,
+            selection_mode=selection_mode,
+            is_complete=is_complete,
         ),
         elimination_teams=tuple(elimination_teams),
+        is_complete=is_complete,
+    )
+
+
+def _is_swiss_stage_selection_complete(
+    *,
+    direct_team_ids: tuple[int, ...],
+    elimination_team_ids: tuple[int, ...],
+    direct_qualifier_count: int,
+    elimination_qualifier_count: int,
+) -> bool:
+    return (
+        len(direct_team_ids) == direct_qualifier_count
+        and len(elimination_team_ids) == elimination_qualifier_count
     )
 
 
@@ -5561,9 +5845,10 @@ def _swiss_stage_playoff_teams(
     *,
     direct_team_ids: tuple[int, ...],
     elimination_team_ids: tuple[int, ...],
-    template_key: str,
+    selection_mode: str,
+    is_complete: bool,
 ) -> tuple[TeamSummary, ...]:
-    if template_key != CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key:
+    if selection_mode != "up_to_limits" or not is_complete:
         return ()
     selected_ids = {*direct_team_ids, *elimination_team_ids}
     return tuple(team for team in candidates if team.id not in selected_ids)
@@ -5573,7 +5858,10 @@ def _swiss_stage_awards_from_rows(
     prediction_rows,
     *,
     result_rows,
-    template_key: str,
+    selection_mode: str,
+    direct_correct_points: int,
+    elimination_correct_points: int,
+    cross_category_points: int,
 ) -> tuple[SwissStageTeamAward, ...]:
     actual_categories = {int(row["id"]): str(row["category"]) for row in result_rows}
     has_result = bool(result_rows)
@@ -5581,27 +5869,17 @@ def _swiss_stage_awards_from_rows(
     for row in prediction_rows:
         predicted_category = str(row["category"])
         actual_category = actual_categories.get(int(row["id"]))
-        if (
-            has_result
-            and actual_category is None
-            and template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key
-        ):
+        if has_result and actual_category is None and selection_mode == "up_to_limits":
             actual_category = "playoff"
         points = None
         if has_result:
-            if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE.key:
-                points = (
-                    2
-                    if predicted_category in {"direct", "elimination"}
-                    and actual_category == predicted_category
-                    else 0
-                )
-            elif actual_category is None:
-                points = 0
-            elif actual_category == predicted_category:
-                points = 2
-            else:
-                points = 1
+            points = calculate_swiss_stage_selection_points(
+                predicted_category=predicted_category,
+                actual_category=actual_category,
+                direct_correct_points=direct_correct_points,
+                elimination_correct_points=elimination_correct_points,
+                cross_category_points=cross_category_points,
+            )
         awards.append(
             SwissStageTeamAward(
                 team=_team_summary_from_row(row),
@@ -5611,6 +5889,35 @@ def _swiss_stage_awards_from_rows(
             )
         )
     return tuple(awards)
+
+
+def _swiss_stage_score_breakdown(
+    awards: tuple[SwissStageTeamAward, ...],
+) -> SwissStageScoreBreakdown:
+    correct_direct_count = sum(
+        award.predicted_category == "direct" and award.actual_category == "direct"
+        for award in awards
+    )
+    direct_points = sum(
+        award.points or 0 for award in awards if award.predicted_category == "direct"
+    )
+    correct_elimination_count = sum(
+        award.predicted_category == "elimination"
+        and award.actual_category == "elimination"
+        for award in awards
+    )
+    elimination_points = sum(
+        award.points or 0
+        for award in awards
+        if award.predicted_category == "elimination"
+    )
+    return SwissStageScoreBreakdown(
+        correct_direct_count=correct_direct_count,
+        direct_points=direct_points,
+        correct_elimination_count=correct_elimination_count,
+        elimination_points=elimination_points,
+        total_points=direct_points + elimination_points,
+    )
 
 
 def _is_contest_completed(
@@ -6565,10 +6872,10 @@ def _get_swiss_stage_prediction_history_rows(
             teams.name,
             swiss_stage_prediction_selections.category
         FROM swiss_stage_predictions
-        JOIN swiss_stage_prediction_selections
+        LEFT JOIN swiss_stage_prediction_selections
             ON swiss_stage_prediction_selections.prediction_id =
             swiss_stage_predictions.id
-        JOIN teams
+        LEFT JOIN teams
             ON teams.id = swiss_stage_prediction_selections.team_id
         WHERE swiss_stage_predictions.contest_id = ?
         ORDER BY
@@ -6606,41 +6913,57 @@ def _get_swiss_stage_prediction_history_rows(
 def _leaderboard_swiss_stage_prediction_history_by_user(
     rows,
     *,
-    template_key: str,
+    selection_mode: str,
+    direct_qualifier_count: int,
+    elimination_qualifier_count: int,
+    direct_correct_points: int,
+    elimination_correct_points: int,
+    cross_category_points: int,
 ) -> dict[int, SwissStagePredictionHistory]:
     prediction_rows, result_rows, candidate_rows = rows
     candidates = tuple(_team_summary_from_row(row) for row in candidate_rows)
     rows_by_user: dict[int, list[object]] = {}
     for row in prediction_rows:
-        rows_by_user.setdefault(int(row["user_id"]), []).append(row)
+        user_rows = rows_by_user.setdefault(int(row["user_id"]), [])
+        if row["id"] is not None:
+            user_rows.append(row)
     actual_result = _swiss_stage_selection_from_rows(
         result_rows,
         candidates=candidates,
-        template_key=template_key,
+        selection_exists=bool(result_rows),
+        selection_mode=selection_mode,
+        direct_qualifier_count=direct_qualifier_count,
+        elimination_qualifier_count=elimination_qualifier_count,
     )
     history_by_user: dict[int, SwissStagePredictionHistory] = {}
     for user_id, user_rows in rows_by_user.items():
         prediction = _swiss_stage_selection_from_rows(
             user_rows,
             candidates=candidates,
-            template_key=template_key,
+            selection_exists=True,
+            selection_mode=selection_mode,
+            direct_qualifier_count=direct_qualifier_count,
+            elimination_qualifier_count=elimination_qualifier_count,
         )
         if prediction is None:
             continue
         awards = _swiss_stage_awards_from_rows(
             user_rows,
             result_rows=result_rows,
-            template_key=template_key,
+            selection_mode=selection_mode,
+            direct_correct_points=direct_correct_points,
+            elimination_correct_points=elimination_correct_points,
+            cross_category_points=cross_category_points,
+        )
+        score_breakdown = (
+            _swiss_stage_score_breakdown(awards) if actual_result is not None else None
         )
         history_by_user[user_id] = SwissStagePredictionHistory(
             prediction=prediction,
             actual_result=actual_result,
-            awarded_points=(
-                sum(award.points or 0 for award in awards)
-                if actual_result is not None
-                else None
-            ),
+            awarded_points=(score_breakdown.total_points if score_breakdown else None),
             awards=awards if actual_result is not None else (),
+            score_breakdown=score_breakdown,
         )
     return history_by_user
 

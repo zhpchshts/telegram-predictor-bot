@@ -321,6 +321,8 @@ class SaveSwissStagePredictionSettingsRequest(BaseModel):
 
 
 class SaveSwissStageSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     direct_team_ids: list[SqliteInteger]
     elimination_team_ids: list[SqliteInteger]
 
@@ -3037,6 +3039,13 @@ def _serialize_shared_tournament_details(details) -> dict[str, object]:
         "elimination_qualifier_count": (
             details.swiss_stage_prediction.elimination_qualifier_count
         ),
+        "selection_mode": details.swiss_stage_prediction.selection_mode,
+        "direct_correct_points": (details.swiss_stage_prediction.direct_correct_points),
+        "elimination_correct_points": (
+            details.swiss_stage_prediction.elimination_correct_points
+        ),
+        "cross_category_points": (details.swiss_stage_prediction.cross_category_points),
+        "maximum_points": details.swiss_stage_prediction.maximum_points,
         "direct_qualifier_team_ids": list(
             details.swiss_stage_prediction.direct_qualifier_team_ids
         ),
@@ -3147,6 +3156,10 @@ def _serialize_contest_details(contest) -> dict[str, object]:
         or contest.swiss_stage_prediction.settings_locked
         or contest.swiss_stage_prediction.direct_qualifier_count != 3
         or contest.swiss_stage_prediction.elimination_qualifier_count != 5
+        or contest.swiss_stage_prediction.selection_mode != "exact"
+        or contest.swiss_stage_prediction.direct_correct_points != 2
+        or contest.swiss_stage_prediction.elimination_correct_points != 2
+        or contest.swiss_stage_prediction.cross_category_points != 1
     ):
         result["swiss_stage_prediction"] = _serialize_swiss_stage_prediction(
             contest.swiss_stage_prediction
@@ -3208,6 +3221,7 @@ def _serialize_swiss_stage_selection(selection) -> dict[str, object]:
         "elimination_teams": [
             _serialize_team_summary(team) for team in selection.elimination_teams
         ],
+        "is_complete": selection.is_complete,
     }
     if selection.playoff_teams:
         result["playoff_teams"] = [
@@ -3233,6 +3247,13 @@ def _serialize_swiss_stage_prediction(swiss_stage_prediction) -> dict[str, objec
         "elimination_qualifier_count": (
             swiss_stage_prediction.elimination_qualifier_count
         ),
+        "selection_mode": swiss_stage_prediction.selection_mode,
+        "direct_correct_points": swiss_stage_prediction.direct_correct_points,
+        "elimination_correct_points": (
+            swiss_stage_prediction.elimination_correct_points
+        ),
+        "cross_category_points": swiss_stage_prediction.cross_category_points,
+        "maximum_points": swiss_stage_prediction.maximum_points,
         "candidates": [
             _serialize_team_summary(team) for team in swiss_stage_prediction.candidates
         ],
@@ -3253,6 +3274,23 @@ def _serialize_swiss_stage_prediction(swiss_stage_prediction) -> dict[str, objec
             _serialize_swiss_stage_award(award)
             for award in swiss_stage_prediction.awards
         ],
+        "score_breakdown": (
+            _serialize_swiss_stage_score_breakdown(
+                swiss_stage_prediction.score_breakdown
+            )
+            if swiss_stage_prediction.score_breakdown is not None
+            else None
+        ),
+    }
+
+
+def _serialize_swiss_stage_score_breakdown(score_breakdown) -> dict[str, int]:
+    return {
+        "correct_direct_count": score_breakdown.correct_direct_count,
+        "direct_points": score_breakdown.direct_points,
+        "correct_elimination_count": score_breakdown.correct_elimination_count,
+        "elimination_points": score_breakdown.elimination_points,
+        "total_points": score_breakdown.total_points,
     }
 
 
@@ -3319,6 +3357,11 @@ def _serialize_leaderboard_swiss_stage_prediction_history(
         ),
         "awarded_points": history.awarded_points,
         "awards": [_serialize_swiss_stage_award(award) for award in history.awards],
+        "score_breakdown": (
+            _serialize_swiss_stage_score_breakdown(history.score_breakdown)
+            if history.score_breakdown is not None
+            else None
+        ),
     }
 
 

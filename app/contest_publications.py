@@ -31,6 +31,7 @@ from app.rich_publications import (
     split_rich_table_messages,
     table_row,
 )
+from app.scoring_service import calculate_swiss_stage_selection_points
 
 
 PUBLICATION_MAX_MESSAGE_LENGTH = RICH_MESSAGE_MAX_LENGTH
@@ -486,7 +487,8 @@ def _render_swiss_predictions(
                 contests.name,
                 contests.template_key,
                 settings.enabled,
-                settings.deadline_at
+                settings.deadline_at,
+                settings.selection_mode
             FROM swiss_stage_prediction_settings AS settings
             JOIN contests ON contests.id = settings.contest_id
             WHERE settings.contest_id = ?
@@ -505,7 +507,8 @@ def _render_swiss_predictions(
             ).fetchone()[0]
         )
         template_key = str(settings["template_key"])
-        if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
+        selection_mode = str(settings["selection_mode"])
+        if selection_mode == "up_to_limits":
             teams = connection.execute(
                 """
                 SELECT
@@ -565,16 +568,15 @@ def _render_swiss_predictions(
         )
 
     lines: list[str] = [f"<b>Прогнозов: {prediction_count}</b>"]
-    if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
-        support_rows = _champions_league_support_rows(
+    if selection_mode == "up_to_limits":
+        support_rows = _categorized_swiss_support_rows(
             teams,
-            prediction_count=prediction_count,
         )
-        for category, label in (
+        categories = [
             ("direct", copy["direct_prediction"]),
-            ("playoff", copy["playoff_prediction"]),
             ("elimination", copy["elimination_prediction"]),
-        ):
+        ]
+        for category, label in categories:
             lines.append(f"<b>{label}</b>")
             lines.extend(
                 _ranked_swiss_support_lines(
@@ -610,7 +612,11 @@ def _render_swiss_result(
                 contests.name,
                 contests.template_key,
                 settings.direct_qualifier_count,
-                settings.elimination_qualifier_count
+                settings.elimination_qualifier_count,
+                settings.selection_mode,
+                settings.direct_correct_points,
+                settings.elimination_correct_points,
+                settings.cross_category_points
             FROM swiss_stage_prediction_settings AS settings
             JOIN contests ON contests.id = settings.contest_id
             JOIN swiss_stage_results AS result
@@ -721,26 +727,41 @@ def _render_swiss_result(
         prediction_id = int(row["prediction_id"])
         team_id = int(row["team_id"])
         selections_by_prediction[prediction_id][team_id] = str(row["category"])
-        if (
-            template_key != CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY
-            or actual_categories.get(team_id) == str(row["category"])
-        ):
+        if settings["selection_mode"] == "exact" or actual_categories.get(
+            team_id
+        ) == str(row["category"]):
             support_counts[team_id] = support_counts.get(team_id, 0) + 1
 
-    maximum_points = 2 * (
-        int(settings["direct_qualifier_count"])
-        + int(settings["elimination_qualifier_count"])
+    direct_correct_points = int(settings["direct_correct_points"])
+    elimination_correct_points = int(settings["elimination_correct_points"])
+    cross_category_points = int(settings["cross_category_points"])
+    maximum_points = (
+        int(settings["direct_qualifier_count"]) * direct_correct_points
+        + int(settings["elimination_qualifier_count"]) * elimination_correct_points
     )
     scores: list[int] = []
+    correct_direct_count = 0
+    direct_points = 0
+    correct_elimination_count = 0
+    elimination_points = 0
     for selections in selections_by_prediction.values():
-        points = sum(
-            _swiss_selection_points(
-                template_key=template_key,
+        points = 0
+        for team_id, category in selections.items():
+            actual_category = actual_categories.get(team_id)
+            selection_points = _swiss_selection_points(
                 predicted_category=category,
-                actual_category=actual_categories.get(team_id),
+                actual_category=actual_category,
+                direct_correct_points=direct_correct_points,
+                elimination_correct_points=elimination_correct_points,
+                cross_category_points=cross_category_points,
             )
-            for team_id, category in selections.items()
-        )
+            points += selection_points
+            if category == "direct":
+                direct_points += selection_points
+                correct_direct_count += actual_category == "direct"
+            elif category == "elimination":
+                elimination_points += selection_points
+                correct_elimination_count += actual_category == "elimination"
         scores.append(points)
     total_points = sum(scores)
     perfect_count = sum(points == maximum_points for points in scores)
@@ -764,6 +785,14 @@ def _render_swiss_result(
     lines = (
         *result_lines,
         f"<b>Прогнозов: {prediction_count}</b>",
+        (
+            f"{copy['direct_breakdown']}: {correct_direct_count} совпадений — "
+            f"{direct_points} баллов"
+        ),
+        (
+            f"{copy['elimination_breakdown']}: "
+            f"{correct_elimination_count} совпадений — {elimination_points} баллов"
+        ),
         f"Средняя точность: {average_percent}%",
         escape_rich_text(accuracy),
         escape_rich_text(perfect),
@@ -805,6 +834,8 @@ def _swiss_publication_copy(template_key: str) -> dict[str, str]:
             "direct_prediction": "Напрямую в 1/8",
             "playoff_prediction": "Стыки",
             "elimination_prediction": "Вылетят после общего этапа",
+            "direct_breakdown": "Напрямую в 1/8",
+            "elimination_breakdown": "Вылет",
             "no_predictions": "Прогнозов на общий этап нет",
             "no_predictions_past": "Прогнозов на общий этап не было",
         }
@@ -815,6 +846,8 @@ def _swiss_publication_copy(template_key: str) -> dict[str, str]:
         "elimination_result": "Через стыки",
         "direct_prediction": "Прямой проход",
         "elimination_prediction": "Через стыки",
+        "direct_breakdown": "Прямой проход",
+        "elimination_breakdown": "Через стыки",
         "no_predictions": "Прогнозов на швейцарский этап нет",
         "no_predictions_past": "Прогнозов на швейцарский этап не было",
     }
@@ -852,21 +885,13 @@ def _ranked_swiss_support_lines(
     return tuple(lines) if lines else ("—",)
 
 
-def _champions_league_support_rows(
-    teams,
-    *,
-    prediction_count: int,
-) -> tuple[dict[str, object], ...]:
+def _categorized_swiss_support_rows(teams) -> tuple[dict[str, object], ...]:
     rows: list[dict[str, object]] = []
     for team in teams:
         direct_support = int(team["direct_support_count"])
         elimination_support = int(team["elimination_support_count"])
         support_by_category = {
             "direct": direct_support,
-            "playoff": max(
-                0,
-                prediction_count - direct_support - elimination_support,
-            ),
             "elimination": elimination_support,
         }
         for category, support_count in support_by_category.items():
@@ -894,20 +919,19 @@ def _champions_league_support_rows(
 
 def _swiss_selection_points(
     *,
-    template_key: str,
     predicted_category: str,
     actual_category: str | None,
+    direct_correct_points: int = 2,
+    elimination_correct_points: int = 2,
+    cross_category_points: int = 1,
 ) -> int:
-    if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
-        return (
-            2
-            if predicted_category in {"direct", "elimination"}
-            and actual_category == predicted_category
-            else 0
-        )
-    if actual_category == predicted_category:
-        return 2
-    return 1 if actual_category is not None else 0
+    return calculate_swiss_stage_selection_points(
+        predicted_category=predicted_category,
+        actual_category=actual_category,
+        direct_correct_points=direct_correct_points,
+        elimination_correct_points=elimination_correct_points,
+        cross_category_points=cross_category_points,
+    )
 
 
 def _render_contest_completed(

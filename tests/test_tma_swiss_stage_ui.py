@@ -31,15 +31,16 @@ def _function_source(name: str) -> str:
 
 def test_tma_contains_mobile_swiss_stage_prediction_controls() -> None:
     source = _source()
+    selector_source = _function_source("createSwissStageTeamSelector")
 
     assert "Прогноз на швейцарскую систему" in source
     assert 'directProgress: "Пройдут напрямую"' in source
     assert 'eliminationProgress: "Через стыковой раунд"' in source
     assert "элиминейшн" not in source.lower()
     assert "createSwissStageTeamSelector" in source
-    assert "data-category='direct'" in source
-    assert "data-category='playoff'" in source
-    assert "data-category='elimination'" in source
+    assert "data-category='direct'" in selector_source
+    assert "data-category='playoff'" not in selector_source
+    assert "data-category='elimination'" in selector_source
     assert "Сохранить прогноз" in source
     assert (
         "drag"
@@ -61,6 +62,29 @@ def test_tma_uses_separate_swiss_stage_api_routes() -> None:
     assert "Исправить итоги? Рейтинг будет пересчитан сразу." in source
 
 
+def test_general_stage_editability_uses_server_state_and_shows_partial_progress() -> (
+    None
+):
+    card_source = _function_source("createSwissStagePredictionCard")
+    selector_source = _function_source("createSwissStageTeamSelector")
+
+    assert "!prediction.is_open" in card_source
+    assert "Date.now" not in card_source
+    assert "deadline <= Date.now()" in selector_source
+    assert "schedulePredictionDeadlineSync" in selector_source
+    assert "form.dataset.predictionDeadline" in selector_source
+    assert "PREDICTION_DEADLINE_SYNC_EVENT" in selector_source
+    assert "prediction.is_open = false" in selector_source
+    assert "if (resultMode)" in selector_source
+    assert "!resultMode && error?.status === 409" in selector_source
+    assert "`${directProgressLabel}: ${directIds.size} из `" in selector_source
+    assert "`${eliminationProgressLabel}: ${eliminationIds.size} из `" in (
+        selector_source
+    )
+    assert 'prediction.selection_mode === "up_to_limits"' in selector_source
+    assert "!allowPartial" in selector_source
+
+
 def test_tma_prediction_count_separates_calculated_and_pending() -> None:
     card_source = _function_source("createLeaderboardCard")
     row_source = _function_source("createLeaderboardRow")
@@ -80,6 +104,7 @@ def test_tma_uses_server_awards_in_personal_card_and_leaderboard_history() -> No
     leaderboard_history_source = _function_source(
         "createLeaderboardSwissStagePredictionHistory"
     )
+    score_summary_source = _function_source("createSwissStageScoreSummary")
 
     assert "award?.predicted_category" in breakdown_source
     assert "award?.actual_category" in breakdown_source
@@ -97,6 +122,13 @@ def test_tma_uses_server_awards_in_personal_card_and_leaderboard_history() -> No
     assert "createSwissStageAwardsBreakdown(prediction.awards, templateKey)" in (
         leaderboard_history_source
     )
+    assert "prediction.score_breakdown" in personal_card_source
+    assert "prediction.score_breakdown" in leaderboard_history_source
+    assert "scoreBreakdown.correct_direct_count" in score_summary_source
+    assert "scoreBreakdown.direct_points" in score_summary_source
+    assert "scoreBreakdown.correct_elimination_count" in score_summary_source
+    assert "scoreBreakdown.elimination_points" in score_summary_source
+    assert "scoreBreakdown.total_points" in score_summary_source
 
 
 def test_tma_formats_swiss_stage_audit_result_with_team_names() -> None:
@@ -106,12 +138,12 @@ def test_tma_formats_swiss_stage_audit_result_with_team_names() -> None:
     summary_source = _function_source("buildAuditSummaryLines")
 
     assert "value?.direct_team_ids" in formatter_source
-    assert "value?.playoff_team_ids" in formatter_source
+    assert "value?.playoff_team_ids" not in formatter_source
     assert "value?.elimination_team_ids" in formatter_source
     assert "getAuditTeamName(event, teamId)" in formatter_source
     assert "getSwissStageCopy(event?.contest?.template_key)" in formatter_source
     assert "copy.directResult" in formatter_source
-    assert "copy.playoffResult" in formatter_source
+    assert "copy.playoffResult" not in formatter_source
     assert "copy.eliminationResult" in formatter_source
     assert 'key === "actual_result"' in state_value_source
     assert "formatAuditSwissStageResult(value, event)" in state_value_source
@@ -158,9 +190,12 @@ def test_swiss_stage_settings_match_champion_settings_copy_and_state() -> None:
     for settings_source in (champion_source, swiss_source):
         assert 'text: "Настройки прогноза"' in settings_source
         assert 'text: "Включить прогноз"' in settings_source
-        assert 'text: "Прогноз закрывается"' in settings_source
         assert "summaryContent.append(title, overview)" in settings_source
         assert "disclosure.append(summary, description, form)" in settings_source
+
+    assert 'text: "Прогноз закрывается"' in champion_source
+    assert '"Начало первого матча общего этапа"' in swiss_source
+    assert ': "Прогноз закрывается"' in swiss_source
 
     assert 'text: "Прогноз на чемпиона"' in champion_card_source
     assert "getSwissStageCopy(contest.template_key)" in swiss_card_source
@@ -234,45 +269,45 @@ def test_champions_league_uses_league_phase_copy_and_fixed_limits() -> None:
     assert "resultMode = false" in selector_source
     assert "resultMode ? copy.directResult : copy.directChoice" in selector_source
     assert "resultMode" in selector_source
-    assert "const playoffCount = isChampionsLeague ? 16 : 0" in selector_source
-    assert 'setCategory(team.id, "playoff")' in selector_source
-    assert "playoffIds.size !== playoffCount" in selector_source
+    assert 'prediction.selection_mode === "up_to_limits"' in selector_source
+    assert "!resultMode" in selector_source
+    assert 'setCategory(team.id, "playoff")' not in selector_source
+    assert "playoffIds" not in selector_source
     assert "removeFromEveryCategory(teamId)" in selector_source
-    assert "const playoffButton = isChampionsLeague" in selector_source
-    assert '"swiss-stage-team-actions--three"' in selector_source
-    assert "...(isChampionsLeague ? [playoffProgress] : [])" in selector_source
-    assert "if (!directIds.has(team.id) && !eliminationIds.has(team.id))" in (
-        selector_source
+    assert "const playoffButton" not in selector_source
+    assert '"swiss-stage-team-actions--three"' not in selector_source
+    assert "categoryIds.size < categoryLimit" in selector_source
+    assert "categoryIds.delete(teamId)" in selector_source
+    assert "directIds.size >= prediction.direct_qualifier_count" in selector_source
+    assert (
+        "eliminationIds.size >= prediction.elimination_qualifier_count"
+        in selector_source
     )
-    transfer_start = selector_source.index(
-        "if (isChampionsLeague)",
-        selector_source.index("function setCategory"),
-    )
-    transfer_end = selector_source.index("const categoryLimit", transfer_start)
-    ucl_transfer_source = selector_source[transfer_start:transfer_end]
-    assert "removeFromEveryCategory(teamId)" in ucl_transfer_source
-    assert "categoryIds.add(teamId)" in ucl_transfer_source
-    assert ".size <" not in ucl_transfer_source
+    assert "!allowPartial" in selector_source
+    assert 'allowPartial && !isComplete ? "Черновик сохранён."' in selector_source
     assert "copy.eliminationResult" in selector_source
     assert "playoff_team_ids" not in selector_source
     assert "resultMode: true" in administration_source
-    assert "2 балла за точную категорию «Напрямую» или «Вылет»" in copy_source
-    assert "За категорию «Стыки» — 0 баллов" in copy_source
-    assert "Максимум — 40 баллов" in copy_source
+    assert "2 балла за команду, вышедшую напрямую в 1/8" in copy_source
+    assert "1 балл за вылетевшую команду" in copy_source
+    assert "За стыки баллы не начисляются" in copy_source
+    assert "Максимум — 28 баллов" in copy_source
     assert 'contest.template_key === "champions_league_2026_27"' in (settings_source)
     assert "Команды общего этапа:" in settings_source
-    assert "8 напрямую в 1/8, 16 в стыки и 12 в вылет" in settings_source
-    assert "getChampionsLeaguePlayoffTeams(selection, candidates)" in readonly_source
-    assert "copy.playoffResult" in readonly_source
-    assert "copy.playoffChoice" in history_source
-    assert "getChampionsLeaguePlayoffTeams" in history_source
+    assert "выбирает до 8 команд напрямую в 1/8 и до 12 на вылет" in settings_source
+    assert "Начало первого матча общего этапа" in settings_source
+    assert "getChampionsLeaguePlayoffTeams" not in readonly_source
+    assert "copy.playoffResult" not in readonly_source
+    assert "copy.playoffChoice" not in history_source
+    assert "getChampionsLeaguePlayoffTeams" not in history_source
     assert "hasFixedChampionsLeagueLimits" in shared_source
     assert "directCount.disabled = hasFixedChampionsLeagueLimits" in shared_source
     assert "eliminationCount.disabled = hasFixedChampionsLeagueLimits" in shared_source
-    assert "${copy.directChoice} — 8" in shared_source
-    assert "${copy.playoffChoice} — 16" in shared_source
-    assert "${copy.eliminationChoice} — 12" in shared_source
-    assert "За категорию «Стыки» баллы не начисляются" in shared_source
-    assert "settings.playoff_team_ids" in shared_source
-    assert "createLabeledField(copy.playoffResult, playoff)" in shared_source
-    assert "selectedPlayoffCount !== 16" in shared_source
+    assert "выбирает до 8 команд" in shared_source
+    assert "до 12" in shared_source
+    assert "максимум — 28 баллов" in shared_source
+    assert "settings.playoff_team_ids" not in shared_source
+    assert "createLabeledField(copy.playoffResult" not in shared_source
+    assert "selectedPlayoffCount" not in shared_source
+    assert "selectedDirectCount !== requiredDirectCount" in shared_source
+    assert "selectedEliminationCount !== requiredEliminationCount" in shared_source

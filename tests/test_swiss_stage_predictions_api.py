@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -9,7 +11,12 @@ from fastapi.testclient import TestClient
 from app.database import database_connection, initialize_database
 from app.main import create_app
 from app.tma_api import get_telegram_administrators_client
+from app.tma_launch import create_tma_launch_token
 from tests.test_champion_predictions_api import (
+    BOT_TOKEN,
+    CHAT_TITLE,
+    TELEGRAM_CHAT_ID,
+    build_signed_init_data,
     build_tma_headers,
     configure_test_environment,
     create_tma_contest,
@@ -27,6 +34,78 @@ def _client() -> TestClient:
         FakeTelegramAdministratorsClient
     )
     return TestClient(app)
+
+
+def _headers_for_user(
+    telegram_user_id: int,
+    *,
+    first_name: str,
+    username: str,
+) -> dict[str, str]:
+    now = int(time.time())
+    launch_token = create_tma_launch_token(
+        chat_id=TELEGRAM_CHAT_ID,
+        chat_type="supergroup",
+        chat_title=CHAT_TITLE,
+        secret=BOT_TOKEN,
+        now=now,
+    )
+    init_data = build_signed_init_data(
+        {
+            "auth_date": str(now),
+            "query_id": f"query-{telegram_user_id}",
+            "user": json.dumps(
+                {
+                    "id": telegram_user_id,
+                    "first_name": first_name,
+                    "username": username,
+                },
+                separators=(",", ":"),
+            ),
+            "chat_type": "supergroup",
+            "start_param": launch_token,
+        }
+    )
+    return {"X-Telegram-Init-Data": init_data}
+
+
+def _create_configured_ucl_contest(
+    client: TestClient,
+) -> tuple[int, list[int]]:
+    create_response = client.post(
+        "/api/tma/contests",
+        headers={
+            **build_tma_headers(),
+            "Idempotency-Key": "create-ucl-general-stage-api",
+        },
+        json={
+            "name": "Лига чемпионов 2026/27",
+            "template_key": "champions_league_2026_27",
+        },
+    )
+    assert create_response.status_code == 201
+    contest_id = int(create_response.json()["contest"]["id"])
+    teams_response = client.put(
+        f"/api/tma/contests/{contest_id}/teams",
+        headers=build_tma_headers(),
+        json={"team_names": [f"Команда {number:02d}" for number in range(1, 37)]},
+    )
+    assert teams_response.status_code == 200
+    team_ids = [
+        int(team["id"]) for team in teams_response.json()["tournament_teams"]["teams"]
+    ]
+    settings_response = client.put(
+        f"/api/tma/contests/{contest_id}/swiss-stage-prediction/settings",
+        headers=build_tma_headers(),
+        json={
+            "enabled": True,
+            "deadline_at": "2030-09-01T12:00:00Z",
+            "direct_qualifier_count": 8,
+            "elimination_qualifier_count": 12,
+        },
+    )
+    assert settings_response.status_code == 200
+    return contest_id, team_ids
 
 
 def test_swiss_stage_api_configures_predicts_and_records_result(
@@ -205,3 +284,186 @@ def test_swiss_stage_api_configures_predicts_and_records_result(
     assert {
         team["name"] for event in result_events for team in event["related_teams"]
     } == {"Альфа", "Бета", "Гамма"}
+
+
+def test_general_stage_api_saves_partial_and_empty_drafts_until_deadline(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = _client()
+    contest_id, team_ids = _create_configured_ucl_contest(client)
+    monkeypatch.setattr(
+        "app.tma_api._utc_now",
+        lambda: datetime(2030, 8, 1, tzinfo=timezone.utc),
+    )
+
+    partial_response = client.put(
+        f"/api/tma/contests/{contest_id}/swiss-stage-prediction",
+        headers=build_tma_headers(),
+        json={
+            "direct_team_ids": team_ids[:5],
+            "elimination_team_ids": team_ids[8:17],
+        },
+    )
+
+    assert partial_response.status_code == 200
+    details = partial_response.json()["swiss_stage_prediction"]
+    assert details["selection_mode"] == "up_to_limits"
+    assert details["direct_correct_points"] == 2
+    assert details["elimination_correct_points"] == 1
+    assert details["cross_category_points"] == 0
+    assert details["maximum_points"] == 28
+    assert details["prediction"]["is_complete"] is False
+    assert "playoff_teams" not in details["prediction"]
+    assert len(details["prediction"]["direct_teams"]) == 5
+    assert len(details["prediction"]["elimination_teams"]) == 9
+
+    empty_response = client.put(
+        f"/api/tma/contests/{contest_id}/swiss-stage-prediction",
+        headers=build_tma_headers(),
+        json={"direct_team_ids": [], "elimination_team_ids": []},
+    )
+    assert empty_response.status_code == 200
+    empty_prediction = empty_response.json()["swiss_stage_prediction"]["prediction"]
+    assert empty_prediction == {
+        "direct_teams": [],
+        "elimination_teams": [],
+        "is_complete": False,
+    }
+
+    unknown_identity_field = client.put(
+        f"/api/tma/contests/{contest_id}/swiss-stage-prediction",
+        headers=build_tma_headers(),
+        json={
+            "direct_team_ids": team_ids[:1],
+            "elimination_team_ids": [],
+            "telegram_user_id": 999,
+        },
+    )
+    assert unknown_identity_field.status_code == 422
+
+    monkeypatch.setattr(
+        "app.tma_api._utc_now",
+        lambda: datetime(2030, 9, 1, 12, tzinfo=timezone.utc),
+    )
+    at_deadline_response = client.put(
+        f"/api/tma/contests/{contest_id}/swiss-stage-prediction",
+        headers=build_tma_headers(),
+        json={"direct_team_ids": team_ids[:1], "elimination_team_ids": []},
+    )
+    assert at_deadline_response.status_code == 409
+
+
+def test_general_stage_api_keeps_user_drafts_private_and_serializes_breakdown(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    client = _client()
+    contest_id, team_ids = _create_configured_ucl_contest(client)
+    alice_headers = _headers_for_user(
+        456,
+        first_name="Алиса",
+        username="alice",
+    )
+    monkeypatch.setattr(
+        "app.tma_api._utc_now",
+        lambda: datetime(2030, 8, 1, tzinfo=timezone.utc),
+    )
+    alice_prediction_response = client.put(
+        f"/api/tma/contests/{contest_id}/swiss-stage-prediction",
+        headers=alice_headers,
+        json={
+            "direct_team_ids": team_ids[:8],
+            "elimination_team_ids": team_ids[8:20],
+        },
+    )
+    assert alice_prediction_response.status_code == 200
+    assert (
+        alice_prediction_response.json()["swiss_stage_prediction"]["prediction"][
+            "is_complete"
+        ]
+        is True
+    )
+
+    admin_view_response = client.get(
+        f"/api/tma/contests/{contest_id}",
+        headers=build_tma_headers(),
+    )
+    assert admin_view_response.status_code == 200
+    admin_view = admin_view_response.json()["contest"]
+    assert admin_view["swiss_stage_prediction"]["prediction"] is None
+    alice_before_deadline = next(
+        entry
+        for entry in admin_view["leaderboard"]
+        if entry["participant_username"] == "alice"
+    )
+    assert alice_before_deadline["swiss_stage_prediction_history"] is None
+
+    partial_result_response = client.put(
+        f"/api/tma/contests/{contest_id}/swiss-stage-result",
+        headers=build_tma_headers(),
+        json={
+            "direct_team_ids": team_ids[:7],
+            "elimination_team_ids": team_ids[8:20],
+        },
+    )
+    assert partial_result_response.status_code == 409
+
+    monkeypatch.setattr(
+        "app.tma_api._utc_now",
+        lambda: datetime(2030, 9, 1, 12, tzinfo=timezone.utc),
+    )
+    invalid_result_response = client.put(
+        f"/api/tma/contests/{contest_id}/swiss-stage-result",
+        headers=build_tma_headers(),
+        json={
+            "direct_team_ids": team_ids[:7],
+            "elimination_team_ids": team_ids[8:20],
+        },
+    )
+    assert invalid_result_response.status_code == 422
+    result_response = client.put(
+        f"/api/tma/contests/{contest_id}/swiss-stage-result",
+        headers=build_tma_headers(),
+        json={
+            "direct_team_ids": team_ids[:8],
+            "elimination_team_ids": team_ids[8:20],
+        },
+    )
+    assert result_response.status_code == 200
+
+    alice_view_response = client.get(
+        f"/api/tma/contests/{contest_id}",
+        headers=alice_headers,
+    )
+    assert alice_view_response.status_code == 200
+    alice_view = alice_view_response.json()["contest"]
+    own_prediction = alice_view["swiss_stage_prediction"]
+    assert own_prediction["awarded_points"] == 28
+    assert own_prediction["score_breakdown"] == {
+        "correct_direct_count": 8,
+        "direct_points": 16,
+        "correct_elimination_count": 12,
+        "elimination_points": 12,
+        "total_points": 28,
+    }
+    alice_history = next(
+        entry
+        for entry in alice_view["leaderboard"]
+        if entry["participant_username"] == "alice"
+    )["swiss_stage_prediction_history"]
+    assert alice_history["prediction"]["is_complete"] is True
+    assert alice_history["actual_result"]["is_complete"] is True
+    assert alice_history["score_breakdown"] == own_prediction["score_breakdown"]

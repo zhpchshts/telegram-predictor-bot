@@ -2827,6 +2827,11 @@ def test_create_contest_creates_ucl_with_eight_direct_plus_twelve_eliminated(
         "deadline_at": None,
         "direct_qualifier_count": 8,
         "elimination_qualifier_count": 12,
+        "selection_mode": "up_to_limits",
+        "direct_correct_points": 2,
+        "elimination_correct_points": 1,
+        "cross_category_points": 0,
+        "maximum_points": 28,
         "candidates": [],
         "prediction": None,
         "actual_result": None,
@@ -2834,6 +2839,7 @@ def test_create_contest_creates_ucl_with_eight_direct_plus_twelve_eliminated(
         "settings_locked": False,
         "awarded_points": None,
         "awards": [],
+        "score_breakdown": None,
     }
 
 
@@ -2890,6 +2896,7 @@ def test_ucl_prediction_api_returns_derived_playoff_teams(
     assert [team["id"] for team in prediction["direct_teams"]] == team_ids[:8]
     assert [team["id"] for team in prediction["playoff_teams"]] == team_ids[20:]
     assert [team["id"] for team in prediction["elimination_teams"]] == team_ids[8:20]
+    assert prediction["is_complete"] is True
 
 
 def test_shared_ucl_result_api_returns_derived_playoff_team_ids(
@@ -2920,6 +2927,11 @@ def test_shared_ucl_result_api_returns_derived_playoff_team_ids(
     )
     assert create_response.status_code == 201
     shared = create_response.json()["shared_tournament"]
+    assert shared["swiss_stage_prediction"]["selection_mode"] == "up_to_limits"
+    assert shared["swiss_stage_prediction"]["direct_correct_points"] == 2
+    assert shared["swiss_stage_prediction"]["elimination_correct_points"] == 1
+    assert shared["swiss_stage_prediction"]["cross_category_points"] == 0
+    assert shared["swiss_stage_prediction"]["maximum_points"] == 28
     assert shared["swiss_stage_prediction"]["playoff_team_ids"] == []
 
     teams_response = client.put(

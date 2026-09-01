@@ -39,14 +39,36 @@ AUDIT_ACTOR = AuditActor(
 )
 
 
-def test_champions_league_publication_never_scores_playoff_category() -> None:
+def test_champions_league_publication_uses_configured_category_scoring() -> None:
     assert (
         _swiss_selection_points(
-            template_key="champions_league_2026_27",
             predicted_category="playoff",
             actual_category="playoff",
+            direct_correct_points=2,
+            elimination_correct_points=1,
+            cross_category_points=0,
         )
         == 0
+    )
+    assert (
+        _swiss_selection_points(
+            predicted_category="direct",
+            actual_category="direct",
+            direct_correct_points=2,
+            elimination_correct_points=1,
+            cross_category_points=0,
+        )
+        == 2
+    )
+    assert (
+        _swiss_selection_points(
+            predicted_category="elimination",
+            actual_category="elimination",
+            direct_correct_points=2,
+            elimination_correct_points=1,
+            cross_category_points=0,
+        )
+        == 1
     )
 
 
@@ -328,18 +350,93 @@ def test_champions_league_publications_use_league_phase_categories(
     assert "Прогнозы на общий этап" in predictions_text
     assert "<b>Напрямую в 1/8</b>" in predictions_text
     assert "1. Команда 01 — 100%" in predictions_text
-    assert "<b>Стыки</b>" in predictions_text
-    assert "1. Команда 21 — 100%" in predictions_text
+    assert "<b>Стыки</b>" not in predictions_text
+    assert "1. Команда 21 — 100%" not in predictions_text
     assert "<b>Вылетят после общего этапа</b>" in predictions_text
     assert "1. Команда 09 — 100%" in predictions_text
     assert "Итоги общего этапа" in result_text
     assert "Напрямую в 1/8: Команда 01" in result_text
     assert "Стыки: Команда 07, Команда 20, Команда 23" in result_text
     assert "Вылетели после общего этапа: Команда 08" in result_text
-    assert "Средняя точность: 80%" in result_text
+    assert "Напрямую в 1/8: 6 совпадений — 12 баллов" in result_text
+    assert "Вылет: 10 совпадений — 10 баллов" in result_text
+    assert "Средняя точность: 79%" in result_text
     assert "проход" not in result_text.lower()
     assert "прошедш" not in result_text.lower()
     assert "швейцарский этап" not in (predictions_text + result_text).lower()
+
+
+def test_champions_league_partial_publication_does_not_infer_playoff_choices(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "champions-league-partial.db"
+    initialize_database(database_path)
+    contest = create_champions_league_2026_27_contest(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        chat_title="Тестовый чат",
+        telegram_user_id=ADMIN_ID,
+        first_name="Администратор",
+        last_name=None,
+        username="admin",
+        contest_name="Лига чемпионов 2026/27",
+        idempotency_key="ucl-partial-publication-contest",
+        audit_actor=AUDIT_ACTOR,
+    ).contest
+    save_tournament_teams(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        team_names=[f"Команда {number:02d}" for number in range(1, 37)],
+        audit_actor=AUDIT_ACTOR,
+    )
+    save_swiss_stage_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        enabled=True,
+        deadline_at=DEADLINE,
+        direct_qualifier_count=8,
+        elimination_qualifier_count=12,
+        audit_actor=AUDIT_ACTOR,
+        now_utc=OPEN_TIME,
+    )
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        now_utc=OPEN_TIME,
+    )
+    team_ids = [team.id for team in details.swiss_stage_prediction.candidates]
+    save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=202,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=team_ids[:1],
+        elimination_team_ids=team_ids[1:2],
+        now_utc=OPEN_TIME,
+    )
+
+    predictions_text = "".join(
+        render_publication_messages(
+            database_path=database_path,
+            publication=_publication(
+                publication_id=1,
+                contest_id=contest.id,
+                publication_type="swiss_predictions",
+            ),
+            now_utc=CLOSED_TIME,
+        )
+    )
+
+    assert "<b>Стыки</b>" not in predictions_text
+    assert "Команда 01 — 100%" in predictions_text
+    assert "Команда 02 — 100%" in predictions_text
+    assert "Команда 03" not in predictions_text
 
 
 def test_swiss_publications_are_not_created_while_master_switch_is_disabled(

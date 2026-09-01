@@ -126,6 +126,11 @@ def test_champions_league_shared_defaults_to_eight_direct_plus_twelve_eliminated
     assert shared.swiss_stage_prediction.is_enabled is False
     assert shared.swiss_stage_prediction.direct_qualifier_count == 8
     assert shared.swiss_stage_prediction.elimination_qualifier_count == 12
+    assert shared.swiss_stage_prediction.selection_mode == "up_to_limits"
+    assert shared.swiss_stage_prediction.direct_correct_points == 2
+    assert shared.swiss_stage_prediction.elimination_correct_points == 1
+    assert shared.swiss_stage_prediction.cross_category_points == 0
+    assert shared.swiss_stage_prediction.maximum_points == 28
 
     first_35_teams = [f"Команда {number:02d}" for number in range(1, 36)]
     shared = save_shared_tournament_teams(
@@ -259,7 +264,11 @@ def test_champions_league_shared_defaults_to_eight_direct_plus_twelve_eliminated
                 contest_id,
                 enabled,
                 direct_qualifier_count,
-                elimination_qualifier_count
+                elimination_qualifier_count,
+                selection_mode,
+                direct_correct_points,
+                elimination_correct_points,
+                cross_category_points
             FROM swiss_stage_prediction_settings
             WHERE contest_id IN (?, ?)
             ORDER BY contest_id
@@ -269,8 +278,8 @@ def test_champions_league_shared_defaults_to_eight_direct_plus_twelve_eliminated
         match_count = connection.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
 
     assert [tuple(row) for row in settings] == [
-        (contest.id, 1, 8, 12),
-        (second_contest.id, 1, 8, 12),
+        (contest.id, 1, 8, 12, "up_to_limits", 2, 1, 0),
+        (second_contest.id, 1, 8, 12, "up_to_limits", 2, 1, 0),
     ]
     assert match_count == 0
 
@@ -278,7 +287,60 @@ def test_champions_league_shared_defaults_to_eight_direct_plus_twelve_eliminated
         database_path=database_path,
         shared_tournament_id=shared.tournament.id,
     )
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE swiss_stage_prediction_settings
+            SET selection_mode = 'exact',
+                direct_correct_points = 9,
+                elimination_correct_points = 9,
+                cross_category_points = 9
+            WHERE contest_id = ?
+            """,
+            (contest.id,),
+        )
+    shared = save_shared_swiss_settings(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        enabled=True,
+        deadline_at="2030-09-01T13:00:00Z",
+        direct_qualifier_count=8,
+        elimination_qualifier_count=12,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-08-01T00:00:00Z"),
+    )
+    with create_connection(database_path) as connection:
+        synchronized_policies = {
+            tuple(row)
+            for row in connection.execute(
+                """
+                SELECT selection_mode, direct_correct_points,
+                       elimination_correct_points, cross_category_points
+                FROM swiss_stage_prediction_settings
+                WHERE contest_id IN (?, ?)
+                """,
+                (contest.id, second_contest.id),
+            )
+        }
+    assert synchronized_policies == {("up_to_limits", 2, 1, 0)}
     team_ids = [team.id for team in shared.teams]
+    with pytest.raises(ValueError, match="не соответствует"):
+        save_shared_swiss_result(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            direct_team_ids=team_ids[:7],
+            elimination_team_ids=team_ids[8:20],
+            expected_version=shared.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+            actor_first_name="Eugene",
+            actor_last_name="Sabir",
+            actor_username="evsab",
+            now_utc=_time("2030-09-02T00:00:00Z"),
+        )
     saved_result = save_shared_swiss_result(
         database_path=database_path,
         shared_tournament_id=shared.tournament.id,
@@ -292,6 +354,26 @@ def test_champions_league_shared_defaults_to_eight_direct_plus_twelve_eliminated
         now_utc=_time("2030-09-02T00:00:00Z"),
     )
     assert saved_result.swiss_stage_prediction.playoff_team_ids == tuple(team_ids[20:])
+
+
+def test_legacy_shared_template_keeps_exact_swiss_scoring_policy(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "world-cup-policy.db"
+    initialize_database(database_path)
+
+    shared = create_shared_tournament(
+        database_path=database_path,
+        name="Чемпионат мира 2026",
+        template_key="world_cup_2026",
+        actor_telegram_user_id=OWNER_ID,
+    )
+
+    assert shared.swiss_stage_prediction.selection_mode == "exact"
+    assert shared.swiss_stage_prediction.direct_correct_points == 2
+    assert shared.swiss_stage_prediction.elimination_correct_points == 2
+    assert shared.swiss_stage_prediction.cross_category_points == 1
+    assert shared.swiss_stage_prediction.maximum_points == 16
 
 
 def test_shared_versioned_writes_accept_only_exact_single_step_retries(
@@ -1430,3 +1512,101 @@ def test_shared_swiss_result_is_common_but_predictions_are_per_contest(
             ).fetchone()[0]
             == 4
         )
+
+
+def test_shared_deadline_only_update_preserves_locked_custom_swiss_policy(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "custom-policy.db"
+    initialize_database(database_path)
+    shared = _create_shared_tournament(database_path)
+    shared = save_shared_swiss_settings(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        enabled=True,
+        deadline_at="2030-06-01T12:00:00Z",
+        direct_qualifier_count=1,
+        elimination_qualifier_count=1,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2029-01-01T00:00:00Z"),
+    )
+    contest = _create_contest(
+        database_path,
+        shared_tournament_id=shared.tournament.id,
+        chat_id=-1001,
+        suffix="custom-policy",
+    )
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE shared_tournament_settings
+            SET swiss_selection_mode = 'up_to_limits',
+                swiss_direct_correct_points = 7,
+                swiss_elimination_correct_points = 3,
+                swiss_cross_category_points = 2
+            WHERE shared_tournament_id = ?
+            """,
+            (shared.tournament.id,),
+        )
+        connection.execute(
+            """
+            UPDATE swiss_stage_prediction_settings
+            SET selection_mode = 'up_to_limits',
+                direct_correct_points = 7,
+                elimination_correct_points = 3,
+                cross_category_points = 2
+            WHERE contest_id = ?
+            """,
+            (contest.id,),
+        )
+    save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=-1001,
+        contest_id=contest.id,
+        telegram_user_id=777,
+        first_name="Участник",
+        last_name=None,
+        username=None,
+        direct_team_ids=[shared.teams[0].id],
+        elimination_team_ids=[],
+        now_utc=_time("2030-05-01T00:00:00Z"),
+    )
+    shared = get_shared_tournament_details(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+    )
+
+    updated = save_shared_swiss_settings(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        enabled=True,
+        deadline_at="2030-06-02T12:00:00Z",
+        direct_qualifier_count=1,
+        elimination_qualifier_count=1,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-05-01T00:00:00Z"),
+    )
+
+    assert updated.swiss_stage_prediction.selection_mode == "up_to_limits"
+    assert updated.swiss_stage_prediction.direct_correct_points == 7
+    assert updated.swiss_stage_prediction.elimination_correct_points == 3
+    assert updated.swiss_stage_prediction.cross_category_points == 2
+    assert updated.swiss_stage_prediction.maximum_points == 10
+    with create_connection(database_path) as connection:
+        local_policy = connection.execute(
+            """
+            SELECT selection_mode, direct_correct_points,
+                   elimination_correct_points, cross_category_points
+            FROM swiss_stage_prediction_settings WHERE contest_id = ?
+            """,
+            (contest.id,),
+        ).fetchone()
+    assert tuple(local_policy) == ("up_to_limits", 7, 3, 2)

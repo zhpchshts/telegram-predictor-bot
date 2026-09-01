@@ -226,6 +226,14 @@ CREATE TABLE IF NOT EXISTS shared_tournament_settings (
         CHECK (swiss_direct_qualifier_count > 0),
     swiss_elimination_qualifier_count INTEGER NOT NULL DEFAULT 5
         CHECK (swiss_elimination_qualifier_count > 0),
+    swiss_selection_mode TEXT NOT NULL DEFAULT 'exact'
+        CHECK (swiss_selection_mode IN ('exact', 'up_to_limits')),
+    swiss_direct_correct_points INTEGER NOT NULL DEFAULT 2
+        CHECK (swiss_direct_correct_points >= 0),
+    swiss_elimination_correct_points INTEGER NOT NULL DEFAULT 2
+        CHECK (swiss_elimination_correct_points >= 0),
+    swiss_cross_category_points INTEGER NOT NULL DEFAULT 1
+        CHECK (swiss_cross_category_points >= 0),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -563,6 +571,14 @@ CREATE TABLE IF NOT EXISTS swiss_stage_prediction_settings (
         CHECK (direct_qualifier_count > 0),
     elimination_qualifier_count INTEGER NOT NULL DEFAULT 5
         CHECK (elimination_qualifier_count > 0),
+    selection_mode TEXT NOT NULL DEFAULT 'exact'
+        CHECK (selection_mode IN ('exact', 'up_to_limits')),
+    direct_correct_points INTEGER NOT NULL DEFAULT 2
+        CHECK (direct_correct_points >= 0),
+    elimination_correct_points INTEGER NOT NULL DEFAULT 2
+        CHECK (elimination_correct_points >= 0),
+    cross_category_points INTEGER NOT NULL DEFAULT 1
+        CHECK (cross_category_points >= 0),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

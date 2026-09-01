@@ -29,6 +29,7 @@ from app.database import database_connection, initialize_database
 CHAT_ID = -1001234567890
 ADMIN_ID = 101
 ALICE_ID = 202
+BOB_ID = 303
 OPEN_TIME = datetime(2029, 1, 1, tzinfo=timezone.utc)
 CLOSED_TIME = datetime(2030, 1, 2, tzinfo=timezone.utc)
 DEADLINE = "2030-01-01T12:00:00Z"
@@ -74,6 +75,37 @@ def _create_champions_league_contest(database_path: Path) -> int:
         idempotency_key="create-ucl-contest",
         audit_actor=AUDIT_ACTOR,
     ).contest.id
+
+
+def _configure_champions_league(database_path: Path) -> tuple[int, tuple[int, ...]]:
+    contest_id = _create_champions_league_contest(database_path)
+    save_tournament_teams(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        team_names=[f"Команда {number:02d}" for number in range(1, 37)],
+        audit_actor=AUDIT_ACTOR,
+    )
+    save_swiss_stage_prediction_settings(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        enabled=True,
+        deadline_at=DEADLINE,
+        direct_qualifier_count=8,
+        elimination_qualifier_count=12,
+        audit_actor=AUDIT_ACTOR,
+        now_utc=OPEN_TIME,
+    )
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        now_utc=OPEN_TIME,
+    )
+    return contest_id, tuple(
+        team.id for team in details.swiss_stage_prediction.candidates
+    )
 
 
 def _configure(
@@ -209,6 +241,11 @@ def test_swiss_stage_defaults_to_three_direct_and_five_playoff_teams(
     assert prediction.is_enabled is False
     assert prediction.direct_qualifier_count == 3
     assert prediction.elimination_qualifier_count == 5
+    assert prediction.selection_mode == "exact"
+    assert prediction.direct_correct_points == 2
+    assert prediction.elimination_correct_points == 2
+    assert prediction.cross_category_points == 1
+    assert prediction.maximum_points == 16
 
 
 def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_twelve(
@@ -311,6 +348,7 @@ def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_tw
     )
 
     assert len(saved.direct_teams) == 8
+    assert saved.is_complete is True
     assert tuple(team.id for team in saved.playoff_teams) == tuple(candidate_ids[20:])
     assert len(saved.elimination_teams) == 12
     assert details.matches == ()
@@ -332,7 +370,12 @@ def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_tw
         now_utc=CLOSED_TIME,
     )
 
-    assert scored.swiss_stage_prediction.awarded_points == 40
+    assert scored.swiss_stage_prediction.selection_mode == "up_to_limits"
+    assert scored.swiss_stage_prediction.direct_correct_points == 2
+    assert scored.swiss_stage_prediction.elimination_correct_points == 1
+    assert scored.swiss_stage_prediction.cross_category_points == 0
+    assert scored.swiss_stage_prediction.maximum_points == 28
+    assert scored.swiss_stage_prediction.awarded_points == 28
     assert scored.swiss_stage_prediction.prediction is not None
     assert scored.swiss_stage_prediction.actual_result is not None
     assert tuple(
@@ -341,7 +384,16 @@ def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_tw
     assert tuple(
         team.id for team in scored.swiss_stage_prediction.actual_result.playoff_teams
     ) == tuple(candidate_ids[20:])
-    assert scored.leaderboard[0].total_points == 40
+    assert scored.swiss_stage_prediction.score_breakdown == (
+        contest_service.SwissStageScoreBreakdown(
+            correct_direct_count=8,
+            direct_points=16,
+            correct_elimination_count=12,
+            elimination_points=12,
+            total_points=28,
+        )
+    )
+    assert scored.leaderboard[0].total_points == 28
 
     save_swiss_stage_result(
         database_path=database_path,
@@ -349,9 +401,11 @@ def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_tw
         contest_id=contest_id,
         direct_team_ids=[*candidate_ids[:6], candidate_ids[8], candidate_ids[20]],
         elimination_team_ids=[
-            *candidate_ids[9:19],
+            *candidate_ids[9:17],
             candidate_ids[7],
             candidate_ids[21],
+            candidate_ids[22],
+            candidate_ids[23],
         ],
         audit_actor=AUDIT_ACTOR,
         now_utc=CLOSED_TIME,
@@ -368,8 +422,8 @@ def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_tw
     }
     history = corrected.leaderboard[0].swiss_stage_prediction_history
 
-    assert corrected.swiss_stage_prediction.awarded_points == 32
-    assert corrected.leaderboard[0].total_points == 32
+    assert corrected.swiss_stage_prediction.awarded_points == 20
+    assert corrected.leaderboard[0].total_points == 20
     assert awards_by_team_id[candidate_ids[0]].points == 2
     assert awards_by_team_id[candidate_ids[7]].actual_category == "elimination"
     assert awards_by_team_id[candidate_ids[7]].points == 0
@@ -380,7 +434,14 @@ def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_tw
     assert awards_by_team_id[candidate_ids[19]].actual_category == "playoff"
     assert awards_by_team_id[candidate_ids[19]].points == 0
     assert history is not None
-    assert history.awarded_points == 32
+    assert history.awarded_points == 20
+    assert history.score_breakdown == contest_service.SwissStageScoreBreakdown(
+        correct_direct_count=6,
+        direct_points=12,
+        correct_elimination_count=8,
+        elimination_points=8,
+        total_points=20,
+    )
     assert tuple(team.id for team in history.prediction.playoff_teams) == tuple(
         candidate_ids[20:]
     )
@@ -388,9 +449,11 @@ def test_champions_league_prediction_requires_thirty_six_teams_and_eight_plus_tw
         *candidate_ids[:6],
         candidate_ids[8],
         candidate_ids[20],
-        *candidate_ids[9:19],
+        *candidate_ids[9:17],
         candidate_ids[7],
         candidate_ids[21],
+        candidate_ids[22],
+        candidate_ids[23],
     }
     assert history.actual_result is not None
     assert tuple(team.id for team in history.actual_result.playoff_teams) == tuple(
@@ -407,12 +470,296 @@ def test_champions_league_playoff_category_is_never_scored() -> None:
     awards = contest_service._swiss_stage_awards_from_rows(
         [{"id": 1, "name": "Альфа", "category": "playoff"}],
         result_rows=[{"id": 1, "name": "Альфа", "category": "playoff"}],
-        template_key="champions_league_2026_27",
+        selection_mode="up_to_limits",
+        direct_correct_points=2,
+        elimination_correct_points=1,
+        cross_category_points=0,
     )
 
     assert len(awards) == 1
     assert awards[0].actual_category == "playoff"
     assert awards[0].points == 0
+
+
+def test_champions_league_partial_and_empty_predictions_remain_visible(
+    database_path: Path,
+) -> None:
+    contest_id, candidate_ids = _configure_champions_league(database_path)
+
+    partial = save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=list(candidate_ids[:5]),
+        elimination_team_ids=list(candidate_ids[8:17]),
+        now_utc=OPEN_TIME,
+    )
+    assert partial.is_complete is False
+    assert len(partial.direct_teams) == 5
+    assert len(partial.elimination_teams) == 9
+    assert partial.playoff_teams == ()
+
+    emptied = save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=[],
+        elimination_team_ids=[],
+        now_utc=OPEN_TIME,
+    )
+    assert emptied.is_complete is False
+    assert emptied.direct_teams == ()
+    assert emptied.elimination_teams == ()
+    assert emptied.playoff_teams == ()
+
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=OPEN_TIME,
+    )
+    prediction = details.swiss_stage_prediction.prediction
+    assert prediction is not None
+    assert prediction.is_complete is False
+    assert prediction.direct_teams == ()
+    assert prediction.elimination_teams == ()
+    assert details.swiss_stage_prediction.settings_locked is True
+    assert details.leaderboard[0].swiss_stage_prediction_count == 0
+    assert details.leaderboard[0].calculated_predictions_count == 0
+
+    after_deadline = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=CLOSED_TIME,
+    )
+    history = after_deadline.leaderboard[0].swiss_stage_prediction_history
+    assert history is not None
+    assert history.prediction.is_complete is False
+    assert history.prediction.direct_teams == ()
+    assert history.prediction.elimination_teams == ()
+
+
+@pytest.mark.parametrize(
+    ("direct_count", "elimination_count", "message"),
+    [(9, 0, "не более 8"), (0, 13, "не более 12")],
+)
+def test_champions_league_prediction_rejects_values_over_limits_atomically(
+    database_path: Path,
+    direct_count: int,
+    elimination_count: int,
+    message: str,
+) -> None:
+    contest_id, candidate_ids = _configure_champions_league(database_path)
+    save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=list(candidate_ids[:5]),
+        elimination_team_ids=list(candidate_ids[8:17]),
+        now_utc=OPEN_TIME,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        save_swiss_stage_prediction(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=ALICE_ID,
+            first_name="Алиса",
+            last_name=None,
+            username="alice",
+            direct_team_ids=list(candidate_ids[:direct_count]),
+            elimination_team_ids=list(candidate_ids[20 : 20 + elimination_count]),
+            now_utc=OPEN_TIME,
+        )
+
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=OPEN_TIME,
+    )
+    prediction = details.swiss_stage_prediction.prediction
+    assert prediction is not None
+    assert tuple(team.id for team in prediction.direct_teams) == candidate_ids[:5]
+    assert {team.id for team in prediction.elimination_teams} == set(
+        candidate_ids[8:17]
+    )
+
+
+def test_identical_champions_league_prediction_is_strict_noop(
+    database_path: Path,
+) -> None:
+    contest_id, candidate_ids = _configure_champions_league(database_path)
+    direct_ids = candidate_ids[:5]
+    elimination_ids = candidate_ids[8:17]
+    save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=list(direct_ids),
+        elimination_team_ids=list(elimination_ids),
+        now_utc=OPEN_TIME,
+    )
+    with database_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE swiss_stage_predictions
+            SET updated_at = '2000-01-01T00:00:00Z'
+            WHERE contest_id = ?
+            """,
+            (contest_id,),
+        )
+
+    retried = save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=list(reversed(direct_ids)),
+        elimination_team_ids=list(reversed(elimination_ids)),
+        now_utc=OPEN_TIME,
+    )
+
+    assert retried.is_complete is False
+    with database_connection(database_path) as connection:
+        prediction_row = connection.execute(
+            """
+            SELECT updated_at
+            FROM swiss_stage_predictions
+            WHERE contest_id = ?
+            """,
+            (contest_id,),
+        ).fetchone()
+        selection_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM swiss_stage_prediction_selections AS selections
+            JOIN swiss_stage_predictions AS prediction
+              ON prediction.id = selections.prediction_id
+            WHERE prediction.contest_id = ?
+            """,
+            (contest_id,),
+        ).fetchone()[0]
+    assert prediction_row["updated_at"] == "2000-01-01T00:00:00Z"
+    assert selection_count == 14
+
+
+def test_champions_league_result_remains_exact_in_partial_mode(
+    database_path: Path,
+) -> None:
+    contest_id, candidate_ids = _configure_champions_league(database_path)
+
+    for direct_count, elimination_count, message in (
+        (7, 12, "ровно 8"),
+        (9, 12, "ровно 8"),
+        (8, 11, "ровно 12"),
+        (8, 13, "ровно 12"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            save_swiss_stage_result(
+                database_path=database_path,
+                telegram_chat_id=CHAT_ID,
+                contest_id=contest_id,
+                direct_team_ids=list(candidate_ids[:direct_count]),
+                elimination_team_ids=list(candidate_ids[20 : 20 + elimination_count]),
+                audit_actor=AUDIT_ACTOR,
+                now_utc=CLOSED_TIME,
+            )
+
+
+def test_partial_champions_league_prediction_scores_but_is_not_complete(
+    database_path: Path,
+) -> None:
+    contest_id, candidate_ids = _configure_champions_league(database_path)
+    for user_id, first_name, username, elimination_count in (
+        (ALICE_ID, "Алиса", "alice", 11),
+        (BOB_ID, "Боб", "bob", 12),
+    ):
+        save_swiss_stage_prediction(
+            database_path=database_path,
+            telegram_chat_id=CHAT_ID,
+            contest_id=contest_id,
+            telegram_user_id=user_id,
+            first_name=first_name,
+            last_name=None,
+            username=username,
+            direct_team_ids=list(candidate_ids[:8]),
+            elimination_team_ids=list(candidate_ids[8 : 8 + elimination_count]),
+            now_utc=OPEN_TIME,
+        )
+
+    before_result = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        now_utc=OPEN_TIME,
+    )
+    before_by_username = {
+        entry.participant_username: entry for entry in before_result.leaderboard
+    }
+    assert before_by_username["alice"].swiss_stage_prediction_count == 0
+    assert before_by_username["bob"].swiss_stage_prediction_count == 1
+    assert before_by_username["alice"].calculated_predictions_count == 0
+    assert before_by_username["bob"].calculated_predictions_count == 0
+
+    save_swiss_stage_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        direct_team_ids=list(candidate_ids[:8]),
+        elimination_team_ids=list(candidate_ids[8:20]),
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_TIME,
+    )
+    scored = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=CLOSED_TIME,
+    )
+    scored_by_username = {
+        entry.participant_username: entry for entry in scored.leaderboard
+    }
+    assert scored_by_username["alice"].total_points == 27
+    assert scored_by_username["alice"].swiss_stage_prediction_count == 0
+    assert scored_by_username["alice"].calculated_predictions_count == 0
+    assert scored_by_username["bob"].total_points == 28
+    assert scored_by_username["bob"].swiss_stage_prediction_count == 1
+    assert scored_by_username["bob"].calculated_predictions_count == 1
+    assert scored.swiss_stage_prediction.score_breakdown == (
+        contest_service.SwissStageScoreBreakdown(
+            correct_direct_count=8,
+            direct_points=16,
+            correct_elimination_count=11,
+            elimination_points=11,
+            total_points=27,
+        )
+    )
 
 
 def test_swiss_stage_settings_create_candidates_without_matches_and_are_audited(
