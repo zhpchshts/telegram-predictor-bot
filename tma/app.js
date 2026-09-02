@@ -4407,7 +4407,6 @@ function getSwissStageCopy(templateKey) {
       playoffChoice: "Стыки",
       eliminationChoice: "Вылет",
       directProgress: "Напрямую в 1/8",
-      playoffProgress: "В стыки",
       eliminationProgress: "Вылетят после общего этапа",
       directResult: "Вышли напрямую в 1/8",
       playoffResult: "Попали в стыки",
@@ -4419,7 +4418,7 @@ function getSwissStageCopy(templateKey) {
       predictedElimination: "вылетит после общего этапа",
       actualElimination: "вылетела после общего этапа",
       actualUnselected: "попала в стыковой раунд",
-      selectionHint: "«Стыки» выбраны по умолчанию. При подсчёте баллов учитываются только прямой выход и вылет; за выбор «Стыки» баллы не начисляются.",
+      selectionHint: "Баллы: +2 за прямой выход, +1 за вылет, за стыки — 0.",
       scoringRule: "При подсчёте баллов учитываются только прямой выход и вылет: 2 балла за верный прямой выход и 1 балл за верный вылет. За выбор «Стыки» баллы не начисляются. Максимум — 28 баллов.",
     };
   }
@@ -4607,10 +4606,9 @@ function createSwissStageMeta(prediction, templateKey) {
       className: "match-meta",
       text: prediction.deadline_at
         ? usesThreeWayGeneralStageChoice
-          ? (
-            "Прогноз закрывается с началом первого матча общего этапа: " +
-            formatMatchStartsAt(prediction.deadline_at)
-          )
+          ? `Дедлайн: ${formatMatchStartsAt(
+            prediction.deadline_at,
+          )} — первый матч.`
           : `Прогноз закрывается: ${formatMatchStartsAt(prediction.deadline_at)}`
         : "Время закрытия прогноза не задано.",
     }),
@@ -4618,10 +4616,9 @@ function createSwissStageMeta(prediction, templateKey) {
       className: "match-meta",
       text: usesThreeWayGeneralStageChoice
         ? (
-          `${copy.directProgress}: ${prediction.direct_qualifier_count}; ` +
-          `${copy.playoffProgress}: 16; ` +
-          `${copy.eliminationProgress}: ${prediction.elimination_qualifier_count}. ` +
-          "В форме доступны все три варианта."
+          `Выберите ${prediction.direct_qualifier_count} команд для прямого ` +
+          `выхода в 1/8 и ${prediction.elimination_qualifier_count} — на вылет. ` +
+          "Остальные 16 останутся в стыках."
         )
         : (
           `${copy.directChoice}: ${prediction.direct_qualifier_count}; ` +
@@ -4652,14 +4649,6 @@ function createSwissStageTeamSelector(
   const allowPartial = (
     !resultMode && prediction.selection_mode === "up_to_limits"
   );
-  const playoffCount = isChampionsLeague
-    ? Math.max(
-      0,
-      prediction.candidates.length
-        - prediction.direct_qualifier_count
-        - prediction.elimination_qualifier_count,
-    )
-    : 0;
   const directActionLabel = resultMode ? copy.directResult : copy.directChoice;
   const playoffActionLabel = resultMode
     ? copy.playoffResult
@@ -4673,9 +4662,6 @@ function createSwissStageTeamSelector(
   const eliminationProgressLabel = resultMode
     ? copy.eliminationResult
     : copy.eliminationProgress;
-  const playoffProgressLabel = resultMode
-    ? copy.playoffResult
-    : copy.playoffProgress;
   const form = createElement("form", {
     className: "swiss-stage-selection-form",
   });
@@ -4683,7 +4669,6 @@ function createSwissStageTeamSelector(
     className: "swiss-stage-progress",
   });
   const directProgress = createElement("strong");
-  const playoffProgress = createElement("strong");
   const eliminationProgress = createElement("strong");
   const selectionHint = isChampionsLeague
     ? createElement("p", {
@@ -4800,21 +4785,22 @@ function createSwissStageTeamSelector(
 
   function sync() {
     const isClosed = isPredictionDeadlineReached();
-    directProgress.textContent = (
-      `${directProgressLabel}: ${directIds.size} из ` +
-      `${prediction.direct_qualifier_count}`
-    );
-    eliminationProgress.textContent = (
-      `${eliminationProgressLabel}: ${eliminationIds.size} из ` +
-      `${prediction.elimination_qualifier_count}`
-    );
     if (isChampionsLeague) {
-      const currentPlayoffCount = (
-        prediction.candidates.length - directIds.size - eliminationIds.size
+      directProgress.textContent = (
+        `В 1/8: ${directIds.size}/${prediction.direct_qualifier_count}`
       );
-      playoffProgress.textContent = (
-        `${playoffProgressLabel}: ${currentPlayoffCount}; ` +
-        `в полном прогнозе — ${playoffCount}`
+      eliminationProgress.textContent = (
+        `На вылет: ${eliminationIds.size}/` +
+        `${prediction.elimination_qualifier_count}`
+      );
+    } else {
+      directProgress.textContent = (
+        `${directProgressLabel}: ${directIds.size} из ` +
+        `${prediction.direct_qualifier_count}`
+      );
+      eliminationProgress.textContent = (
+        `${eliminationProgressLabel}: ${eliminationIds.size} из ` +
+        `${prediction.elimination_qualifier_count}`
       );
     }
     submitButton.disabled = (
@@ -4986,7 +4972,6 @@ function createSwissStageTeamSelector(
 
   progress.append(
     directProgress,
-    ...(isChampionsLeague ? [playoffProgress] : []),
     eliminationProgress,
   );
   actions.append(submitButton);

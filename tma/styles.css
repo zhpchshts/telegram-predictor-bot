@@ -1695,9 +1695,14 @@ summary:focus-visible {
 }
 
 .swiss-stage-progress {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
   font-size: 0.84rem;
+}
+
+.swiss-stage-progress strong {
+  white-space: nowrap;
 }
 
 .swiss-stage-team-list {

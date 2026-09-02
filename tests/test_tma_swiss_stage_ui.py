@@ -77,12 +77,12 @@ def test_general_stage_editability_uses_server_state_and_shows_partial_progress(
     assert "prediction.is_open = false" in selector_source
     assert "if (resultMode)" in selector_source
     assert "!resultMode && error?.status === 409" in selector_source
-    assert "`${directProgressLabel}: ${directIds.size} из `" in selector_source
-    assert "`${eliminationProgressLabel}: ${eliminationIds.size} из `" in (
+    assert "`В 1/8: ${directIds.size}/${prediction.direct_qualifier_count}`" in (
         selector_source
     )
-    assert "`${playoffProgressLabel}: ${currentPlayoffCount}; `" in selector_source
-    assert "`в полном прогнозе — ${playoffCount}`" in selector_source
+    assert "`На вылет: ${eliminationIds.size}/`" in selector_source
+    assert "currentPlayoffCount" not in selector_source
+    assert "playoffProgress" not in selector_source
     assert 'prediction.selection_mode === "up_to_limits"' in selector_source
     assert "!allowPartial" in selector_source
 
@@ -242,6 +242,7 @@ def test_tma_locked_settings_text_mentions_prediction_and_result() -> None:
 def test_champions_league_uses_league_phase_copy_and_fixed_limits() -> None:
     copy_source = _function_source("getSwissStageCopy")
     scoring_source = _function_source("getSwissStageScoringRule")
+    meta_source = _function_source("createSwissStageMeta")
     category_source = _function_source("getSwissStageCategoryLabel")
     selector_source = _function_source("createSwissStageTeamSelector")
     administration_source = _function_source("createSwissStageAdministrationCard")
@@ -257,7 +258,6 @@ def test_champions_league_uses_league_phase_copy_and_fixed_limits() -> None:
     assert 'directChoice: "Напрямую"' in copy_source
     assert 'playoffChoice: "Стыки"' in copy_source
     assert 'eliminationChoice: "Вылет"' in copy_source
-    assert 'playoffProgress: "В стыки"' in copy_source
     assert 'eliminationProgress: "Вылетят после общего этапа"' in copy_source
     assert 'directResult: "Вышли напрямую в 1/8"' in copy_source
     assert 'playoffResult: "Попали в стыки"' in copy_source
@@ -295,10 +295,12 @@ def test_champions_league_uses_league_phase_copy_and_fixed_limits() -> None:
     assert "copy.eliminationResult" in selector_source
     assert "playoff_team_ids" not in selector_source
     assert "resultMode: true" in administration_source
-    assert "При подсчёте баллов учитываются только прямой выход и вылет" in (
-        copy_source
-    )
-    assert "За выбор «Стыки» баллы не начисляются" in copy_source
+    assert "Баллы: +2 за прямой выход, +1 за вылет, за стыки — 0" in copy_source
+    assert "`Дедлайн: ${formatMatchStartsAt(" in meta_source
+    assert "Выберите ${prediction.direct_qualifier_count} команд" in meta_source
+    assert "Остальные 16 останутся в стыках." in meta_source
+    assert "В форме доступны все три варианта." not in meta_source
+    assert "Прогноз закрывается с началом первого матча" not in meta_source
     assert "При подсчёте баллов учитываются только прямой выход и вылет" in (
         scoring_source
     )
