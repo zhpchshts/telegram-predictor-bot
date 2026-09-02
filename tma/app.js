@@ -859,7 +859,7 @@ function createContestFormCard(bootstrap, state) {
     } else if (isWorldCup) {
       hint.textContent = "Счёт строго после 90 минут: 3 очка за точный счёт, 2 — за разницу голов, 1 — за исход.";
     } else if (isChampionsLeague) {
-      hint.textContent = "Общий этап без матчей: выберите 8 команд напрямую в 1/8 и 12 команд на вылет. Остальные неявно относятся к стыкам. За прямой выход начисляется 2 балла, за вылет — 1; максимум — 28 баллов.";
+      hint.textContent = "Общий этап без матчей: для каждой из 36 команд доступны варианты «Напрямую», «Стыки» и «Вылет». В полном прогнозе — 8 команд напрямую в 1/8, 16 в стыках и 12 на вылет. Баллы начисляются только за верный прямой выход и верный вылет; максимум — 28 баллов.";
     } else {
       hint.textContent = "Параметры матчей и начисления зависят от выбранного шаблона.";
     }
@@ -960,7 +960,7 @@ function createContestConfirmationCard(bootstrap, state) {
   } else if (state.draftTemplateKey === "world_cup_2026") {
     details.textContent = "Будет создан конкурс Чемпионата мира 2026 со стандартными футбольными правилами.";
   } else if (state.draftTemplateKey === "champions_league_2026_27") {
-    details.textContent = "Будет создан конкурс Лиги чемпионов 2026/27 без матчей общего этапа: один прогноз с выбором 8 команд напрямую в 1/8 и 12 команд на вылет. Остальные команды неявно относятся к стыкам. Максимум — 28 баллов.";
+    details.textContent = "Будет создан конкурс Лиги чемпионов 2026/27 без матчей общего этапа: один прогноз с тремя вариантами для каждой команды — 8 напрямую в 1/8, 16 в стыках и 12 на вылет. Баллы начисляются только за верный прямой выход и верный вылет; максимум — 28 баллов.";
   } else {
     details.textContent = `Будет создан конкурс по шаблону «${selectedTemplate.label}».`;
   }
@@ -4419,7 +4419,8 @@ function getSwissStageCopy(templateKey) {
       predictedElimination: "вылетит после общего этапа",
       actualElimination: "вылетела после общего этапа",
       actualUnselected: "попала в стыковой раунд",
-      scoringRule: "2 балла за команду, вышедшую напрямую в 1/8, и 1 балл за вылетевшую команду. За стыки баллы не начисляются. Максимум — 28 баллов.",
+      selectionHint: "«Стыки» выбраны по умолчанию. При подсчёте баллов учитываются только прямой выход и вылет; за выбор «Стыки» баллы не начисляются.",
+      scoringRule: "При подсчёте баллов учитываются только прямой выход и вылет: 2 балла за верный прямой выход и 1 балл за верный вылет. За выбор «Стыки» баллы не начисляются. Максимум — 28 баллов.",
     };
   }
   return {
@@ -4468,10 +4469,10 @@ function getSwissStageScoringRule(prediction, templateKey = "") {
       ? ""
       : ` Максимум — ${maximumPoints} ${getPointsLabel(maximumPoints)}.`;
     return (
-      `${directPoints} ${getPointsLabel(directPoints)} за команду, ` +
-      `вышедшую напрямую, и ${eliminationPoints} ` +
-      `${getPointsLabel(eliminationPoints)} за вылетевшую команду. ` +
-      `За стыки и ошибки — 0 баллов.${maximumCopy}`
+      "При подсчёте баллов учитываются только прямой выход и вылет: " +
+      `${directPoints} ${getPointsLabel(directPoints)} за верный прямой выход ` +
+      `и ${eliminationPoints} ${getPointsLabel(eliminationPoints)} ` +
+      `за верный вылет. За выбор «Стыки» баллы не начисляются.${maximumCopy}`
     );
   }
   if (
@@ -4595,7 +4596,7 @@ function createSwissStageStatus(prediction) {
 
 function createSwissStageMeta(prediction, templateKey) {
   const copy = getSwissStageCopy(templateKey);
-  const usesImplicitMiddleCategory = (
+  const usesThreeWayGeneralStageChoice = (
     prediction.selection_mode === "up_to_limits"
   );
   const meta = createElement("div", {
@@ -4605,7 +4606,7 @@ function createSwissStageMeta(prediction, templateKey) {
     createElement("p", {
       className: "match-meta",
       text: prediction.deadline_at
-        ? usesImplicitMiddleCategory
+        ? usesThreeWayGeneralStageChoice
           ? (
             "Прогноз закрывается с началом первого матча общего этапа: " +
             formatMatchStartsAt(prediction.deadline_at)
@@ -4615,11 +4616,12 @@ function createSwissStageMeta(prediction, templateKey) {
     }),
     createElement("p", {
       className: "match-meta",
-      text: usesImplicitMiddleCategory
+      text: usesThreeWayGeneralStageChoice
         ? (
           `${copy.directProgress}: ${prediction.direct_qualifier_count}; ` +
+          `${copy.playoffProgress}: 16; ` +
           `${copy.eliminationProgress}: ${prediction.elimination_qualifier_count}. ` +
-          "Остальные команды неявно относятся к стыкам."
+          "В форме доступны все три варианта."
         )
         : (
           `${copy.directChoice}: ${prediction.direct_qualifier_count}; ` +
@@ -4646,10 +4648,22 @@ function createSwissStageTeamSelector(
   },
 ) {
   const copy = getSwissStageCopy(templateKey);
+  const isChampionsLeague = templateKey === "champions_league_2026_27";
   const allowPartial = (
     !resultMode && prediction.selection_mode === "up_to_limits"
   );
+  const playoffCount = isChampionsLeague
+    ? Math.max(
+      0,
+      prediction.candidates.length
+        - prediction.direct_qualifier_count
+        - prediction.elimination_qualifier_count,
+    )
+    : 0;
   const directActionLabel = resultMode ? copy.directResult : copy.directChoice;
+  const playoffActionLabel = resultMode
+    ? copy.playoffResult
+    : copy.playoffChoice;
   const eliminationActionLabel = resultMode
     ? copy.eliminationResult
     : copy.eliminationChoice;
@@ -4659,6 +4673,9 @@ function createSwissStageTeamSelector(
   const eliminationProgressLabel = resultMode
     ? copy.eliminationResult
     : copy.eliminationProgress;
+  const playoffProgressLabel = resultMode
+    ? copy.playoffResult
+    : copy.playoffProgress;
   const form = createElement("form", {
     className: "swiss-stage-selection-form",
   });
@@ -4666,7 +4683,14 @@ function createSwissStageTeamSelector(
     className: "swiss-stage-progress",
   });
   const directProgress = createElement("strong");
+  const playoffProgress = createElement("strong");
   const eliminationProgress = createElement("strong");
+  const selectionHint = isChampionsLeague
+    ? createElement("p", {
+      className: "form-hint swiss-stage-scoring-hint",
+      text: copy.selectionHint,
+    })
+    : null;
   const list = createElement("ul", {
     className: "swiss-stage-team-list",
   });
@@ -4745,7 +4769,20 @@ function createSwissStageTeamSelector(
     eliminationIds.delete(teamId);
   }
 
+  function isPlayoffTeam(teamId) {
+    return (
+      isChampionsLeague
+      && !directIds.has(teamId)
+      && !eliminationIds.has(teamId)
+    );
+  }
+
   function setCategory(teamId, category) {
+    if (category === "playoff" && isChampionsLeague) {
+      removeFromEveryCategory(teamId);
+      sync();
+      return;
+    }
     const categoryIds = category === "direct"
       ? directIds
       : eliminationIds;
@@ -4771,6 +4808,15 @@ function createSwissStageTeamSelector(
       `${eliminationProgressLabel}: ${eliminationIds.size} из ` +
       `${prediction.elimination_qualifier_count}`
     );
+    if (isChampionsLeague) {
+      const currentPlayoffCount = (
+        prediction.candidates.length - directIds.size - eliminationIds.size
+      );
+      playoffProgress.textContent = (
+        `${playoffProgressLabel}: ${currentPlayoffCount}; ` +
+        `в полном прогнозе — ${playoffCount}`
+      );
+    }
     submitButton.disabled = (
       isClosed || (
         !allowPartial && (
@@ -4785,7 +4831,9 @@ function createSwissStageTeamSelector(
       const eliminationButton = row.querySelector(
         "[data-category='elimination']",
       );
+      const playoffButton = row.querySelector("[data-category='playoff']");
       directButton.classList.toggle("is-selected", directIds.has(teamId));
+      playoffButton?.classList.toggle("is-selected", isPlayoffTeam(teamId));
       eliminationButton.classList.toggle(
         "is-selected",
         eliminationIds.has(teamId),
@@ -4793,6 +4841,10 @@ function createSwissStageTeamSelector(
       directButton.setAttribute(
         "aria-pressed",
         directIds.has(teamId) ? "true" : "false",
+      );
+      playoffButton?.setAttribute(
+        "aria-pressed",
+        isPlayoffTeam(teamId) ? "true" : "false",
       );
       eliminationButton.setAttribute(
         "aria-pressed",
@@ -4810,6 +4862,9 @@ function createSwissStageTeamSelector(
           eliminationIds.size >= prediction.elimination_qualifier_count
         )
       );
+      if (playoffButton) {
+        playoffButton.disabled = isClosed;
+      }
     }
   }
 
@@ -4825,10 +4880,17 @@ function createSwissStageTeamSelector(
     const choices = createElement("div", {
       className: "swiss-stage-team-actions",
     });
+    choices.classList.toggle(
+      "swiss-stage-team-actions--three",
+      isChampionsLeague,
+    );
     const directButton = createActionButton(
       directActionLabel,
       "swiss-stage-choice",
     );
+    const playoffButton = isChampionsLeague
+      ? createActionButton(playoffActionLabel, "swiss-stage-choice")
+      : null;
     const eliminationButton = createActionButton(
       eliminationActionLabel,
       "swiss-stage-choice",
@@ -4837,13 +4899,24 @@ function createSwissStageTeamSelector(
     eliminationButton.type = "button";
     directButton.dataset.category = "direct";
     eliminationButton.dataset.category = "elimination";
+    if (playoffButton) {
+      playoffButton.type = "button";
+      playoffButton.dataset.category = "playoff";
+    }
     directButton.addEventListener("click", () => {
       setCategory(team.id, "direct");
+    });
+    playoffButton?.addEventListener("click", () => {
+      setCategory(team.id, "playoff");
     });
     eliminationButton.addEventListener("click", () => {
       setCategory(team.id, "elimination");
     });
-    choices.append(directButton, eliminationButton);
+    choices.append(
+      directButton,
+      ...(playoffButton ? [playoffButton] : []),
+      eliminationButton,
+    );
     row.append(name, choices);
     list.append(row);
   }
@@ -4911,9 +4984,19 @@ function createSwissStageTeamSelector(
     }
   });
 
-  progress.append(directProgress, eliminationProgress);
+  progress.append(
+    directProgress,
+    ...(isChampionsLeague ? [playoffProgress] : []),
+    eliminationProgress,
+  );
   actions.append(submitButton);
-  form.append(progress, list, message, actions);
+  form.append(
+    progress,
+    ...(selectionHint ? [selectionHint] : []),
+    list,
+    message,
+    actions,
+  );
   if (!resultMode && prediction.deadline_at) {
     form.dataset.predictionDeadline = prediction.deadline_at;
   }
@@ -6382,7 +6465,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
     text: prediction.settings_locked
       ? "До наступления текущего дедлайна его можно изменить. Остальные настройки зафиксированы."
       : hasFixedChampionsLeagueLimits
-        ? "Добавьте 36 команд и задайте начало первого матча общего этапа. Участник выбирает до 8 команд напрямую в 1/8 и до 12 на вылет; остальные неявно относятся к стыкам."
+        ? "Добавьте 36 команд и задайте начало первого матча общего этапа. Для каждой команды участнику доступны варианты «Напрямую», «Стыки» и «Вылет»; частичный черновик сохраняется в пределах 8 прямых выходов и 12 вылетов."
         : (
         "Укажите, до какого времени можно выбрать команды и сколько команд пройдёт " +
         "напрямую и через стыковой раунд."
@@ -11306,7 +11389,7 @@ function createSharedSwissStageCard(bootstrap, tournament) {
     ...(hasFixedChampionsLeagueLimits
       ? [createElement("p", {
         className: "form-hint",
-        text: `Добавьте ровно 36 команд. Участник выбирает до 8 команд в категории «${copy.directChoice}» и до 12 в категории «${copy.eliminationChoice}». Остальные неявно относятся к стыкам. Формула: +2 за прямой выход, +1 за вылет; максимум — 28 баллов.`,
+        text: `Добавьте ровно 36 команд. Для каждой команды доступны категории «${copy.directChoice}», «${copy.playoffChoice}» и «${copy.eliminationChoice}». Баллы начисляются только за верный прямой выход и верный вылет: +2 и +1 соответственно; максимум — 28 баллов.`,
       })]
       : []),
     saveButton,

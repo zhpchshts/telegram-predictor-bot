@@ -183,15 +183,17 @@ def test_champions_league_template_creation_explains_league_phase_prediction() -
     confirmation_source = _function_source("createContestConfirmationCard")
 
     assert 'templateInput.value === "champions_league_2026_27"' in form_source
-    assert "выберите 8 команд напрямую в 1/8 и 12 команд на вылет" in form_source
-    assert "Остальные неявно относятся к стыкам" in form_source
+    assert "для каждой из 36 команд доступны варианты" in form_source
+    assert "«Напрямую», «Стыки» и «Вылет»" in form_source
+    assert "Баллы начисляются только за верный прямой выход" in form_source
     assert "максимум — 28 баллов" in form_source
     assert 'state.draftTemplateKey === "champions_league_2026_27"' in (
         confirmation_source
     )
-    assert "один прогноз с выбором 8 команд напрямую в 1/8" in confirmation_source
-    assert "12 команд на вылет" in confirmation_source
-    assert "Максимум — 28 баллов" in confirmation_source
+    assert "один прогноз с тремя вариантами для каждой команды" in confirmation_source
+    assert "8 напрямую в 1/8, 16 в стыках и 12 на вылет" in confirmation_source
+    assert "Баллы начисляются только за верный прямой выход" in confirmation_source
+    assert "максимум — 28 баллов" in confirmation_source
 
 
 def test_ti_series_controls_and_historical_rules_are_preserved() -> None:
