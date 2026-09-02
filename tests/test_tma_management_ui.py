@@ -320,6 +320,7 @@ def test_role_and_audit_tools_have_separate_screens_with_hub_back_links() -> Non
 
 def test_participant_tabs_separate_match_and_tournament_predictions() -> None:
     source = _source()
+    default_tab_source = _function_source("getDefaultContestTab")
     active_tab_source = _function_source("getActiveContestTab")
     details_source = _function_source("renderContestDetailsScreen")
     match_predictions_source = _function_source("createMatchPredictionListItems")
@@ -333,7 +334,10 @@ def test_participant_tabs_separate_match_and_tournament_predictions() -> None:
     leaderboard_tab = '{ id: "leaderboard", label: "Рейтинг" }'
     assert source.index(matches_tab) < source.index(tournament_tab)
     assert source.index(tournament_tab) < source.index(leaderboard_tab)
-    assert ': "matches"' in active_tab_source
+    assert '? "tournament"' in default_tab_source
+    assert ': "matches"' in default_tab_source
+    assert "getDefaultContestTab(contest)" in active_tab_source
+    assert "getActiveContestTab(state.activeTab, contest)" in details_source
 
     assert 'activeTab === "tournament"' in details_source
     assert "createTournamentPredictionListItems(" in details_source

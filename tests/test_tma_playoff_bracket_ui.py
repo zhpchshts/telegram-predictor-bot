@@ -78,8 +78,43 @@ def test_participant_bracket_groups_a_tie_and_both_legs_without_duplicates() -> 
     assert "matchIds.add(secondLeg.id)" in references_source
     assert "excludeMatchIds.has(match.id)" in list_source
     assert "excludeTieIds.has(tieId)" in list_source
-    assert "createPlayoffBracketCard(contest)" in screen_source
+    assert "createPlayoffBracketCard(contest, {" in screen_source
+    assert "selectedRoundKey: currentPlayoffRoundKey" in screen_source
     assert '{ title: "Другие матчи" }' in screen_source
+
+
+def test_participant_default_navigation_follows_latest_materialized_round() -> None:
+    round_source = _function_source("getLatestMaterializedPlayoffRoundKey")
+    default_tab_source = _function_source("getDefaultContestTab")
+    active_tab_source = _function_source("getActiveContestTab")
+    bracket_source = _function_source("createPlayoffBracketCard")
+    screen_source = _function_source("renderContestDetailsScreen")
+
+    assert 'container?.template_key !== "champions_league_2026_27"' in round_source
+    assert "bracket.rounds.length - 1" in round_source
+    assert 'entityType === "two_legged_tie"' in round_source
+    assert "findBracketTie(container, node) !== null" in round_source
+    assert 'entityType === "match"' in round_source
+    assert "findBracketMatch(container, node) !== null" in round_source
+    assert "return round.key" in round_source
+    assert "return null" in round_source
+
+    assert 'contest?.template_key === "champions_league_2026_27"' in default_tab_source
+    assert "getLatestMaterializedPlayoffRoundKey(contest) === null" in (
+        default_tab_source
+    )
+    assert '? "tournament"' in default_tab_source
+    assert ': "matches"' in default_tab_source
+    assert "getDefaultContestTab(contest)" in active_tab_source
+
+    assert "selectedRoundKey = null" in bracket_source
+    assert "round.key === selectedRoundKey" in bracket_source
+    assert "selectRound(selectedRoundIndex >= 0 ? selectedRoundIndex : 0)" in (
+        bracket_source
+    )
+    assert "track.scrollLeft = Math.max(" in bracket_source
+    assert "getLatestMaterializedPlayoffRoundKey(contest)" in screen_source
+    assert "selectedRoundKey: currentPlayoffRoundKey" in screen_source
 
 
 def test_bracket_falls_back_to_round_metadata_and_keeps_legacy_matches() -> None:

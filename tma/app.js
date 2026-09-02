@@ -2184,10 +2184,43 @@ function createContestRulesCard(
   return card;
 }
 
-function getActiveContestTab(tab) {
+function getLatestMaterializedPlayoffRoundKey(container) {
+  if (container?.template_key !== "champions_league_2026_27") {
+    return null;
+  }
+  const bracket = getPlayoffBracket(container);
+  if (!bracket) {
+    return null;
+  }
+  for (let index = bracket.rounds.length - 1; index >= 0; index -= 1) {
+    const round = bracket.rounds[index];
+    const hasMaterializedEntity = round.nodes.some((node) => {
+      const entityType = getBracketNodeEntityType(node);
+      if (entityType === "two_legged_tie") {
+        return findBracketTie(container, node) !== null;
+      }
+      return entityType === "match" && findBracketMatch(container, node) !== null;
+    });
+    if (hasMaterializedEntity) {
+      return round.key;
+    }
+  }
+  return null;
+}
+
+function getDefaultContestTab(contest) {
+  return (
+    contest?.template_key === "champions_league_2026_27"
+    && getLatestMaterializedPlayoffRoundKey(contest) === null
+  )
+    ? "tournament"
+    : "matches";
+}
+
+function getActiveContestTab(tab, contest) {
   return CONTEST_TABS.some((candidate) => candidate.id === tab)
     ? tab
-    : "matches";
+    : getDefaultContestTab(contest);
 }
 
 function getActiveContestManagementTab(tab) {
@@ -7427,7 +7460,10 @@ function createPlayoffBracketNode(container, node, { mode, bracketMode }) {
   return item;
 }
 
-function createPlayoffBracketCard(container, { mode = "participant" } = {}) {
+function createPlayoffBracketCard(
+  container,
+  { mode = "participant", selectedRoundKey = null } = {},
+) {
   const bracket = getPlayoffBracket(container);
   if (!bracket) {
     return null;
@@ -7510,11 +7546,24 @@ function createPlayoffBracketCard(container, { mode = "participant" } = {}) {
       button.tabIndex = isSelected ? 0 : -1;
       columns[index].classList.toggle("is-mobile-selected", isSelected);
     }
+    const selectedColumn = columns[selectedIndex];
+    window.requestAnimationFrame(() => {
+      if (!selectedColumn?.isConnected || track.scrollWidth <= track.clientWidth) {
+        return;
+      }
+      track.scrollLeft = Math.max(
+        0,
+        selectedColumn.offsetLeft - columns[0].offsetLeft,
+      );
+    });
   }
   for (const [index, button] of buttons.entries()) {
     button.addEventListener("click", () => selectRound(index));
   }
-  selectRound(0);
+  const selectedRoundIndex = bracket.rounds.findIndex(
+    (round) => round.key === selectedRoundKey,
+  );
+  selectRound(selectedRoundIndex >= 0 ? selectedRoundIndex : 0);
   card.append(heading, description, roundSelector, track);
   return card;
 }
@@ -8676,7 +8725,8 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
   const leaderboard = Array.isArray(contest.leaderboard)
     ? contest.leaderboard
     : [];
-  const activeTab = getActiveContestTab(state.activeTab);
+  const currentPlayoffRoundKey = getLatestMaterializedPlayoffRoundKey(contest);
+  const activeTab = getActiveContestTab(state.activeTab, contest);
   const isActive = contest.is_active !== false;
   const cards = [
     createContestDetailsCard(contest, () => {
@@ -8726,7 +8776,9 @@ function renderContestDetailsScreen(bootstrap, contest, state = {}) {
     );
   } else {
     const bracket = getPlayoffBracket(contest);
-    const bracketCard = createPlayoffBracketCard(contest);
+    const bracketCard = createPlayoffBracketCard(contest, {
+      selectedRoundKey: currentPlayoffRoundKey,
+    });
     if (bracketCard) {
       cards.push(bracketCard);
     }
