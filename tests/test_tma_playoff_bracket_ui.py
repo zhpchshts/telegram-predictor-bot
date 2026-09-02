@@ -31,16 +31,21 @@ def test_champions_league_rounds_have_stable_keys_names_and_formats() -> None:
     source = _source()
 
     expected_rounds = (
-        ('key: "playoff"', 'name: "Стыковые матчи"'),
-        ('key: "round_of_16"', 'name: "1/8 финала"'),
-        ('key: "quarterfinal"', 'name: "1/4 финала"'),
-        ('key: "semifinal"', 'name: "1/2 финала"'),
-        ('key: "final"', 'name: "Финал"'),
+        (
+            'key: "playoff"',
+            'name: "Стыковые матчи"',
+            'selectorLabel: "Стыковые"',
+        ),
+        ('key: "round_of_16"', 'name: "1/8 финала"', 'selectorLabel: "1/8"'),
+        ('key: "quarterfinal"', 'name: "1/4 финала"', 'selectorLabel: "1/4"'),
+        ('key: "semifinal"', 'name: "1/2 финала"', 'selectorLabel: "1/2"'),
+        ('key: "final"', 'name: "Финал"', 'selectorLabel: "Финал"'),
     )
     positions = []
-    for round_key, round_name in expected_rounds:
+    for round_key, round_name, selector_label in expected_rounds:
         positions.append(source.index(round_key))
         assert round_name in source
+        assert selector_label in source
     assert positions == sorted(positions)
     assert 'format: "two_legged"' in source
     assert 'format: "single"' in source
@@ -58,6 +63,8 @@ def test_participant_bracket_groups_a_tie_and_both_legs_without_duplicates() -> 
     assert 'className: "playoff-bracket-track"' in bracket_source
     assert 'role", "tablist"' in bracket_source
     assert 'role", "tabpanel"' in bracket_source
+    assert 'button.setAttribute("aria-label", round.name)' in bracket_source
+    assert "?.selectorLabel || round.name" in bracket_source
     assert 'round.format === "single"' in bracket_source
 
     assert "createTwoLeggedTiePredictionListItem(container, tie)" in node_source
@@ -146,6 +153,11 @@ def test_playoff_bracket_is_horizontal_on_desktop_and_one_round_on_mobile() -> N
     assert "scroll-snap-type: inline mandatory" in styles
     assert ".playoff-round-column.is-mobile-selected" in styles
     assert ".playoff-round-selector" in styles
+    assert (
+        "grid-template-columns: minmax(0, 1.45fr) repeat(4, minmax(0, 1fr))" in styles
+    )
+    assert ".playoff-round-button {" in styles
+    assert "min-height: 44px" in styles
     assert "@media (max-width: 560px)" in styles
     assert ".fixture-sync-card" in styles
     assert ".manual-correction-card" in styles

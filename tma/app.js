@@ -15,6 +15,7 @@ const CHAMPIONS_LEAGUE_PLAYOFF_ROUNDS = Object.freeze([
   Object.freeze({
     key: "playoff",
     name: "Стыковые матчи",
+    selectorLabel: "Стыковые",
     position: 10,
     format: "two_legged",
     nodeCount: 8,
@@ -22,6 +23,7 @@ const CHAMPIONS_LEAGUE_PLAYOFF_ROUNDS = Object.freeze([
   Object.freeze({
     key: "round_of_16",
     name: "1/8 финала",
+    selectorLabel: "1/8",
     position: 20,
     format: "two_legged",
     nodeCount: 8,
@@ -29,6 +31,7 @@ const CHAMPIONS_LEAGUE_PLAYOFF_ROUNDS = Object.freeze([
   Object.freeze({
     key: "quarterfinal",
     name: "1/4 финала",
+    selectorLabel: "1/4",
     position: 30,
     format: "two_legged",
     nodeCount: 4,
@@ -36,6 +39,7 @@ const CHAMPIONS_LEAGUE_PLAYOFF_ROUNDS = Object.freeze([
   Object.freeze({
     key: "semifinal",
     name: "1/2 финала",
+    selectorLabel: "1/2",
     position: 40,
     format: "two_legged",
     nodeCount: 2,
@@ -43,6 +47,7 @@ const CHAMPIONS_LEAGUE_PLAYOFF_ROUNDS = Object.freeze([
   Object.freeze({
     key: "final",
     name: "Финал",
+    selectorLabel: "Финал",
     position: 50,
     format: "single",
     nodeCount: 1,
@@ -7452,9 +7457,12 @@ function createPlayoffBracketCard(container, { mode = "participant" } = {}) {
 
   for (const [roundIndex, round] of bracket.rounds.entries()) {
     const columnId = `playoff-round-${container.id}-${mode}-${roundIndex}`;
-    const button = createActionButton(round.name, "playoff-round-button");
+    const selectorLabel = CHAMPIONS_LEAGUE_PLAYOFF_ROUNDS_BY_KEY
+      .get(round.key)?.selectorLabel || round.name;
+    const button = createActionButton(selectorLabel, "playoff-round-button");
     button.type = "button";
     button.setAttribute("role", "tab");
+    button.setAttribute("aria-label", round.name);
     button.setAttribute("aria-controls", columnId);
     const column = createElement("section", {
       className: "playoff-round-column",
