@@ -42,6 +42,7 @@ def test_two_legged_pair_is_a_separate_autosaved_participant_prediction() -> Non
     assert "predicted_advancing_team_id: advancingTeamId" in prediction_source
     assert "predicted_home_score" not in prediction_source
     assert "queueTwoLeggedTiePredictionSave(" in prediction_source
+    assert "String(savedTeamId) !== fingerprint" in prediction_source
     assert "PREDICTION_FLUSH_EVENT" in prediction_source
     assert "PREDICTION_DEADLINE_SYNC_EVENT" in prediction_source
     assert "form.dataset.predictionDeadline = deadlineAt" in prediction_source

@@ -352,18 +352,49 @@ def test_participant_tabs_separate_match_and_tournament_predictions() -> None:
     assert "if (!hasListItems)" in matches_card_source
 
 
-def test_participant_tournament_predictions_save_without_reloading_contest() -> None:
+def test_participant_tournament_predictions_autosave_without_reloading() -> None:
     details_source = _function_source("renderContestDetailsScreen")
     champion_source = _function_source("createChampionPredictionChoiceSection")
     swiss_source = _function_source("createSwissStagePredictionCard")
 
     assert "createTournamentPredictionListItems(contest)" in details_source
     assert "openContest" not in champion_source
-    assert 'setFormMessage(message, "Прогноз сохранён.", "success")' in (
-        champion_source
-    )
+    assert 'select.addEventListener("change", scheduleSave)' in champion_source
+    assert "queueChampionPredictionSave(" in champion_source
+    assert "PREDICTION_FLUSH_EVENT" in champion_source
+    assert 'form.dataset.predictionAutosave = "true"' in champion_source
+    assert 'form.addEventListener("submit"' not in champion_source
+    assert '"Сохранить прогноз"' not in champion_source
+    assert '"Изменить прогноз"' not in champion_source
     assert "openContest" not in swiss_source
-    assert 'successMessage: "Прогноз сохранён."' in swiss_source
+    assert "autosave: true" in swiss_source
+
+
+def test_champion_autosave_tracks_status_retry_and_deadline() -> None:
+    champion_source = _function_source("createChampionPredictionChoiceSection")
+    card_source = _function_source("createChampionPredictionCard")
+
+    assert "lastSavedFingerprint" in champion_source
+    assert "let isSaving = false" in champion_source
+    assert "function scheduleSave()" in champion_source
+    assert "function savePrediction()" in champion_source
+    assert '"Изменения будут сохранены…"' in champion_source
+    assert '"Сохраняем…"' in champion_source
+    assert '"Прогноз сохранён."' in champion_source
+    assert '"Повторить сохранение"' in champion_source
+    assert "error?.status === 409" in champion_source
+    assert "championPrediction.is_open = false" in champion_source
+    assert "select.disabled = true" in champion_source
+    assert "PREDICTION_DEADLINE_SYNC_EVENT" in champion_source
+    assert (
+        "form.dataset.predictionDeadline = championPrediction.deadline_at"
+        in champion_source
+    )
+    assert "Math.min(remaining, MAX_TIMER_DELAY_MS)" in champion_source
+    assert "onClosed = () => {}" in champion_source
+    assert "onClosed();" in champion_source
+    assert "syncChampionCardStatus(status, championPrediction)" in card_source
+    assert "savedTeamId !== payload.predicted_team_id" in champion_source
 
 
 def test_leaderboard_keeps_name_and_optional_username_in_one_line() -> None:

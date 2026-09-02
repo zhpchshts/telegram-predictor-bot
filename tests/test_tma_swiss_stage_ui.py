@@ -32,6 +32,7 @@ def _function_source(name: str) -> str:
 def test_tma_contains_mobile_swiss_stage_prediction_controls() -> None:
     source = _source()
     selector_source = _function_source("createSwissStageTeamSelector")
+    card_source = _function_source("createSwissStagePredictionCard")
 
     assert "Прогноз на швейцарскую систему" in source
     assert 'directProgress: "Пройдут напрямую"' in source
@@ -41,7 +42,8 @@ def test_tma_contains_mobile_swiss_stage_prediction_controls() -> None:
     assert "data-category='direct'" in selector_source
     assert "data-category='playoff'" in selector_source
     assert "data-category='elimination'" in selector_source
-    assert "Сохранить прогноз" in source
+    assert "autosave: true" in card_source
+    assert "submitLabel: prediction.prediction" not in card_source
     assert (
         "drag"
         not in source[
@@ -49,6 +51,46 @@ def test_tma_contains_mobile_swiss_stage_prediction_controls() -> None:
                 "function createSwissStageReadonlySelection"
             )
         ]
+    )
+
+
+def test_participant_stage_choices_autosave_but_results_remain_manual() -> None:
+    selector_source = _function_source("createSwissStageTeamSelector")
+    participant_source = _function_source("createSwissStagePredictionCard")
+    administration_source = _function_source("createSwissStageAdministrationCard")
+
+    assert "autosave = false" in selector_source
+    assert "const isAutosave = autosave && !resultMode" in selector_source
+    assert "queueSwissStagePredictionSave(" in selector_source
+    assert "function scheduleSave()" in selector_source
+    assert "function savePrediction()" in selector_source
+    assert "let isSaving = false" in selector_source
+    assert "lastSavedFingerprint" in selector_source
+    assert "PREDICTION_FLUSH_EVENT" in selector_source
+    assert "onClosed = () => {}" in selector_source
+    assert "onClosed();" in selector_source
+    assert "autosave: true" in participant_source
+    assert "contestId: contest.id" in participant_source
+    assert "syncSwissStageStatus(status, prediction)" in participant_source
+    assert "resultMode: true" in administration_source
+    assert "autosave: true" not in administration_source
+    assert "window.confirm(" in selector_source
+
+
+def test_stage_autosave_preserves_partial_and_exact_selection_modes() -> None:
+    selector_source = _function_source("createSwissStageTeamSelector")
+
+    assert 'prediction.selection_mode === "up_to_limits"' in selector_source
+    assert "return allowPartial || isSelectionComplete()" in selector_source
+    assert "function isDirty(" in selector_source
+    assert "function getSavedSelectionFingerprint(" in selector_source
+    assert "savedFingerprint !== fingerprint" in selector_source
+    assert "fingerprint !== initialFingerprint" in selector_source
+    assert ".sort((left, right) => left - right)" in selector_source
+    assert "Черновик сохранён." in selector_source
+    assert 'setSaveStatus("", "draft")' in selector_source
+    assert "Заполните прогноз полностью — изменения пока не сохранены." in (
+        selector_source
     )
 
 
@@ -187,7 +229,7 @@ def test_swiss_stage_settings_match_champion_settings_copy_and_state() -> None:
     champion_card_source = _function_source("createChampionAdministrationCard")
     swiss_source = _function_source("createSwissStageSettingsForm")
     swiss_card_source = _function_source("createSwissStageAdministrationCard")
-    swiss_status_source = _function_source("createSwissStageStatus")
+    swiss_status_source = _function_source("syncSwissStageStatus")
 
     for settings_source in (champion_source, swiss_source):
         assert 'text: "Настройки прогноза"' in settings_source
@@ -290,7 +332,7 @@ def test_champions_league_uses_league_phase_copy_and_fixed_limits() -> None:
         in selector_source
     )
     assert "!allowPartial" in selector_source
-    assert 'allowPartial && !isComplete ? "Черновик сохранён."' in selector_source
+    assert "allowPartial && !isSelectionComplete()" in selector_source
     assert "text: copy.selectionHint" in selector_source
     assert "copy.eliminationResult" in selector_source
     assert "playoff_team_ids" not in selector_source

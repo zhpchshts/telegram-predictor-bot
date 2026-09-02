@@ -65,20 +65,27 @@ def test_awaited_ui_requests_cannot_redraw_a_replaced_view() -> None:
     assert source.count("await apiRequestForCurrentView(") >= 30
 
 
-def test_match_autosaves_are_flushed_and_serialized_across_renders() -> None:
+def test_participant_autosaves_are_flushed_and_serialized_across_renders() -> None:
     source = _source()
     replace_source = _function_source("replaceAppContent")
-    flush_source = _function_source("flushMatchPredictionForms")
+    flush_source = _function_source("flushPredictionForms")
     queue_source = _function_source("queuePredictionSave")
     match_queue_source = _function_source("queueMatchPredictionSave")
     tie_queue_source = _function_source("queueTwoLeggedTiePredictionSave")
-    wait_source = _function_source("waitForMatchPredictionSaves")
+    swiss_queue_source = _function_source("queueSwissStagePredictionSave")
+    champion_queue_source = _function_source("queueChampionPredictionSave")
+    wait_source = _function_source("waitForPredictionSaves")
     prediction_source = _function_source("createMatchPredictionSection")
     tie_prediction_source = _function_source("createTwoLeggedTiePredictionListItem")
+    swiss_prediction_source = _function_source("createSwissStageTeamSelector")
+    champion_prediction_source = _function_source(
+        "createChampionPredictionChoiceSection"
+    )
     open_source = _function_source("openContest")
 
-    assert "flushMatchPredictionForms()" in replace_source
+    assert "flushPredictionForms()" in replace_source
     assert "PREDICTION_FLUSH_EVENT" in flush_source
+    assert "form[data-prediction-autosave]" in flush_source
     assert "previousSave" in queue_source
     assert ".catch(() => undefined)" in queue_source
     assert "void trackedRequest.catch(() => undefined)" in queue_source
@@ -86,16 +93,31 @@ def test_match_autosaves_are_flushed_and_serialized_across_renders() -> None:
     assert source.count("keepalive: true") == 1
     assert ".then(sendSave)" in queue_source
     assert ": sendSave()" in queue_source
-    assert "matchPredictionSaveQueues.set" in queue_source
-    assert "matchPredictionSaveQueues.delete" in queue_source
+    assert "predictionSaveQueues.set" in queue_source
+    assert "predictionSaveQueues.delete" in queue_source
+    assert "predictionSaveFailures.set" in queue_source
+    assert "predictionSaveFailures.delete" in queue_source
+    assert "error?.status === 409" in queue_source
     assert "`${contestId}:match:${matchId}`" in match_queue_source
     assert "`${contestId}:two-legged-tie:${tieId}`" in tie_queue_source
     assert (
         "`/api/tma/contests/${contestId}/two-legged-ties/${tieId}/prediction`"
         in tie_queue_source
     )
+    assert "`${contestId}:swiss-stage`" in swiss_queue_source
+    assert (
+        "`/api/tma/contests/${contestId}/swiss-stage-prediction`" in swiss_queue_source
+    )
+    assert "`${contestId}:champion`" in champion_queue_source
+    assert (
+        "`/api/tma/contests/${contestId}/champion-prediction`" in champion_queue_source
+    )
     assert "while (true)" in wait_source
-    assert "Promise.allSettled(pendingSaves)" in wait_source
+    assert "Promise.allSettled(" in wait_source
+    assert "predictionSaveFailures.entries()" in wait_source
+    assert "predictionSaveFailures.delete(failedEntry[0])" in wait_source
+    assert "throw failedEntry[1]" in wait_source
+    assert "await Promise.resolve()" in wait_source
     assert "Promise.race([drainSaves(), timeout])" in wait_source
     assert "PREDICTION_SAVE_WAIT_TIMEOUT_MS" in wait_source
     assert "Не удалось дождаться сохранения прогноза" in wait_source
@@ -107,23 +129,41 @@ def test_match_autosaves_are_flushed_and_serialized_across_renders() -> None:
     assert timeout_match is not None
     assert 0 < int(timeout_match.group(1).replace("_", "")) <= 15_000
     assert "queueMatchPredictionSave(" in prediction_source
-    assert "form.addEventListener(PREDICTION_FLUSH_EVENT" in prediction_source
     assert "queueTwoLeggedTiePredictionSave(" in tie_prediction_source
-    assert "form.addEventListener(PREDICTION_FLUSH_EVENT" in tie_prediction_source
-    assert "await waitForMatchPredictionSaves(contestId)" in open_source
+    assert "queueSwissStagePredictionSave(" in swiss_prediction_source
+    assert "queueChampionPredictionSave(" in champion_prediction_source
+    for form_source in (
+        prediction_source,
+        tie_prediction_source,
+        swiss_prediction_source,
+        champion_prediction_source,
+    ):
+        assert 'form.dataset.predictionAutosave = "true"' in form_source
+        assert "form.addEventListener(PREDICTION_FLUSH_EVENT" in form_source
+        assert "clearPredictionSaveFailure(saveQueueKey)" in form_source
+        assert "recordPredictionSaveFailure(saveQueueKey, error)" in form_source
+    assert "function getSavedPredictionFingerprint(" in prediction_source
+    assert "savedFingerprint !== fingerprint" in prediction_source
+    assert "let predictionClosed = false" in prediction_source
+    assert "error?.status === 409" in prediction_source
+    assert "predictionClosed = true" in prediction_source
+    assert "String(savedTeamId) !== fingerprint" in tie_prediction_source
+    assert "savedTeamId !== payload.predicted_team_id" in champion_prediction_source
+    assert "await waitForPredictionSaves(contestId)" in open_source
 
 
-def test_match_autosave_flushes_on_hard_close_lifecycle_events() -> None:
+def test_prediction_autosave_flushes_on_hard_close_lifecycle_events() -> None:
     source = _source()
-    flush_source = _function_source("flushMatchPredictionForms")
+    flush_source = _function_source("flushPredictionForms")
 
     assert 'document.visibilityState === "hidden"' in source
-    assert 'window.addEventListener("pagehide", flushMatchPredictionForms)' in source
+    assert 'window.addEventListener("pagehide", flushPredictionForms)' in source
     assert (
         'window.addEventListener("pageshow", syncVisiblePredictionDeadlines)' in source
     )
-    assert 'appContentElement.querySelectorAll(\n    ".match-prediction-form",' in (
-        flush_source
+    assert (
+        'appContentElement.querySelectorAll(\n    "form[data-prediction-autosave]",'
+        in flush_source
     )
     assert "form.dispatchEvent(new Event(PREDICTION_FLUSH_EVENT))" in flush_source
 
@@ -136,7 +176,7 @@ def test_match_autosave_closes_stale_form_after_deadline() -> None:
     assert 'document.visibilityState === "visible"' in source
     assert 'window.addEventListener("pageshow"' in source
     assert "function syncPredictionDeadline()" in prediction_source
-    assert "if (isMatchPredictionOpen(match))" in prediction_source
+    assert "if (!predictionClosed && isMatchPredictionOpen(match))" in prediction_source
     assert "homeScoreInput.disabled = true" in prediction_source
     assert "awayScoreInput.disabled = true" in prediction_source
     assert "seriesScoreInput.disabled = true" in prediction_source

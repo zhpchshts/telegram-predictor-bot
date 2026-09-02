@@ -150,21 +150,22 @@ const AUDIT_ROLE_LABELS = Object.freeze({
   participant: "Участник",
 });
 const AUDIT_PAGE_SIZE = 30;
-const matchPredictionSaveQueues = new Map();
+const predictionSaveQueues = new Map();
+const predictionSaveFailures = new Map();
 
 const chatSummaryElement = document.querySelector("#chat-summary");
 const appContentElement = document.querySelector("#app-content");
 
-function flushMatchPredictionForms() {
+function flushPredictionForms() {
   for (const form of appContentElement.querySelectorAll(
-    ".match-prediction-form",
+    "form[data-prediction-autosave]",
   )) {
     form.dispatchEvent(new Event(PREDICTION_FLUSH_EVENT));
   }
 }
 
 function replaceAppContent(...children) {
-  flushMatchPredictionForms();
+  flushPredictionForms();
   currentViewToken += 1;
   appContentElement.replaceChildren(...children);
   return currentViewToken;
@@ -199,6 +200,7 @@ async function apiRequestForCurrentView(path, options = {}) {
 }
 
 function queuePredictionSave(queueKey, path, payload) {
+  predictionSaveFailures.delete(queueKey);
   const sendSave = () => apiRequest(
     path,
     {
@@ -208,19 +210,45 @@ function queuePredictionSave(queueKey, path, payload) {
       body: JSON.stringify(payload),
     },
   );
-  const previousSave = matchPredictionSaveQueues.get(queueKey);
+  const previousSave = predictionSaveQueues.get(queueKey);
   const request = previousSave
     ? previousSave.catch(() => undefined).then(sendSave)
     : sendSave();
+  const requestWithFailureTracking = request.then(
+    (result) => {
+      predictionSaveFailures.delete(queueKey);
+      return result;
+    },
+    (error) => {
+      if (error?.status === 409) {
+        predictionSaveFailures.delete(queueKey);
+      } else {
+        predictionSaveFailures.set(queueKey, error);
+      }
+      throw error;
+    },
+  );
   let trackedRequest;
-  trackedRequest = request.finally(() => {
-    if (matchPredictionSaveQueues.get(queueKey) === trackedRequest) {
-      matchPredictionSaveQueues.delete(queueKey);
+  trackedRequest = requestWithFailureTracking.finally(() => {
+    if (predictionSaveQueues.get(queueKey) === trackedRequest) {
+      predictionSaveQueues.delete(queueKey);
     }
   });
   void trackedRequest.catch(() => undefined);
-  matchPredictionSaveQueues.set(queueKey, trackedRequest);
+  predictionSaveQueues.set(queueKey, trackedRequest);
   return trackedRequest;
+}
+
+function clearPredictionSaveFailure(queueKey) {
+  predictionSaveFailures.delete(queueKey);
+}
+
+function recordPredictionSaveFailure(queueKey, error) {
+  if (error?.status === 409) {
+    predictionSaveFailures.delete(queueKey);
+    return;
+  }
+  predictionSaveFailures.set(queueKey, error);
 }
 
 function queueMatchPredictionSave(contestId, matchId, payload) {
@@ -239,17 +267,41 @@ function queueTwoLeggedTiePredictionSave(contestId, tieId, payload) {
   );
 }
 
-async function waitForMatchPredictionSaves(contestId) {
+function queueSwissStagePredictionSave(contestId, payload) {
+  return queuePredictionSave(
+    `${contestId}:swiss-stage`,
+    `/api/tma/contests/${contestId}/swiss-stage-prediction`,
+    payload,
+  );
+}
+
+function queueChampionPredictionSave(contestId, payload) {
+  return queuePredictionSave(
+    `${contestId}:champion`,
+    `/api/tma/contests/${contestId}/champion-prediction`,
+    payload,
+  );
+}
+
+async function waitForPredictionSaves(contestId) {
   const queuePrefix = `${contestId}:`;
   const drainSaves = async () => {
     while (true) {
-      const pendingSaves = [...matchPredictionSaveQueues.entries()]
-        .filter(([queueKey]) => queueKey.startsWith(queuePrefix))
-        .map(([, request]) => request);
-      if (pendingSaves.length === 0) {
+      const pendingEntries = [...predictionSaveQueues.entries()]
+        .filter(([queueKey]) => queueKey.startsWith(queuePrefix));
+      if (pendingEntries.length === 0) {
+        const failedEntry = [...predictionSaveFailures.entries()]
+          .find(([queueKey]) => queueKey.startsWith(queuePrefix));
+        if (failedEntry) {
+          predictionSaveFailures.delete(failedEntry[0]);
+          throw failedEntry[1];
+        }
         return;
       }
-      await Promise.allSettled(pendingSaves);
+      await Promise.allSettled(
+        pendingEntries.map(([, request]) => request),
+      );
+      await Promise.resolve();
     }
   };
   let timeoutId;
@@ -279,7 +331,7 @@ function syncVisiblePredictionDeadlines() {
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
-    flushMatchPredictionForms();
+    flushPredictionForms();
     return;
   }
   if (document.visibilityState === "visible") {
@@ -287,7 +339,7 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-window.addEventListener("pagehide", flushMatchPredictionForms);
+window.addEventListener("pagehide", flushPredictionForms);
 window.addEventListener("pageshow", syncVisiblePredictionDeadlines);
 
 function setChatSummary(text = "") {
@@ -3662,6 +3714,8 @@ function createMatchPredictionSection(contest, match) {
   const form = createElement("form", {
     className: "match-prediction-form",
   });
+  form.dataset.predictionAutosave = "true";
+  const saveQueueKey = `${contest.id}:match:${match.id}`;
   const scoreHeading = createElement("p", {
     className: "form-field-label",
     text: isSeries
@@ -3843,7 +3897,37 @@ function createMatchPredictionSection(contest, match) {
     ].join(":");
   }
 
+  function getSavedPredictionFingerprint(savedPrediction) {
+    if (
+      !savedPrediction ||
+      !Number.isSafeInteger(savedPrediction.home_score) ||
+      savedPrediction.home_score < 0 ||
+      !Number.isSafeInteger(savedPrediction.away_score) ||
+      savedPrediction.away_score < 0
+    ) {
+      return null;
+    }
+    if (
+      !isSeries &&
+      !isTwoLegged &&
+      (
+        !Number.isSafeInteger(savedPrediction.advancing_team_id) ||
+        savedPrediction.advancing_team_id <= 0
+      )
+    ) {
+      return null;
+    }
+    return getPayloadFingerprint({
+      predicted_home_score: savedPrediction.home_score,
+      predicted_away_score: savedPrediction.away_score,
+      predicted_advancing_team_id: isSeries || isTwoLegged
+        ? null
+        : savedPrediction.advancing_team_id,
+    });
+  }
+
   let isSaving = false;
+  let predictionClosed = false;
   let lastSavedFingerprint = prediction
     ? getPayloadFingerprint({
         predicted_home_score: prediction.home_score,
@@ -3856,9 +3940,10 @@ function createMatchPredictionSection(contest, match) {
   let deadlineTimer = null;
 
   function syncPredictionDeadline() {
-    if (isMatchPredictionOpen(match)) {
+    if (!predictionClosed && isMatchPredictionOpen(match)) {
       return false;
     }
+    predictionClosed = true;
 
     if (deadlineTimer !== null) {
       window.clearTimeout(deadlineTimer);
@@ -3923,11 +4008,13 @@ function createMatchPredictionSection(contest, match) {
 
     const payload = readPredictionPayload();
     if (!payload.isReady) {
+      clearPredictionSaveFailure(saveQueueKey);
       setSaveStatus(payload.message, "draft");
       return;
     }
 
     if (!isSaving && getPayloadFingerprint(payload) === lastSavedFingerprint) {
+      clearPredictionSaveFailure(saveQueueKey);
       setSaveStatus("Сохранено.", "saved");
       return;
     }
@@ -3949,12 +4036,14 @@ function createMatchPredictionSection(contest, match) {
 
     const payload = readPredictionPayload();
     if (!payload.isReady) {
+      clearPredictionSaveFailure(saveQueueKey);
       setSaveStatus(payload.message, "draft");
       return;
     }
 
     const fingerprint = getPayloadFingerprint(payload);
     if (fingerprint === lastSavedFingerprint) {
+      clearPredictionSaveFailure(saveQueueKey);
       setSaveStatus("Сохранено.", "saved");
       return;
     }
@@ -3968,14 +4057,21 @@ function createMatchPredictionSection(contest, match) {
         match.id,
         payload,
       );
-      if (!result || !result.prediction) {
+      const savedFingerprint = getSavedPredictionFingerprint(
+        result?.prediction,
+      );
+      if (savedFingerprint === null || savedFingerprint !== fingerprint) {
         throw new Error("Сервер вернул некорректный ответ при сохранении прогноза.");
       }
 
       match.prediction = result.prediction;
-      lastSavedFingerprint = fingerprint;
+      lastSavedFingerprint = savedFingerprint;
     } catch (error) {
       isSaving = false;
+      recordPredictionSaveFailure(saveQueueKey, error);
+      if (error?.status === 409) {
+        predictionClosed = true;
+      }
       if (syncPredictionDeadline()) {
         return;
       }
@@ -3984,10 +4080,12 @@ function createMatchPredictionSection(contest, match) {
         currentPayload.isReady &&
         getPayloadFingerprint(currentPayload) !== fingerprint
       ) {
+        clearPredictionSaveFailure(saveQueueKey);
         void savePrediction();
         return;
       }
       if (!currentPayload.isReady) {
+        clearPredictionSaveFailure(saveQueueKey);
         setSaveStatus(currentPayload.message, "draft");
         return;
       }
@@ -4200,6 +4298,8 @@ function createTwoLeggedTiePredictionListItem(contest, tie) {
   const form = createElement("form", {
     className: "match-prediction-form two-legged-tie-prediction-form",
   });
+  form.dataset.predictionAutosave = "true";
+  const saveQueueKey = `${contest.id}:two-legged-tie:${tieId}`;
   const teamField = createTwoLeggedTieTeamField(contest, tie, {
     idPrefix: `two-legged-tie-${tieId}-prediction`,
     selectedTeamId: prediction?.advancing_team_id ?? null,
@@ -4305,11 +4405,13 @@ function createTwoLeggedTiePredictionListItem(contest, tie) {
     }
     const payload = readPredictionPayload();
     if (!payload.isReady) {
+      clearPredictionSaveFailure(saveQueueKey);
       setSaveStatus(payload.message, "draft");
       return;
     }
     const fingerprint = String(payload.predicted_advancing_team_id);
     if (fingerprint === lastSavedFingerprint) {
+      clearPredictionSaveFailure(saveQueueKey);
       setSaveStatus("Сохранено.", "saved");
       return;
     }
@@ -4324,15 +4426,21 @@ function createTwoLeggedTiePredictionListItem(contest, tie) {
       const savedPrediction = response?.prediction
         || response?.two_legged_tie?.prediction
         || response?.tie?.prediction;
-      if (!savedPrediction) {
+      const savedTeamId = savedPrediction?.advancing_team_id;
+      if (
+        !Number.isSafeInteger(savedTeamId) ||
+        savedTeamId <= 0 ||
+        String(savedTeamId) !== fingerprint
+      ) {
         throw new Error(
           "Сервер вернул некорректный ответ при сохранении прогноза на проход.",
         );
       }
       tie.prediction = savedPrediction;
-      lastSavedFingerprint = String(savedPrediction.advancing_team_id);
+      lastSavedFingerprint = String(savedTeamId);
     } catch (error) {
       isSaving = false;
+      recordPredictionSaveFailure(saveQueueKey, error);
       if (error?.status === 409) {
         tie.is_prediction_open = false;
       }
@@ -4344,6 +4452,7 @@ function createTwoLeggedTiePredictionListItem(contest, tie) {
         currentPayload.isReady
         && String(currentPayload.predicted_advancing_team_id) !== fingerprint
       ) {
+        clearPredictionSaveFailure(saveQueueKey);
         void savePrediction();
         return;
       }
@@ -4379,6 +4488,7 @@ function createTwoLeggedTiePredictionListItem(contest, tie) {
     }
     const payload = readPredictionPayload();
     if (!payload.isReady) {
+      clearPredictionSaveFailure(saveQueueKey);
       setSaveStatus(payload.message, "draft");
       return;
     }
@@ -4611,10 +4721,13 @@ function getSwissStageSelectionIds(selection, key) {
   );
 }
 
-function createSwissStageStatus(prediction) {
-  const status = createElement("span", {
-    className: "champion-card-status",
-  });
+function syncSwissStageStatus(status, prediction) {
+  status.classList.remove(
+    "champion-card-status--disabled",
+    "champion-card-status--completed",
+    "champion-card-status--open",
+    "champion-card-status--closed",
+  );
   if (!prediction.is_enabled) {
     status.textContent = "Не настроен";
     status.classList.add("champion-card-status--disabled");
@@ -4628,6 +4741,13 @@ function createSwissStageStatus(prediction) {
     status.textContent = "Закрыт";
     status.classList.add("champion-card-status--closed");
   }
+}
+
+function createSwissStageStatus(prediction) {
+  const status = createElement("span", {
+    className: "champion-card-status",
+  });
+  syncSwissStageStatus(status, prediction);
   return status;
 }
 
@@ -4680,13 +4800,18 @@ function createSwissStageTeamSelector(
     savedSubmitLabel = submitLabel,
     templateKey = "",
     resultMode = false,
+    autosave = false,
+    contestId = null,
+    onClosed = () => {},
   },
 ) {
   const copy = getSwissStageCopy(templateKey);
   const isChampionsLeague = templateKey === "champions_league_2026_27";
+  const isAutosave = autosave && !resultMode;
   const allowPartial = (
     !resultMode && prediction.selection_mode === "up_to_limits"
   );
+  const saveQueueKey = isAutosave ? `${contestId}:swiss-stage` : null;
   const directActionLabel = resultMode ? copy.directResult : copy.directChoice;
   const playoffActionLabel = resultMode
     ? copy.playoffResult
@@ -4703,6 +4828,9 @@ function createSwissStageTeamSelector(
   const form = createElement("form", {
     className: "swiss-stage-selection-form",
   });
+  if (isAutosave) {
+    form.dataset.predictionAutosave = "true";
+  }
   const progress = createElement("div", {
     className: "swiss-stage-progress",
   });
@@ -4714,6 +4842,12 @@ function createSwissStageTeamSelector(
       text: copy.selectionHint,
     })
     : null;
+  const autosaveHint = isAutosave
+    ? createElement("p", {
+        className: "form-hint",
+        text: "Изменения сохраняются автоматически.",
+      })
+    : null;
   const list = createElement("ul", {
     className: "swiss-stage-team-list",
   });
@@ -4723,11 +4857,19 @@ function createSwissStageTeamSelector(
   const actions = createElement("div", {
     className: "form-actions",
   });
-  const submitButton = createActionButton(
-    submitLabel,
-    "primary-action-button",
-    "submit",
-  );
+  const submitButton = isAutosave
+    ? null
+    : createActionButton(
+        submitLabel,
+        "primary-action-button",
+        "submit",
+      );
+  const retryButton = isAutosave
+    ? createActionButton(
+        "Повторить сохранение",
+        "secondary-action-button",
+      )
+    : null;
   const directIds = getSwissStageSelectionIds(
     initialSelection,
     "direct_teams",
@@ -4736,7 +4878,96 @@ function createSwissStageTeamSelector(
     initialSelection,
     "elimination_teams",
   );
+  function readPredictionPayload() {
+    return {
+      direct_team_ids: [...directIds].sort((left, right) => left - right),
+      elimination_team_ids: [...eliminationIds].sort(
+        (left, right) => left - right,
+      ),
+    };
+  }
+
+  function getPayloadFingerprint(payload) {
+    return `${payload.direct_team_ids.join(",")}|` +
+      payload.elimination_team_ids.join(",");
+  }
+
+  function getSavedSelectionFingerprint(selection) {
+    if (
+      !selection ||
+      !Array.isArray(selection.direct_teams) ||
+      !Array.isArray(selection.elimination_teams)
+    ) {
+      return null;
+    }
+    const directTeamIds = selection.direct_teams.map((team) => team?.id);
+    const eliminationTeamIds = selection.elimination_teams.map(
+      (team) => team?.id,
+    );
+    const allTeamIds = [...directTeamIds, ...eliminationTeamIds];
+    if (
+      allTeamIds.some(
+        (teamId) => !Number.isSafeInteger(teamId) || teamId <= 0,
+      ) ||
+      new Set(allTeamIds).size !== allTeamIds.length
+    ) {
+      return null;
+    }
+    return getPayloadFingerprint({
+      direct_team_ids: directTeamIds.sort((left, right) => left - right),
+      elimination_team_ids: eliminationTeamIds.sort(
+        (left, right) => left - right,
+      ),
+    });
+  }
+
+  function isSelectionComplete() {
+    return (
+      directIds.size === prediction.direct_qualifier_count &&
+      eliminationIds.size === prediction.elimination_qualifier_count
+    );
+  }
+
+  function isPayloadReady() {
+    return allowPartial || isSelectionComplete();
+  }
+
+  const initialFingerprint = getPayloadFingerprint(readPredictionPayload());
+  let lastSavedFingerprint = (
+    initialSelection && typeof initialSelection === "object"
+  )
+    ? initialFingerprint
+    : null;
+  let isSaving = false;
+  let saveTimer = null;
   let deadlineTimer = null;
+
+  function isDirty(payload = readPredictionPayload()) {
+    const fingerprint = getPayloadFingerprint(payload);
+    return lastSavedFingerprint === null
+      ? fingerprint !== initialFingerprint
+      : fingerprint !== lastSavedFingerprint;
+  }
+
+  function getSavedMessage() {
+    return allowPartial && !isSelectionComplete()
+      ? "Черновик сохранён."
+      : (successMessage || "Прогноз сохранён.");
+  }
+
+  function setSaveStatus(statusMessage, state = "") {
+    setFormMessage(
+      message,
+      statusMessage,
+      state === "error" ? "error" : state === "saved" ? "success" : "",
+    );
+    message.dataset.saveState = state;
+    form.setAttribute("aria-busy", state === "saving" ? "true" : "false");
+    if (retryButton) {
+      retryButton.hidden = state !== "error";
+      actions.hidden = state !== "error";
+    }
+  }
 
   function isPredictionDeadlineReached() {
     if (resultMode) {
@@ -4754,13 +4985,41 @@ function createSwissStageTeamSelector(
       return false;
     }
     prediction.is_open = false;
+    onClosed();
     if (deadlineTimer !== null) {
       window.clearTimeout(deadlineTimer);
       deadlineTimer = null;
     }
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
     form.setAttribute("aria-disabled", "true");
     sync();
-    setFormMessage(message, "Приём прогнозов завершён.");
+    const currentFingerprint = getPayloadFingerprint(readPredictionPayload());
+    const isSaved = (
+      lastSavedFingerprint !== null &&
+      currentFingerprint === lastSavedFingerprint
+    );
+    let deadlineMessage;
+    if (isSaved) {
+      deadlineMessage = allowPartial && !isSelectionComplete()
+        ? "Сохранён неполный черновик. Приём прогнозов завершён."
+        : "Прогноз сохранён. Приём прогнозов завершён.";
+    } else if (
+      lastSavedFingerprint === null &&
+      currentFingerprint === initialFingerprint
+    ) {
+      deadlineMessage = "Приём прогнозов завершён. Прогноз не был сохранён.";
+    } else {
+      deadlineMessage = (
+        "Приём прогнозов завершён. Последние изменения не сохранены."
+      );
+    }
+    setSaveStatus(
+      deadlineMessage,
+      isSaved ? "saved" : "closed",
+    );
     return true;
   }
 
@@ -4801,24 +5060,31 @@ function createSwissStageTeamSelector(
   }
 
   function setCategory(teamId, category) {
+    const previousFingerprint = getPayloadFingerprint(readPredictionPayload());
     if (category === "playoff" && isChampionsLeague) {
       removeFromEveryCategory(teamId);
       sync();
-      return;
+    } else {
+      const categoryIds = category === "direct"
+        ? directIds
+        : eliminationIds;
+      const categoryLimit = category === "direct"
+        ? prediction.direct_qualifier_count
+        : prediction.elimination_qualifier_count;
+      if (categoryIds.has(teamId)) {
+        categoryIds.delete(teamId);
+      } else if (categoryIds.size < categoryLimit) {
+        removeFromEveryCategory(teamId);
+        categoryIds.add(teamId);
+      }
+      sync();
     }
-    const categoryIds = category === "direct"
-      ? directIds
-      : eliminationIds;
-    const categoryLimit = category === "direct"
-      ? prediction.direct_qualifier_count
-      : prediction.elimination_qualifier_count;
-    if (categoryIds.has(teamId)) {
-      categoryIds.delete(teamId);
-    } else if (categoryIds.size < categoryLimit) {
-      removeFromEveryCategory(teamId);
-      categoryIds.add(teamId);
+    if (
+      isAutosave &&
+      getPayloadFingerprint(readPredictionPayload()) !== previousFingerprint
+    ) {
+      scheduleSave();
     }
-    sync();
   }
 
   function sync() {
@@ -4841,14 +5107,16 @@ function createSwissStageTeamSelector(
         `${prediction.elimination_qualifier_count}`
       );
     }
-    submitButton.disabled = (
-      isClosed || (
-        !allowPartial && (
-          directIds.size !== prediction.direct_qualifier_count ||
-          eliminationIds.size !== prediction.elimination_qualifier_count
+    if (submitButton) {
+      submitButton.disabled = (
+        isClosed || (
+          !allowPartial && (
+            directIds.size !== prediction.direct_qualifier_count ||
+            eliminationIds.size !== prediction.elimination_qualifier_count
+          )
         )
-      )
-    );
+      );
+    }
     for (const row of list.children) {
       const teamId = Number(row.dataset.teamId);
       const directButton = row.querySelector("[data-category='direct']");
@@ -4890,6 +5158,145 @@ function createSwissStageTeamSelector(
         playoffButton.disabled = isClosed;
       }
     }
+  }
+
+  function scheduleSave() {
+    if (!isAutosave || syncPredictionDeadline()) {
+      return;
+    }
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    const payload = readPredictionPayload();
+    if (!isSaving && !isDirty(payload)) {
+      clearPredictionSaveFailure(saveQueueKey);
+      setSaveStatus(
+        lastSavedFingerprint === null ? "" : getSavedMessage(),
+        lastSavedFingerprint === null ? "draft" : "saved",
+      );
+      return;
+    }
+    if (!isPayloadReady()) {
+      clearPredictionSaveFailure(saveQueueKey);
+      setSaveStatus(
+        "Заполните прогноз полностью — изменения пока не сохранены.",
+        "draft",
+      );
+      return;
+    }
+    setSaveStatus("Изменения будут сохранены…", "draft");
+    const deadline = new Date(prediction.deadline_at).getTime();
+    const remaining = deadline - Date.now();
+    const debounceDelay = Number.isFinite(remaining) && remaining <= 1_000
+      ? 0
+      : 300;
+    saveTimer = window.setTimeout(() => {
+      saveTimer = null;
+      void savePrediction();
+    }, debounceDelay);
+  }
+
+  async function savePrediction() {
+    if (!isAutosave || syncPredictionDeadline() || isSaving) {
+      return;
+    }
+    const payload = readPredictionPayload();
+    if (!isPayloadReady()) {
+      clearPredictionSaveFailure(saveQueueKey);
+      setSaveStatus(
+        "Заполните прогноз полностью — изменения пока не сохранены.",
+        "draft",
+      );
+      return;
+    }
+    if (!isDirty(payload)) {
+      clearPredictionSaveFailure(saveQueueKey);
+      setSaveStatus(
+        lastSavedFingerprint === null ? "" : getSavedMessage(),
+        lastSavedFingerprint === null ? "draft" : "saved",
+      );
+      return;
+    }
+
+    const fingerprint = getPayloadFingerprint(payload);
+    isSaving = true;
+    setSaveStatus("Сохраняем…", "saving");
+    try {
+      const result = await queueSwissStagePredictionSave(
+        contestId,
+        payload,
+      );
+      const savedPrediction = result?.swiss_stage_prediction;
+      const savedFingerprint = getSavedSelectionFingerprint(
+        savedPrediction?.prediction,
+      );
+      if (
+        !savedPrediction ||
+        typeof savedPrediction.is_open !== "boolean" ||
+        savedFingerprint === null ||
+        savedFingerprint !== fingerprint
+      ) {
+        throw new Error("Сервер вернул некорректный ответ.");
+      }
+      prediction.is_open = savedPrediction.is_open;
+      lastSavedFingerprint = savedFingerprint;
+      onSaved(savedPrediction);
+    } catch (error) {
+      isSaving = false;
+      recordPredictionSaveFailure(saveQueueKey, error);
+      if (error?.status === 409) {
+        prediction.is_open = false;
+      }
+      if (syncPredictionDeadline()) {
+        return;
+      }
+      const currentPayload = readPredictionPayload();
+      if (getPayloadFingerprint(currentPayload) !== fingerprint) {
+        if (!isPayloadReady()) {
+          clearPredictionSaveFailure(saveQueueKey);
+          setSaveStatus(
+            "Заполните прогноз полностью — изменения пока не сохранены.",
+            "draft",
+          );
+        } else if (isDirty(currentPayload)) {
+          clearPredictionSaveFailure(saveQueueKey);
+          void savePrediction();
+        } else if (lastSavedFingerprint !== null) {
+          clearPredictionSaveFailure(saveQueueKey);
+          setSaveStatus(getSavedMessage(), "saved");
+        } else {
+          clearPredictionSaveFailure(saveQueueKey);
+          setSaveStatus("", "draft");
+        }
+        return;
+      }
+      setSaveStatus(
+        error instanceof Error
+          ? error.message
+          : `Не удалось сохранить прогноз ${copy.stageGenitive}.`,
+        "error",
+      );
+      return;
+    }
+
+    isSaving = false;
+    if (syncPredictionDeadline()) {
+      return;
+    }
+    const currentPayload = readPredictionPayload();
+    if (!isPayloadReady()) {
+      setSaveStatus(
+        "Заполните прогноз полностью — изменения пока не сохранены.",
+        "draft",
+      );
+      return;
+    }
+    if (isDirty(currentPayload)) {
+      void savePrediction();
+      return;
+    }
+    setSaveStatus(getSavedMessage(), "saved");
   }
 
   for (const team of prediction.candidates) {
@@ -4945,81 +5352,105 @@ function createSwissStageTeamSelector(
     list.append(row);
   }
 
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (syncPredictionDeadline() || submitButton.disabled) {
-      return;
-    }
-    if (
-      confirmCorrection &&
-      !window.confirm(
-        "Исправить итоги? Рейтинг будет пересчитан сразу.",
-      )
-    ) {
-      return;
-    }
-    submitButton.disabled = true;
-    submitButton.textContent = "Сохраняем…";
-    try {
-      const result = await apiRequestForCurrentView(endpoint, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          direct_team_ids: [...directIds],
-          elimination_team_ids: [...eliminationIds],
-        }),
-      });
-      if (!result?.swiss_stage_prediction) {
-        throw new Error("Сервер вернул некорректный ответ.");
+  if (isAutosave) {
+    retryButton.addEventListener("click", () => {
+      if (saveTimer !== null) {
+        window.clearTimeout(saveTimer);
+        saveTimer = null;
       }
-      prediction.is_open = result.swiss_stage_prediction.is_open === true;
-      onSaved(result.swiss_stage_prediction);
-      if (successMessage) {
-        const isComplete = (
-          directIds.size === prediction.direct_qualifier_count &&
-          eliminationIds.size === prediction.elimination_qualifier_count
-        );
+      void savePrediction();
+    });
+    form.addEventListener(PREDICTION_FLUSH_EVENT, () => {
+      if (deadlineTimer !== null) {
+        window.clearTimeout(deadlineTimer);
+        deadlineTimer = null;
+      }
+      if (saveTimer !== null) {
+        window.clearTimeout(saveTimer);
+        saveTimer = null;
+      }
+      void savePrediction();
+    });
+  } else {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (syncPredictionDeadline() || submitButton.disabled) {
+        return;
+      }
+      if (
+        confirmCorrection &&
+        !window.confirm(
+          "Исправить итоги? Рейтинг будет пересчитан сразу.",
+        )
+      ) {
+        return;
+      }
+      submitButton.disabled = true;
+      submitButton.textContent = "Сохраняем…";
+      try {
+        const result = await apiRequestForCurrentView(endpoint, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(readPredictionPayload()),
+        });
+        if (!result?.swiss_stage_prediction) {
+          throw new Error("Сервер вернул некорректный ответ.");
+        }
+        prediction.is_open = result.swiss_stage_prediction.is_open === true;
+        onSaved(result.swiss_stage_prediction);
+        if (successMessage) {
+          setFormMessage(
+            message,
+            allowPartial && !isSelectionComplete()
+              ? "Черновик сохранён."
+              : successMessage,
+            "success",
+          );
+          submitButton.textContent = savedSubmitLabel;
+          sync();
+        }
+      } catch (error) {
+        if (!resultMode && error?.status === 409) {
+          prediction.is_open = false;
+          syncPredictionDeadline();
+          return;
+        }
+        if (handleManagementRequestError(error)) {
+          return;
+        }
         setFormMessage(
           message,
-          allowPartial && !isComplete ? "Черновик сохранён." : successMessage,
-          "success",
+          error instanceof Error
+            ? error.message
+            : `Не удалось сохранить данные ${copy.stageGenitive}.`,
+          "error",
         );
-        submitButton.textContent = savedSubmitLabel;
+        submitButton.textContent = submitLabel;
         sync();
       }
-    } catch (error) {
-      if (!resultMode && error?.status === 409) {
-        prediction.is_open = false;
-        syncPredictionDeadline();
-        return;
-      }
-      if (handleManagementRequestError(error)) {
-        return;
-      }
-      setFormMessage(
-        message,
-        error instanceof Error
-          ? error.message
-          : `Не удалось сохранить данные ${copy.stageGenitive}.`,
-        "error",
-      );
-      submitButton.textContent = submitLabel;
-      sync();
-    }
-  });
+    });
+  }
 
   progress.append(
     directProgress,
     eliminationProgress,
   );
-  actions.append(submitButton);
-  form.append(
-    progress,
-    ...(selectionHint ? [selectionHint] : []),
-    list,
-    message,
-    actions,
-  );
+  if (isAutosave) {
+    actions.append(retryButton);
+  } else {
+    actions.append(submitButton);
+  }
+  form.append(progress);
+  if (autosaveHint) {
+    form.append(autosaveHint, message, actions);
+  }
+  if (selectionHint) {
+    form.append(selectionHint);
+  }
+  form.append(list);
+  if (!isAutosave) {
+    form.append(message, actions);
+  }
   if (!resultMode && prediction.deadline_at) {
     form.dataset.predictionDeadline = prediction.deadline_at;
   }
@@ -5029,6 +5460,12 @@ function createSwissStageTeamSelector(
     }
   });
   sync();
+  if (isAutosave) {
+    setSaveStatus(
+      lastSavedFingerprint === null ? "" : getSavedMessage(),
+      lastSavedFingerprint === null ? "draft" : "saved",
+    );
+  }
   if (!resultMode && !syncPredictionDeadline()) {
     schedulePredictionDeadlineSync();
   }
@@ -5228,12 +5665,13 @@ function createSwissStagePredictionCard(contest) {
   const header = createElement("div", {
     className: "match-card-header",
   });
+  const status = createSwissStageStatus(prediction);
   header.append(
     createElement("strong", {
       className: "match-teams",
       text: copy.predictionTitle,
     }),
-    createSwissStageStatus(prediction),
+    status,
   );
   item.append(header, createSwissStageMeta(prediction, contest.template_key));
   if (prediction.actual_result) {
@@ -5301,18 +5739,14 @@ function createSwissStagePredictionCard(contest) {
       prediction,
       prediction.prediction,
       {
-        submitLabel: prediction.prediction
-          ? "Изменить прогноз"
-          : "Сохранить прогноз",
-        endpoint: (
-          `/api/tma/contests/${contest.id}/swiss-stage-prediction`
-        ),
         onSaved: (savedPrediction) => {
           prediction.prediction = savedPrediction.prediction;
         },
         successMessage: "Прогноз сохранён.",
-        savedSubmitLabel: "Изменить прогноз",
         templateKey: contest.template_key,
+        autosave: true,
+        contestId: contest.id,
+        onClosed: () => syncSwissStageStatus(status, prediction),
       },
     ),
   );
@@ -5694,6 +6128,7 @@ function createChampionPredictionSettingsDisclosure(
 function createChampionPredictionChoiceSection(
   contest,
   championPrediction,
+  onClosed = () => {},
 ) {
   const section = createElement("div", {
     className: "champion-card-section",
@@ -5735,12 +6170,13 @@ function createChampionPredictionChoiceSection(
   const hint = createElement("p", {
     className: "match-prediction-hint",
     text: championPrediction.prediction
-      ? "До дедлайна можно изменить выбранную команду."
-      : "Выберите команду, которая, по вашему мнению, станет чемпионом.",
+      ? "Выбор можно изменить до дедлайна. Изменения сохраняются автоматически."
+      : "Выберите чемпиона — прогноз сохранится автоматически.",
   });
   const form = createElement("form", {
     className: "champion-choice-form",
   });
+  form.dataset.predictionAutosave = "true";
   const field = createElement("label", {
     className: "form-field",
   });
@@ -5759,70 +6195,276 @@ function createChampionPredictionChoiceSection(
   const actions = createElement("div", {
     className: "form-actions",
   });
-  const submitButton = createActionButton(
-    championPrediction.prediction ? "Изменить прогноз" : "Сохранить прогноз",
-    "primary-action-button",
-    "submit",
+  const retryButton = createActionButton(
+    "Повторить сохранение",
+    "secondary-action-button",
   );
+  const saveQueueKey = `${contest.id}:champion`;
+  let isSaving = false;
+  let saveTimer = null;
+  let deadlineTimer = null;
+  const initialFingerprint = championPrediction.prediction
+    ? String(championPrediction.prediction.id)
+    : "";
+  let lastSavedFingerprint = championPrediction.prediction
+    ? initialFingerprint
+    : null;
 
-  field.append(label, select);
-  actions.append(submitButton);
-  form.append(field, message, actions);
-  section.append(hint, form);
+  function setSaveStatus(statusMessage, state = "") {
+    setFormMessage(
+      message,
+      statusMessage,
+      state === "error" ? "error" : state === "saved" ? "success" : "",
+    );
+    message.dataset.saveState = state;
+    form.setAttribute("aria-busy", state === "saving" ? "true" : "false");
+    retryButton.hidden = state !== "error";
+    actions.hidden = state !== "error";
+  }
 
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-
+  function readPredictionPayload() {
     const predictedTeamId = Number(select.value);
+    return Number.isSafeInteger(predictedTeamId) && predictedTeamId > 0
+      ? { isReady: true, predicted_team_id: predictedTeamId }
+      : { isReady: false };
+  }
 
-    if (!Number.isSafeInteger(predictedTeamId) || predictedTeamId <= 0) {
-      select.setAttribute("aria-invalid", "true");
-      setFormMessage(message, "Выберите команду.", "error");
-      select.focus();
+  function getPayloadFingerprint(payload) {
+    return payload.isReady ? String(payload.predicted_team_id) : "";
+  }
+
+  function isDirty(payload = readPredictionPayload()) {
+    const fingerprint = getPayloadFingerprint(payload);
+    return lastSavedFingerprint === null
+      ? fingerprint !== initialFingerprint
+      : fingerprint !== lastSavedFingerprint;
+  }
+
+  function isPredictionDeadlineReached() {
+    if (!championPrediction.is_open) {
+      return true;
+    }
+    const deadline = new Date(championPrediction.deadline_at).getTime();
+    return Number.isFinite(deadline) && deadline <= Date.now();
+  }
+
+  function syncPredictionDeadline() {
+    if (!isPredictionDeadlineReached()) {
+      return false;
+    }
+    championPrediction.is_open = false;
+    onClosed();
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    }
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    select.disabled = true;
+    form.setAttribute("aria-disabled", "true");
+    const payload = readPredictionPayload();
+    const isSaved = (
+      payload.isReady &&
+      getPayloadFingerprint(payload) === lastSavedFingerprint
+    );
+    let deadlineMessage;
+    if (isSaved) {
+      deadlineMessage = "Прогноз сохранён. Приём прогнозов завершён.";
+    } else if (lastSavedFingerprint === null && !payload.isReady) {
+      deadlineMessage = "Приём прогнозов завершён. Прогноз не был сохранён.";
+    } else {
+      deadlineMessage = (
+        "Приём прогнозов завершён. Последние изменения не сохранены."
+      );
+    }
+    setSaveStatus(
+      deadlineMessage,
+      isSaved ? "saved" : "closed",
+    );
+    return true;
+  }
+
+  function schedulePredictionDeadlineSync() {
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    }
+    const deadline = new Date(championPrediction.deadline_at).getTime();
+    const remaining = deadline - Date.now();
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      syncPredictionDeadline();
+      return;
+    }
+    deadlineTimer = window.setTimeout(() => {
+      deadlineTimer = null;
+      if (!form.isConnected || syncPredictionDeadline()) {
+        return;
+      }
+      schedulePredictionDeadlineSync();
+    }, Math.min(remaining, MAX_TIMER_DELAY_MS));
+  }
+
+  function scheduleSave() {
+    if (syncPredictionDeadline()) {
+      return;
+    }
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    const payload = readPredictionPayload();
+    if (!payload.isReady) {
+      clearPredictionSaveFailure(saveQueueKey);
+      setSaveStatus("Выберите команду.", "draft");
+      return;
+    }
+    if (!isSaving && !isDirty(payload)) {
+      clearPredictionSaveFailure(saveQueueKey);
+      setSaveStatus("Прогноз сохранён.", "saved");
+      return;
+    }
+    setSaveStatus("Изменения будут сохранены…", "draft");
+    const deadline = new Date(championPrediction.deadline_at).getTime();
+    const remaining = deadline - Date.now();
+    const debounceDelay = Number.isFinite(remaining) && remaining <= 1_000
+      ? 0
+      : 200;
+    saveTimer = window.setTimeout(() => {
+      saveTimer = null;
+      void savePrediction();
+    }, debounceDelay);
+  }
+
+  async function savePrediction() {
+    if (syncPredictionDeadline() || isSaving) {
+      return;
+    }
+    const payload = readPredictionPayload();
+    if (!payload.isReady) {
+      clearPredictionSaveFailure(saveQueueKey);
+      if (isDirty(payload)) {
+        setSaveStatus("Выберите команду.", "draft");
+      }
+      return;
+    }
+    if (!isDirty(payload)) {
+      clearPredictionSaveFailure(saveQueueKey);
+      setSaveStatus("Прогноз сохранён.", "saved");
       return;
     }
 
-    select.removeAttribute("aria-invalid");
-    submitButton.disabled = true;
-    submitButton.textContent = "Сохраняем…";
-
+    const fingerprint = getPayloadFingerprint(payload);
+    isSaving = true;
+    setSaveStatus("Сохраняем…", "saving");
     try {
-      const result = await apiRequestForCurrentView(
-        `/api/tma/contests/${contest.id}/champion-prediction`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            predicted_team_id: predictedTeamId,
-          }),
-        },
-      );
-
-      if (!result || !result.prediction) {
+      const result = await queueChampionPredictionSave(contest.id, {
+        predicted_team_id: payload.predicted_team_id,
+      });
+      const savedTeamId = result?.prediction?.id;
+      if (
+        !Number.isSafeInteger(savedTeamId) ||
+        savedTeamId <= 0 ||
+        savedTeamId !== payload.predicted_team_id ||
+        typeof result.prediction.name !== "string" ||
+        !result.prediction.name
+      ) {
         throw new Error(
           "Сервер вернул некорректный ответ при сохранении прогноза.",
         );
       }
-
       championPrediction.prediction = result.prediction;
-      setFormMessage(message, "Прогноз сохранён.", "success");
-      submitButton.textContent = "Изменить прогноз";
-      submitButton.disabled = false;
+      lastSavedFingerprint = String(savedTeamId);
     } catch (error) {
-      const errorMessage =
+      isSaving = false;
+      recordPredictionSaveFailure(saveQueueKey, error);
+      if (error?.status === 409) {
+        championPrediction.is_open = false;
+      }
+      if (syncPredictionDeadline()) {
+        return;
+      }
+      const currentPayload = readPredictionPayload();
+      if (!currentPayload.isReady) {
+        clearPredictionSaveFailure(saveQueueKey);
+        setSaveStatus("Выберите команду.", "draft");
+        return;
+      }
+      if (
+        getPayloadFingerprint(currentPayload) !== fingerprint
+      ) {
+        if (isDirty(currentPayload)) {
+          clearPredictionSaveFailure(saveQueueKey);
+          void savePrediction();
+        } else {
+          clearPredictionSaveFailure(saveQueueKey);
+          setSaveStatus("Прогноз сохранён.", "saved");
+        }
+        return;
+      }
+      setSaveStatus(
         error instanceof Error
           ? error.message
-          : "Не удалось сохранить прогноз на чемпиона.";
+          : "Не удалось сохранить прогноз на чемпиона.",
+        "error",
+      );
+      return;
+    }
 
-      setFormMessage(message, errorMessage, "error");
-      submitButton.textContent = championPrediction.prediction
-        ? "Изменить прогноз"
-        : "Сохранить прогноз";
-      submitButton.disabled = false;
+    isSaving = false;
+    if (syncPredictionDeadline()) {
+      return;
+    }
+    const currentPayload = readPredictionPayload();
+    if (
+      currentPayload.isReady &&
+      getPayloadFingerprint(currentPayload) !== lastSavedFingerprint
+    ) {
+      void savePrediction();
+      return;
+    }
+    setSaveStatus("Прогноз сохранён.", "saved");
+  }
+
+  field.append(label, select);
+  actions.append(retryButton);
+  form.append(field, message, actions);
+  section.append(hint, form);
+  select.addEventListener("change", scheduleSave);
+  retryButton.addEventListener("click", () => {
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    void savePrediction();
+  });
+  form.addEventListener(PREDICTION_FLUSH_EVENT, () => {
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    }
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    void savePrediction();
+  });
+  if (championPrediction.deadline_at) {
+    form.dataset.predictionDeadline = championPrediction.deadline_at;
+  }
+  form.addEventListener(PREDICTION_DEADLINE_SYNC_EVENT, () => {
+    if (!syncPredictionDeadline()) {
+      schedulePredictionDeadlineSync();
     }
   });
+  setSaveStatus(
+    lastSavedFingerprint === null ? "" : "Прогноз сохранён.",
+    lastSavedFingerprint === null ? "draft" : "saved",
+  );
+  if (!syncPredictionDeadline()) {
+    schedulePredictionDeadlineSync();
+  }
 
   return section;
 }
@@ -5976,11 +6618,13 @@ function createContestChampionSection(
   return section;
 }
 
-function createChampionCardStatus(championPrediction) {
-  const status = createElement("span", {
-    className: "champion-card-status",
-  });
-
+function syncChampionCardStatus(status, championPrediction) {
+  status.classList.remove(
+    "champion-card-status--disabled",
+    "champion-card-status--completed",
+    "champion-card-status--open",
+    "champion-card-status--closed",
+  );
   if (!championPrediction.is_enabled) {
     status.textContent = "Не настроен";
     status.classList.add("champion-card-status--disabled");
@@ -5994,7 +6638,13 @@ function createChampionCardStatus(championPrediction) {
     status.textContent = "Закрыт";
     status.classList.add("champion-card-status--closed");
   }
+}
 
+function createChampionCardStatus(championPrediction) {
+  const status = createElement("span", {
+    className: "champion-card-status",
+  });
+  syncChampionCardStatus(status, championPrediction);
   return status;
 }
 
@@ -6808,8 +7458,9 @@ function createChampionPredictionCard(contest) {
     className: "match-teams",
     text: "Чемпион турнира",
   });
+  const status = createChampionCardStatus(championPrediction);
 
-  header.append(title, createChampionCardStatus(championPrediction));
+  header.append(title, status);
   item.append(header, createChampionPredictionMeta(championPrediction));
 
   if (championPrediction.actual_champion) {
@@ -6842,6 +7493,7 @@ function createChampionPredictionCard(contest) {
     createChampionPredictionChoiceSection(
       contest,
       championPrediction,
+      () => syncChampionCardStatus(status, championPrediction),
     ),
   );
 
@@ -9079,7 +9731,7 @@ async function openContest(bootstrap, contestId, state = {}) {
   const viewToken = renderContestDetailsLoading(bootstrap);
 
   try {
-    await waitForMatchPredictionSaves(contestId);
+    await waitForPredictionSaves(contestId);
     if (!isCurrentView(viewToken)) {
       return;
     }
