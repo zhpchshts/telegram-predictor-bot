@@ -32,6 +32,7 @@ from app.rich_publications import (
     table_row,
 )
 from app.scoring_service import calculate_swiss_stage_selection_points
+from app.tournament_catalog import CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY
 
 
 PUBLICATION_MAX_MESSAGE_LENGTH = RICH_MESSAGE_MAX_LENGTH
@@ -39,7 +40,6 @@ PUBLICATION_MAX_TABLE_ROWS = RICH_MESSAGE_MAX_TABLE_ROWS
 MATCH_RESULT_COLUMN_SPANS = (4, 3, 1)
 CHAMPION_RESULT_COLUMN_SPANS = (3, 3, 1)
 LEADERBOARD_COLUMN_SPANS = (1, 5, 1)
-CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY = "champions_league_2026_27"
 
 
 def render_publication_messages(
@@ -502,7 +502,16 @@ def _render_swiss_predictions(
         _validate_swiss_publication_deadline(settings, now_utc=now_utc)
         prediction_count = int(
             connection.execute(
-                "SELECT COUNT(*) FROM swiss_stage_predictions WHERE contest_id = ?",
+                """
+                SELECT COUNT(*)
+                FROM swiss_stage_predictions AS predictions
+                WHERE predictions.contest_id = ?
+                  AND EXISTS (
+                    SELECT 1
+                    FROM swiss_stage_prediction_selections AS selections
+                    WHERE selections.prediction_id = predictions.id
+                  )
+                """,
                 (contest_id,),
             ).fetchone()[0]
         )
@@ -657,7 +666,16 @@ def _render_swiss_result(
         prediction_ids = tuple(
             int(row["id"])
             for row in connection.execute(
-                "SELECT id FROM swiss_stage_predictions WHERE contest_id = ?",
+                """
+                SELECT predictions.id
+                FROM swiss_stage_predictions AS predictions
+                WHERE predictions.contest_id = ?
+                  AND EXISTS (
+                    SELECT 1
+                    FROM swiss_stage_prediction_selections AS selections
+                    WHERE selections.prediction_id = predictions.id
+                  )
+                """,
                 (contest_id,),
             ).fetchall()
         )

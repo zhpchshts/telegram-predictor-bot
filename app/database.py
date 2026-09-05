@@ -1034,6 +1034,203 @@ CREATE TABLE IF NOT EXISTS event_log (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS contest_prediction_reminder_settings (
+    contest_id INTEGER PRIMARY KEY REFERENCES contests(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    lead_time_minutes INTEGER NOT NULL DEFAULT 180 CHECK (
+        lead_time_minutes BETWEEN 5 AND 10080
+    ),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    updated_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS chat_user_prediction_reminder_preferences (
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    mention_in_prediction_reminders INTEGER NOT NULL DEFAULT 0 CHECK (
+        mention_in_prediction_reminders IN (0, 1)
+    ),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS prediction_reminder_deliveries (
+    id INTEGER PRIMARY KEY,
+    contest_id INTEGER REFERENCES contests(id) ON DELETE SET NULL,
+    original_contest_id INTEGER NOT NULL,
+    source TEXT NOT NULL DEFAULT 'auto' CHECK (source IN ('auto', 'manual')),
+    batch_starts_at_utc TEXT,
+    supplemental_sequence INTEGER NOT NULL CHECK (supplemental_sequence >= 1),
+    expires_at TEXT NOT NULL,
+    settings_revision INTEGER NOT NULL CHECK (settings_revision >= 1),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN (
+            'pending',
+            'preparing',
+            'sending',
+            'retry',
+            'sent',
+            'partial',
+            'cancelled',
+            'expired',
+            'terminal_failed',
+            'unknown'
+        )
+    ),
+    claim_token TEXT,
+    claim_expires_at TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at TEXT,
+    last_error TEXT,
+    snapshot_at TEXT,
+    first_sent_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (original_contest_id, batch_starts_at_utc, supplemental_sequence),
+    CHECK (
+        (claim_token IS NULL AND claim_expires_at IS NULL)
+        OR
+        (claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS prediction_reminder_occurrences (
+    id INTEGER PRIMARY KEY,
+    contest_id INTEGER REFERENCES contests(id) ON DELETE SET NULL,
+    original_contest_id INTEGER NOT NULL,
+    match_id INTEGER REFERENCES matches(id) ON DELETE SET NULL,
+    original_match_id INTEGER NOT NULL,
+    match_created_at_snapshot TEXT NOT NULL,
+    observed_starts_at_utc TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    schedule_revision INTEGER NOT NULL DEFAULT 1 CHECK (schedule_revision >= 1),
+    status TEXT NOT NULL DEFAULT 'scheduled' CHECK (
+        status IN (
+            'scheduled',
+            'batched',
+            'sent',
+            'expired',
+            'deleted',
+            'cancelled',
+            'terminal_failed',
+            'unknown'
+        )
+    ),
+    delivery_id INTEGER REFERENCES prediction_reminder_deliveries(id)
+        ON DELETE SET NULL,
+    finalized_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS prediction_reminder_deadline_occurrences (
+    id INTEGER PRIMARY KEY,
+    contest_id INTEGER REFERENCES contests(id) ON DELETE SET NULL,
+    original_contest_id INTEGER NOT NULL,
+    deadline_kind TEXT NOT NULL CHECK (
+        deadline_kind IN ('swiss', 'champion')
+    ),
+    observed_deadline_at_utc TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    schedule_revision INTEGER NOT NULL DEFAULT 1 CHECK (schedule_revision >= 1),
+    status TEXT NOT NULL DEFAULT 'scheduled' CHECK (
+        status IN (
+            'scheduled',
+            'batched',
+            'sent',
+            'expired',
+            'deleted',
+            'cancelled',
+            'terminal_failed',
+            'unknown'
+        )
+    ),
+    delivery_id INTEGER REFERENCES prediction_reminder_deliveries(id)
+        ON DELETE SET NULL,
+    finalized_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS prediction_reminder_delivery_items (
+    delivery_id INTEGER NOT NULL REFERENCES prediction_reminder_deliveries(id)
+        ON DELETE CASCADE,
+    occurrence_id INTEGER REFERENCES prediction_reminder_occurrences(id)
+        ON DELETE SET NULL,
+    original_occurrence_id INTEGER NOT NULL,
+    occurrence_schedule_revision INTEGER NOT NULL CHECK (
+        occurrence_schedule_revision >= 1
+    ),
+    match_id_snapshot INTEGER NOT NULL,
+    starts_at_snapshot TEXT NOT NULL,
+    home_team_name TEXT NOT NULL,
+    away_team_name TEXT NOT NULL,
+    item_order INTEGER NOT NULL CHECK (item_order >= 0),
+    PRIMARY KEY (delivery_id, original_occurrence_id),
+    UNIQUE (delivery_id, item_order)
+);
+
+CREATE TABLE IF NOT EXISTS prediction_reminder_delivery_recipients (
+    delivery_id INTEGER NOT NULL REFERENCES prediction_reminder_deliveries(id)
+        ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    telegram_user_id INTEGER NOT NULL,
+    username TEXT,
+    first_name TEXT NOT NULL,
+    last_name TEXT,
+    recipient_order INTEGER NOT NULL CHECK (recipient_order >= 0),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN ('pending', 'sent', 'suppressed')
+    ),
+    PRIMARY KEY (delivery_id, telegram_user_id),
+    UNIQUE (delivery_id, recipient_order)
+);
+
+CREATE TABLE IF NOT EXISTS prediction_reminder_delivery_parts (
+    delivery_id INTEGER NOT NULL REFERENCES prediction_reminder_deliveries(id)
+        ON DELETE CASCADE,
+    part_number INTEGER NOT NULL CHECK (part_number >= 0),
+    html TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    has_launch_button INTEGER NOT NULL DEFAULT 1 CHECK (
+        has_launch_button IN (0, 1)
+    ),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN (
+            'pending',
+            'sending',
+            'sent',
+            'skipped',
+            'terminal_failed',
+            'unknown'
+        )
+    ),
+    telegram_message_id INTEGER,
+    send_started_at TEXT,
+    sent_at TEXT,
+    last_error TEXT,
+    PRIMARY KEY (delivery_id, part_number),
+    CHECK (status != 'sent' OR telegram_message_id IS NOT NULL)
+);
+
+CREATE TABLE IF NOT EXISTS prediction_reminder_manual_requests (
+    id INTEGER PRIMARY KEY,
+    contest_id INTEGER REFERENCES contests(id) ON DELETE SET NULL,
+    original_contest_id INTEGER NOT NULL,
+    actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    original_actor_user_id INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    delivery_id INTEGER NOT NULL REFERENCES prediction_reminder_deliveries(id),
+    created_at TEXT NOT NULL,
+    UNIQUE (original_contest_id, original_actor_user_id, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS contest_publications (
     id INTEGER PRIMARY KEY,
     contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
@@ -1155,6 +1352,30 @@ CREATE INDEX IF NOT EXISTS idx_swiss_stage_prediction_selections_contest
 
 CREATE INDEX IF NOT EXISTS idx_event_log_contest_id
     ON event_log(contest_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prediction_reminder_occurrences_live_match
+    ON prediction_reminder_occurrences(match_id)
+    WHERE match_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_prediction_reminder_occurrences_due
+    ON prediction_reminder_occurrences(due_at, id)
+    WHERE status = 'scheduled';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prediction_reminder_deadline_occurrences_live
+    ON prediction_reminder_deadline_occurrences(contest_id, deadline_kind)
+    WHERE contest_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_prediction_reminder_deadline_occurrences_due
+    ON prediction_reminder_deadline_occurrences(due_at, id)
+    WHERE status = 'scheduled';
+
+CREATE INDEX IF NOT EXISTS idx_prediction_reminder_deliveries_retry
+    ON prediction_reminder_deliveries(next_attempt_at, expires_at, id)
+    WHERE status IN ('pending', 'retry');
+
+CREATE INDEX IF NOT EXISTS idx_prediction_reminder_deliveries_claim
+    ON prediction_reminder_deliveries(claim_expires_at)
+    WHERE claim_token IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_contest_publications_contest_order
     ON contest_publications(contest_id, first_event_id, id);

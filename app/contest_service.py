@@ -36,118 +36,17 @@ from app.scoring_service import (
     resolve_two_legged_tie_result,
 )
 from app.shared_tournament_service import attach_shared_tournament
-
-
-WORLD_CUP_2026_COMPETITION_NAME = "Чемпионат мира"
-WORLD_CUP_2026_SEASON = "2026"
-WORLD_CUP_2026_COMPETITION_TYPE = "world_cup"
-
-DEFAULT_EXACT_SCORE_POINTS = 3
-DEFAULT_GOAL_DIFFERENCE_POINTS = 2
-DEFAULT_OUTCOME_POINTS = 1
-DEFAULT_ADVANCING_TEAM_POINTS = 1
-
-THE_INTERNATIONAL_2026_COMPETITION_NAME = "The International"
-THE_INTERNATIONAL_2026_SEASON = "2026"
-THE_INTERNATIONAL_2026_COMPETITION_TYPE = "the_international"
-
-CHAMPIONS_LEAGUE_2026_27_COMPETITION_NAME = "Лига чемпионов"
-CHAMPIONS_LEAGUE_2026_27_SEASON = "2026/27"
-CHAMPIONS_LEAGUE_2026_27_COMPETITION_TYPE = "champions_league"
-CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT = 8
-CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT = 12
-CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS: dict[str, tuple[str, int, str]] = {
-    "playoff": ("Стыковые матчи", 10, "knockout"),
-    "round_of_16": ("1/8 финала", 20, "knockout"),
-    "quarterfinal": ("1/4 финала", 30, "knockout"),
-    "semifinal": ("1/2 финала", 40, "knockout"),
-    "final": ("Финал", 50, "final"),
-}
-CHAMPIONS_LEAGUE_KNOCKOUT_ROUND_CAPACITIES: dict[str, int] = {
-    "playoff": 8,
-    "round_of_16": 8,
-    "quarterfinal": 4,
-    "semifinal": 2,
-    "final": 1,
-}
-SwissStageSelectionMode = Literal["exact", "up_to_limits"]
-
-
-@dataclass(frozen=True, slots=True)
-class _ContestTemplate:
-    key: str
-    slug_prefix: str
-    competition_name: str
-    competition_season: str
-    competition_type: str
-    exact_score_points: int
-    goal_difference_points: int
-    outcome_points: int
-    advancing_team_points: int
-    champion_prediction_points: int
-    swiss_direct_qualifier_count: int
-    swiss_elimination_qualifier_count: int
-    swiss_selection_mode: SwissStageSelectionMode
-    swiss_direct_correct_points: int
-    swiss_elimination_correct_points: int
-    swiss_cross_category_points: int
-
-
-WORLD_CUP_2026_TEMPLATE = _ContestTemplate(
-    key="world_cup_2026",
-    slug_prefix="world-cup-2026",
-    competition_name=WORLD_CUP_2026_COMPETITION_NAME,
-    competition_season=WORLD_CUP_2026_SEASON,
-    competition_type=WORLD_CUP_2026_COMPETITION_TYPE,
-    exact_score_points=DEFAULT_EXACT_SCORE_POINTS,
-    goal_difference_points=DEFAULT_GOAL_DIFFERENCE_POINTS,
-    outcome_points=DEFAULT_OUTCOME_POINTS,
-    advancing_team_points=DEFAULT_ADVANCING_TEAM_POINTS,
-    champion_prediction_points=5,
-    swiss_direct_qualifier_count=3,
-    swiss_elimination_qualifier_count=5,
-    swiss_selection_mode="exact",
-    swiss_direct_correct_points=2,
-    swiss_elimination_correct_points=2,
-    swiss_cross_category_points=1,
-)
-
-THE_INTERNATIONAL_2026_TEMPLATE = _ContestTemplate(
-    key="the_international_2026",
-    slug_prefix="the-international-2026",
-    competition_name=THE_INTERNATIONAL_2026_COMPETITION_NAME,
-    competition_season=THE_INTERNATIONAL_2026_SEASON,
-    competition_type=THE_INTERNATIONAL_2026_COMPETITION_TYPE,
-    exact_score_points=2,
-    goal_difference_points=0,
-    outcome_points=1,
-    advancing_team_points=0,
-    champion_prediction_points=4,
-    swiss_direct_qualifier_count=3,
-    swiss_elimination_qualifier_count=5,
-    swiss_selection_mode="exact",
-    swiss_direct_correct_points=2,
-    swiss_elimination_correct_points=2,
-    swiss_cross_category_points=1,
-)
-
-CHAMPIONS_LEAGUE_2026_27_TEMPLATE = _ContestTemplate(
-    key="champions_league_2026_27",
-    slug_prefix="champions-league-2026-27",
-    competition_name=CHAMPIONS_LEAGUE_2026_27_COMPETITION_NAME,
-    competition_season=CHAMPIONS_LEAGUE_2026_27_SEASON,
-    competition_type=CHAMPIONS_LEAGUE_2026_27_COMPETITION_TYPE,
-    exact_score_points=DEFAULT_EXACT_SCORE_POINTS,
-    goal_difference_points=DEFAULT_GOAL_DIFFERENCE_POINTS,
-    outcome_points=DEFAULT_OUTCOME_POINTS,
-    advancing_team_points=DEFAULT_ADVANCING_TEAM_POINTS,
-    champion_prediction_points=5,
-    swiss_direct_qualifier_count=CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT,
-    swiss_elimination_qualifier_count=CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT,
-    swiss_selection_mode="up_to_limits",
-    swiss_direct_correct_points=2,
-    swiss_elimination_correct_points=1,
-    swiss_cross_category_points=0,
+from app.team_store import resolve_team_ids
+from app.tournament_catalog import (
+    CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT,
+    CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT,
+    CHAMPIONS_LEAGUE_2026_27_TEMPLATE,
+    CHAMPIONS_LEAGUE_KNOCKOUT_ROUND_CAPACITIES,
+    CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS,
+    THE_INTERNATIONAL_2026_TEMPLATE,
+    WORLD_CUP_2026_TEMPLATE,
+    SwissStageSelectionMode,
+    TournamentTemplate as _ContestTemplate,
 )
 
 
@@ -503,6 +402,7 @@ class ContestDetails:
     is_active: bool
     shared_tournament_id: int | None
     shared_tournament_name: str | None
+    shared_tournament_is_archived: bool | None
     tournament_teams: TournamentTeamsDetails
     match_prediction_publication: MatchPredictionPublicationSettings
     champion_prediction: ChampionPredictionDetails
@@ -1051,23 +951,12 @@ def get_contest_details(
                         WHERE swiss_stage_predictions.contest_id = ?
                             AND swiss_stage_predictions.user_id = users.id
                             AND swiss_stage_prediction_settings.enabled = 1
-                            AND (
-                                SELECT COUNT(*)
+                            AND EXISTS (
+                                SELECT 1
                                 FROM swiss_stage_prediction_selections
                                 WHERE swiss_stage_prediction_selections.prediction_id =
                                     swiss_stage_predictions.id
-                                  AND swiss_stage_prediction_selections.category =
-                                    'direct'
-                            ) = swiss_stage_prediction_settings.direct_qualifier_count
-                            AND (
-                                SELECT COUNT(*)
-                                FROM swiss_stage_prediction_selections
-                                WHERE swiss_stage_prediction_selections.prediction_id =
-                                    swiss_stage_predictions.id
-                                  AND swiss_stage_prediction_selections.category =
-                                    'elimination'
-                            ) =
-                                swiss_stage_prediction_settings.elimination_qualifier_count
+                            )
                     ) THEN 1
                     ELSE 0
                 END AS swiss_stage_prediction_count,
@@ -1121,23 +1010,12 @@ def get_contest_details(
                         WHERE swiss_stage_predictions.contest_id = ?
                             AND swiss_stage_predictions.user_id = users.id
                             AND swiss_stage_prediction_settings.enabled = 1
-                            AND (
-                                SELECT COUNT(*)
+                            AND EXISTS (
+                                SELECT 1
                                 FROM swiss_stage_prediction_selections
                                 WHERE swiss_stage_prediction_selections.prediction_id =
                                     swiss_stage_predictions.id
-                                  AND swiss_stage_prediction_selections.category =
-                                    'direct'
-                            ) = swiss_stage_prediction_settings.direct_qualifier_count
-                            AND (
-                                SELECT COUNT(*)
-                                FROM swiss_stage_prediction_selections
-                                WHERE swiss_stage_prediction_selections.prediction_id =
-                                    swiss_stage_predictions.id
-                                  AND swiss_stage_prediction_selections.category =
-                                    'elimination'
-                            ) =
-                                swiss_stage_prediction_settings.elimination_qualifier_count
+                            )
                     ) THEN 1
                     ELSE 0
                 END AS calculated_predictions_count
@@ -1271,7 +1149,7 @@ def get_contest_details(
         )
         shared_tournament_row = connection.execute(
             """
-            SELECT tournament.id, tournament.name
+            SELECT tournament.id, tournament.name, tournament.is_archived
             FROM contest_shared_tournaments AS link
             JOIN shared_tournaments AS tournament
               ON tournament.id = link.shared_tournament_id
@@ -1294,6 +1172,11 @@ def get_contest_details(
             ),
             shared_tournament_name=(
                 str(shared_tournament_row["name"])
+                if shared_tournament_row is not None
+                else None
+            ),
+            shared_tournament_is_archived=(
+                bool(shared_tournament_row["is_archived"])
                 if shared_tournament_row is not None
                 else None
             ),
@@ -1367,6 +1250,23 @@ def complete_contest(
             telegram_chat_id=telegram_chat_id,
             contest_id=contest_id,
         )
+
+        active_shared_tournament = connection.execute(
+            """
+            SELECT tournament.id
+            FROM contest_shared_tournaments AS link
+            JOIN shared_tournaments AS tournament
+              ON tournament.id = link.shared_tournament_id
+            WHERE link.contest_id = ?
+              AND tournament.is_archived = 0
+            LIMIT 1
+            """,
+            (contest_id,),
+        ).fetchone()
+        if active_shared_tournament is not None:
+            raise ContestCompletionUnavailableError(
+                "Связанный конкурс можно завершить после завершения общего турнира."
+            )
 
         incomplete_match = connection.execute(
             """
@@ -1619,9 +1519,9 @@ def save_tournament_teams(
                 "количество команд турнира."
             )
 
-        team_ids = tuple(
-            _find_or_create_team(connection, team_name=team_name)[0]
-            for team_name in normalized_team_names
+        team_ids = resolve_team_ids(
+            connection,
+            team_names=normalized_team_names,
         )
         before_team_ids = tuple(team.id for team in before_details.teams)
         if before_team_ids == team_ids:
@@ -1703,7 +1603,7 @@ def create_match(
             round_key=round_key,
             is_two_legged=False,
         )
-        if contest_row["template_key"] == "the_international_2026":
+        if contest_row["template_key"] == THE_INTERNATIONAL_2026_TEMPLATE.key:
             if isinstance(best_of, bool) or best_of not in (3, 5):
                 raise ValueError("Для серии The International выберите Bo3 или Bo5.")
             normalized_best_of = best_of
@@ -4057,6 +3957,33 @@ def save_swiss_stage_prediction(
             template_key=str(contest_row["template_key"]),
         )
 
+        existing_prediction_row = connection.execute(
+            """
+            SELECT predictions.id
+            FROM swiss_stage_predictions AS predictions
+            JOIN users ON users.id = predictions.user_id
+            WHERE predictions.contest_id = ?
+              AND users.telegram_user_id = ?
+            """,
+            (contest_id, telegram_user_id),
+        ).fetchone()
+        if (
+            existing_prediction_row is None
+            and not normalized_direct_ids
+            and not normalized_elimination_ids
+        ):
+            return _swiss_stage_selection_from_ids(
+                connection,
+                contest_id=contest_id,
+                selection_mode=str(configuration_row["selection_mode"]),
+                direct_qualifier_count=int(configuration_row["direct_qualifier_count"]),
+                elimination_qualifier_count=int(
+                    configuration_row["elimination_qualifier_count"]
+                ),
+                direct_team_ids=normalized_direct_ids,
+                elimination_team_ids=normalized_elimination_ids,
+            )
+
         user_id = _upsert_user(
             connection,
             telegram_user_id=telegram_user_id,
@@ -5370,16 +5297,6 @@ def _get_swiss_stage_prediction_details(
             contest_id=contest_id,
         )
     )
-    prediction_row = connection.execute(
-        """
-        SELECT swiss_stage_predictions.id
-        FROM swiss_stage_predictions
-        JOIN users ON users.id = swiss_stage_predictions.user_id
-        WHERE swiss_stage_predictions.contest_id = ?
-            AND users.telegram_user_id = ?
-        """,
-        (contest_id, telegram_user_id),
-    ).fetchone()
     prediction_rows = connection.execute(
         """
         SELECT
@@ -5436,7 +5353,7 @@ def _get_swiss_stage_prediction_details(
     prediction = _swiss_stage_selection_from_rows(
         prediction_rows,
         candidates=candidates,
-        selection_exists=prediction_row is not None,
+        selection_exists=bool(prediction_rows),
         selection_mode=selection_mode,
         direct_qualifier_count=direct_qualifier_count,
         elimination_qualifier_count=elimination_qualifier_count,
@@ -6500,36 +6417,6 @@ def _get_next_tie_position(
     return int(row["next_position"])
 
 
-def _find_or_create_team(
-    connection,
-    *,
-    team_name: str,
-) -> tuple[int, bool]:
-    normalized_team_name = team_name.casefold()
-    rows = connection.execute(
-        """
-        SELECT id, name
-        FROM teams
-        ORDER BY id ASC
-        """
-    ).fetchall()
-
-    for row in rows:
-        if str(row["name"]).casefold() == normalized_team_name:
-            return int(row["id"]), False
-
-    team_id = int(
-        connection.execute(
-            """
-            INSERT INTO teams (name)
-            VALUES (?)
-            """,
-            (team_name,),
-        ).lastrowid
-    )
-    return team_id, True
-
-
 def _normalize_tournament_team_names(values: list[str]) -> tuple[str, ...]:
     if not isinstance(values, list):
         raise ValueError("Список команд должен быть массивом.")
@@ -7135,9 +7022,9 @@ def _leaderboard_swiss_stage_prediction_history_by_user(
     candidates = tuple(_team_summary_from_row(row) for row in candidate_rows)
     rows_by_user: dict[int, list[object]] = {}
     for row in prediction_rows:
-        user_rows = rows_by_user.setdefault(int(row["user_id"]), [])
-        if row["id"] is not None:
-            user_rows.append(row)
+        if row["id"] is None:
+            continue
+        rows_by_user.setdefault(int(row["user_id"]), []).append(row)
     actual_result = _swiss_stage_selection_from_rows(
         result_rows,
         candidates=candidates,
@@ -7381,7 +7268,7 @@ def _resolve_advancing_team_for_score(
     home_team_id = int(match_row["home_team_id"])
     away_team_id = int(match_row["away_team_id"])
 
-    if match_row["template_key"] == "the_international_2026":
+    if match_row["template_key"] == THE_INTERNATIONAL_2026_TEMPLATE.key:
         best_of = int(match_row["best_of"])
         wins_required = best_of // 2 + 1
         is_valid_home_win = (

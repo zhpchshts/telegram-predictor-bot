@@ -46,6 +46,37 @@ def test_tma_index_is_available() -> None:
     assert "Клевер" in response.text
 
 
+@pytest.mark.parametrize(
+    ("asset_path", "content_type"),
+    (
+        ("/tma/app.js", "text/javascript"),
+        ("/tma/styles.css", "text/css"),
+    ),
+)
+def test_tma_static_assets_are_stored_and_revalidated(
+    asset_path: str,
+    content_type: str,
+) -> None:
+    client = TestClient(create_app())
+
+    response = client.get(asset_path)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-cache, must-revalidate"
+    assert response.headers["content-type"].startswith(content_type)
+    assert response.headers["etag"]
+
+    not_modified_response = client.get(
+        asset_path,
+        headers={"If-None-Match": response.headers["etag"]},
+    )
+
+    assert not_modified_response.status_code == 304
+    assert not_modified_response.content == b""
+    assert not_modified_response.headers["etag"] == response.headers["etag"]
+    assert not_modified_response.headers["cache-control"] == "no-cache, must-revalidate"
+
+
 def test_private_tma_api_responses_are_not_cacheable() -> None:
     app = create_app()
     app.state.telegram_bot = object()
@@ -110,6 +141,7 @@ def test_health_reports_missing_database_and_stopped_task(tmp_path: Path) -> Non
                 "telegram-polling": "stopped",
                 "match-prediction-publications": "ok",
                 "contest-publications": "ok",
+                "prediction-reminders": "ok",
                 "match-lifecycle": "ok",
                 "champions-league-sync": "ok",
             },
@@ -302,6 +334,9 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         startup_steps.append("contest-publication-worker")
         await background_task("contest-publication")
 
+    async def prediction_reminder_worker(**_kwargs) -> None:
+        await background_task("prediction-reminder")
+
     async def match_lifecycle_worker(**_kwargs) -> None:
         await background_task("match-lifecycle")
 
@@ -316,6 +351,7 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         "load_settings",
         lambda: SimpleNamespace(
             bot_token="dummy",
+            bot_username="test_bot",
             telegram_bot_api_fallback_ips=(),
             database_path=Path("unused.db"),
             telegram_api_id=12345,
@@ -345,6 +381,11 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         main,
         "run_contest_publication_worker",
         contest_publication_worker,
+    )
+    monkeypatch.setattr(
+        main,
+        "run_prediction_reminder_worker",
+        prediction_reminder_worker,
     )
     monkeypatch.setattr(
         main,
@@ -379,6 +420,7 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
         "polling",
         "match-publication",
         "contest-publication",
+        "prediction-reminder",
         "match-lifecycle",
         "champions-league-sync",
     }

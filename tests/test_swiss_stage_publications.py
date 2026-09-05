@@ -420,6 +420,30 @@ def test_champions_league_partial_publication_does_not_infer_playoff_choices(
         elimination_team_ids=team_ids[1:2],
         now_utc=OPEN_TIME,
     )
+    save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=303,
+        first_name="Боб",
+        last_name=None,
+        username="bob",
+        direct_team_ids=team_ids[2:3],
+        elimination_team_ids=[],
+        now_utc=OPEN_TIME,
+    )
+    save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        telegram_user_id=303,
+        first_name="Боб",
+        last_name=None,
+        username="bob",
+        direct_team_ids=[],
+        elimination_team_ids=[],
+        now_utc=OPEN_TIME,
+    )
 
     predictions_text = "".join(
         render_publication_messages(
@@ -434,9 +458,33 @@ def test_champions_league_partial_publication_does_not_infer_playoff_choices(
     )
 
     assert "<b>Стыки</b>" not in predictions_text
+    assert "Прогнозов: 1" in predictions_text
     assert "Команда 01 — 100%" in predictions_text
     assert "Команда 02 — 100%" in predictions_text
     assert "Команда 03" not in predictions_text
+
+    save_swiss_stage_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest.id,
+        direct_team_ids=team_ids[:8],
+        elimination_team_ids=team_ids[8:20],
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_TIME,
+    )
+    result_text = "".join(
+        render_publication_messages(
+            database_path=database_path,
+            publication=_publication(
+                publication_id=2,
+                contest_id=contest.id,
+                publication_type="swiss_result",
+            ),
+            now_utc=CLOSED_TIME,
+        )
+    )
+    assert "Прогнозов: 1" in result_text
+    assert "Средняя точность: 7%" in result_text
 
 
 def test_swiss_publications_are_not_created_while_master_switch_is_disabled(

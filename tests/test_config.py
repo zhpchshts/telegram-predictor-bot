@@ -69,6 +69,18 @@ def test_telegram_network_settings_reject_invalid_values(
         load_settings()
 
 
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
+def test_telegram_admin_check_timeout_rejects_non_finite_values(
+    monkeypatch,
+    value: str,
+) -> None:
+    _set_required_environment(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_ADMIN_CHECK_TIMEOUT_SECONDS", value)
+
+    with pytest.raises(RuntimeError, match="TELEGRAM_ADMIN_CHECK_TIMEOUT_SECONDS"):
+        load_settings()
+
+
 def test_mtproto_configuration_is_optional(monkeypatch) -> None:
     _set_required_environment(monkeypatch)
     monkeypatch.delenv("TELEGRAM_API_ID", raising=False)

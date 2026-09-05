@@ -11,6 +11,7 @@ import pytest
 from app import shared_tournament_service
 from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import (
+    complete_contest,
     SharedTournamentManagedError,
     create_champions_league_2026_27_contest,
     create_world_cup_2026_contest,
@@ -376,6 +377,52 @@ def test_legacy_shared_template_keeps_exact_swiss_scoring_policy(
     assert shared.swiss_stage_prediction.maximum_points == 16
 
 
+def test_shared_team_lock_is_exposed_and_preserves_unlinked_stage_result(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "shared-team-lock.db"
+    initialize_database(database_path)
+    shared = _create_shared_tournament(database_path)
+    assert shared.teams_locked is False
+
+    configured = save_shared_swiss_settings(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        enabled=True,
+        deadline_at="2030-06-01T12:00:00Z",
+        direct_qualifier_count=1,
+        elimination_qualifier_count=1,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-05-01T00:00:00Z"),
+    )
+    resulted = save_shared_swiss_result(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        direct_team_ids=[shared.teams[0].id],
+        elimination_team_ids=[shared.teams[1].id],
+        expected_version=configured.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Eugene",
+        actor_last_name="Sabir",
+        actor_username="evsab",
+        now_utc=_time("2030-06-01T12:00:00Z"),
+    )
+
+    assert resulted.teams_locked is True
+    with pytest.raises(SharedTournamentLockedError, match="заблокирован"):
+        save_shared_tournament_teams(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            team_names=["Испания", "Германия"],
+            expected_version=resulted.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+        )
+
+
 def test_shared_versioned_writes_accept_only_exact_single_step_retries(
     tmp_path: Path,
 ) -> None:
@@ -733,6 +780,60 @@ def test_shared_tournament_archive_requires_results_and_can_be_restored(
                 """
             )
         ] == ["shared_tournament.archived", "shared_tournament.restored"]
+
+
+def test_shared_tournament_restore_rejects_completed_linked_contest(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "completed-linked-contest.db"
+    initialize_database(database_path)
+    shared = _create_shared_tournament(database_path)
+    contest = _create_contest(
+        database_path,
+        shared_tournament_id=shared.tournament.id,
+        chat_id=-1001,
+        suffix="Завершён",
+    )
+    archived = archive_shared_tournament(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        now_utc=_time("2030-06-01T14:00:00Z"),
+    )
+    complete_contest(
+        database_path=database_path,
+        telegram_chat_id=-1001,
+        contest_id=contest.id,
+        telegram_user_id=OWNER_ID,
+        first_name="Eugene",
+        last_name="Sabir",
+        username="evsab",
+        audit_actor=AuditActor(
+            telegram_chat_id=-1001,
+            telegram_user_id=OWNER_ID,
+            role=AuditActorRole.TELEGRAM_ADMIN,
+        ),
+        now_utc=_time("2030-06-01T15:00:00Z"),
+    )
+
+    with pytest.raises(
+        SharedTournamentConflictError,
+        match="связанных конкурсов уже завершён",
+    ):
+        restore_shared_tournament(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            expected_version=archived.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+        )
+
+    current = get_shared_tournament_details(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+    )
+    assert current.tournament.is_archived is True
+    assert current.tournament.version == archived.tournament.version
 
 
 def test_shared_tournament_archive_requires_long_term_results(

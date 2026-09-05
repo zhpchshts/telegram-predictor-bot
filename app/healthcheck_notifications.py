@@ -56,10 +56,15 @@ def get_healthcheck_snapshot(*, database_path: Path) -> HealthcheckSnapshot:
                     WHERE contests.is_active = 1
                 ) + (
                     SELECT COUNT(*)
-                    FROM swiss_stage_predictions
+                    FROM swiss_stage_predictions AS predictions
                     JOIN contests
-                      ON contests.id = swiss_stage_predictions.contest_id
+                      ON contests.id = predictions.contest_id
                     WHERE contests.is_active = 1
+                      AND EXISTS (
+                        SELECT 1
+                        FROM swiss_stage_prediction_selections AS selections
+                        WHERE selections.prediction_id = predictions.id
+                      )
                 ) AS saved_predictions_count
             """
         ).fetchone()

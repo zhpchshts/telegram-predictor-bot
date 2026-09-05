@@ -22,6 +22,11 @@ from app.match_prediction_publications import (
     run_match_prediction_publication_worker,
 )
 from app.match_lifecycle import run_match_lifecycle_worker
+from app.prediction_reminders import PredictionReminderRenderer
+from app.prediction_reminder_worker import (
+    TelegramPredictionReminderAdapter,
+    run_prediction_reminder_worker,
+)
 from app.publication_worker import run_contest_publication_worker
 from app.tma_api import router as tma_api_router
 from app.telegram_username_resolver import (
@@ -37,9 +42,20 @@ EXPECTED_BACKGROUND_TASK_NAMES = (
     "telegram-polling",
     "match-prediction-publications",
     "contest-publications",
+    "prediction-reminders",
     "match-lifecycle",
     "champions-league-sync",
 )
+PRIVATE_CACHE_CONTROL = "no-store"
+STATIC_ASSET_CACHE_CONTROL = "no-cache, must-revalidate"
+
+
+def _is_tma_html_response(*, path: str, response: Response) -> bool:
+    content_type = response.headers.get("Content-Type", "")
+    media_type = content_type.partition(";")[0].strip().lower()
+    return (
+        path in {"/tma", "/tma/"} or path.endswith(".html") or media_type == "text/html"
+    )
 
 
 def _create_telegram_bot(*, token: str, fallback_ips: tuple[str, ...]) -> Bot:
@@ -232,6 +248,26 @@ def create_app() -> FastAPI:
             background_tasks[contest_publication_task.get_name()] = (
                 contest_publication_task
             )
+            prediction_reminder_adapter = TelegramPredictionReminderAdapter(
+                bot=bot,
+                database_path=settings.database_path,
+                bot_username=settings.bot_username,
+                bot_token=settings.bot_token,
+            )
+            prediction_reminder_task = asyncio.create_task(
+                run_prediction_reminder_worker(
+                    database_path=settings.database_path,
+                    preflight=prediction_reminder_adapter,
+                    renderer=PredictionReminderRenderer(
+                        database_path=settings.database_path,
+                    ),
+                    sender=prediction_reminder_adapter,
+                ),
+                name="prediction-reminders",
+            )
+            background_tasks[prediction_reminder_task.get_name()] = (
+                prediction_reminder_task
+            )
             match_lifecycle_task = asyncio.create_task(
                 run_match_lifecycle_worker(database_path=settings.database_path),
                 name="match-lifecycle",
@@ -330,13 +366,14 @@ def create_app() -> FastAPI:
         response = await call_next(request)
 
         path = request.url.path
-        if (
-            path == "/tma"
-            or path.startswith("/tma/")
-            or path == "/api/tma"
-            or path.startswith("/api/tma/")
-        ):
-            response.headers["Cache-Control"] = "no-store"
+        if path == "/api/tma" or path.startswith("/api/tma/"):
+            response.headers["Cache-Control"] = PRIVATE_CACHE_CONTROL
+        elif path == "/tma" or path.startswith("/tma/"):
+            response.headers["Cache-Control"] = (
+                PRIVATE_CACHE_CONTROL
+                if _is_tma_html_response(path=path, response=response)
+                else STATIC_ASSET_CACHE_CONTROL
+            )
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
 

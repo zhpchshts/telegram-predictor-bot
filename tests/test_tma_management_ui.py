@@ -185,15 +185,40 @@ def test_champions_league_template_creation_explains_league_phase_prediction() -
     assert 'templateInput.value === "champions_league_2026_27"' in form_source
     assert "для каждой из 36 команд доступны варианты" in form_source
     assert "«Напрямую», «Стыки» и «Вылет»" in form_source
+    assert "Прогноз сохраняется с первого выбора «Напрямую» или «Вылет»" in (
+        form_source
+    )
+    assert "полностью заполненный набор" in form_source
     assert "Баллы начисляются только за верный прямой выход" in form_source
     assert "максимум — 28 баллов" in form_source
     assert 'state.draftTemplateKey === "champions_league_2026_27"' in (
         confirmation_source
     )
+    assert "общий этап, чемпион и весь плей-офф" in form_source
+    assert "пары, расписание и результаты" in form_source
+    assert "дедлайны, итоги общего этапа, чемпион" in confirmation_source
+    assert "результаты плей-офф редактируются только" in confirmation_source
     assert "один прогноз с тремя вариантами для каждой команды" in confirmation_source
+    assert "сохранится с первого выбора «Напрямую» или «Вылет»" in (confirmation_source)
+    assert "полностью заполненный набор" in confirmation_source
     assert "8 напрямую в 1/8, 16 в стыках и 12 на вылет" in confirmation_source
     assert "Баллы начисляются только за верный прямой выход" in confirmation_source
     assert "максимум — 28 баллов" in confirmation_source
+
+
+def test_contest_creation_defaults_only_the_single_active_shared_ucl() -> None:
+    form_source = _function_source("createContestFormCard")
+
+    assert "tournament.is_archived !== true" in form_source
+    assert 'tournament.template_key === "champions_league_2026_27"' in form_source
+    assert "activeChampionsLeagueTournaments.length === 1" in form_source
+    assert "Object.prototype.hasOwnProperty.call(" in form_source
+    assert 'state,\n    "draftSharedTournamentId"' in form_source
+    assert "!hasDraftSharedTournament" in form_source
+    assert "activeChampionsLeagueTournaments[0].id" in form_source
+    assert (
+        "hasDraftSharedTournament\n    ? state.draftSharedTournamentId" in form_source
+    )
 
 
 def test_ti_series_controls_and_historical_rules_are_preserved() -> None:
@@ -451,11 +476,12 @@ def test_management_tabs_default_to_matches_and_keep_settings_separate() -> None
     assert "createChampionAdministrationCard" in settings_source
     assert "createSwissStageAdministrationCard" in settings_source
     assert "createMatchPredictionPublicationAdministrationCard" in publications_source
+    assert "createPredictionReminderAdministrationCard" in publications_source
     assert "createChampionAdministrationCard" not in publications_source
     assert "createSwissStageAdministrationCard" not in publications_source
 
 
-def test_prediction_reminders_are_published_as_one_manual_message() -> None:
+def test_prediction_reminders_are_queued_as_an_idempotent_manual_action() -> None:
     reminder_source = _function_source("createPredictionReminderPublicationSection")
     publication_source = _function_source(
         "createMatchPredictionPublicationAdministrationCard"
@@ -464,10 +490,57 @@ def test_prediction_reminders_are_published_as_one_manual_message() -> None:
     assert '"Опубликовать напоминания"' in reminder_source
     assert "getSwissStageCopy(contest.template_key)" in reminder_source
     assert "/prediction-reminders/publish`" in reminder_source
-    assert '{ method: "POST" }' in reminder_source
-    assert "отправит одно сообщение" in reminder_source
-    assert "result?.published !== true" in reminder_source
-    assert "createPredictionReminderPublicationSection(contest)" in (publication_source)
+    assert 'method: "POST"' in reminder_source
+    assert "[IDEMPOTENCY_KEY_HEADER]: idempotencyKey" in reminder_source
+    assert 'createIdempotencyKey("prediction-reminder-publication")' in reminder_source
+    assert "поставит отправку в очередь" in reminder_source
+    assert "result?.queued !== true" in reminder_source
+    assert "Напоминание поставлено в очередь." in reminder_source
+    assert "last_manual_delivery_status" in reminder_source
+    assert "Последняя ручная отправка:" in reminder_source
+    assert '"Обновить статус"' in reminder_source
+    assert reminder_source.count("onUpdated();") >= 2
+    assert "отправит одно сообщение" not in reminder_source
+    assert "createPredictionReminderPublicationSection(contest, onUpdated)" in (
+        publication_source
+    )
+
+
+def test_automatic_prediction_reminders_have_a_separate_settings_card() -> None:
+    settings_source = _function_source("getPredictionReminderSettings")
+    card_source = _function_source("createPredictionReminderAdministrationCard")
+    publications_source = _function_source("createContestPublicationsCard")
+
+    assert "contest?.prediction_reminders" in settings_source
+    assert "reminders?.is_enabled === true" in settings_source
+    assert "lead_time_minutes" in settings_source
+    assert "next_due_at" in settings_source
+    assert "last_delivery_status" in settings_source
+    assert "last_manual_delivery_status" in settings_source
+
+    assert 'text: "Автоматические напоминания"' in card_source
+    assert "ближайших дедлайнах матчей" in card_source
+    assert "общего или швейцарского этапа и чемпиона" in card_source
+    assert "Автоматические напоминания о ближайших дедлайнах выключены" in (card_source)
+    assert 'text: "Отправлять напоминания автоматически"' in card_source
+    assert 'text: "Когда напоминать"' in card_source
+    assert "Интервал применяется к матчам" in card_source
+    assert "и прогнозу на чемпиона" in card_source
+    assert '[60, "За 1 час"]' in card_source
+    assert '[180, "За 3 часа"]' in card_source
+    assert '[360, "За 6 часов"]' in card_source
+    assert '[1440, "За 24 часа"]' in card_source
+    assert "/prediction-reminders/settings`" in card_source
+    assert 'method: "PUT"' in card_source
+    assert "enabled: enabledInput.checked" in card_source
+    assert "lead_time_minutes: Number(leadTimeSelect.value)" in card_source
+    assert "result.prediction_reminders" in card_source
+    assert "Следующее напоминание:" in card_source
+    assert "Последняя отправка:" in card_source
+    assert (
+        "createPredictionReminderAdministrationCard(contest, onUpdated)"
+        in publications_source
+    )
 
 
 def test_intermediate_leaderboard_publication_is_an_idempotent_admin_action() -> None:
@@ -512,10 +585,28 @@ def test_participant_contour_does_not_render_administrative_forms() -> None:
     assert "createContestDeletionCard" not in details_source
 
 
-def test_match_form_prefills_local_start_time_and_focuses_on_manual_open() -> None:
+def test_participant_chat_mention_preference_autosaves_and_rolls_back() -> None:
+    preference_source = _function_source("createNotificationPreferencesCard")
+    home_source = _function_source("renderContestScreen")
+
+    assert "bootstrap?.notification_preferences" in preference_source
+    assert "preferences.mention_in_prediction_reminders === true" in preference_source
+    assert "Упоминать меня в напоминаниях этого чата" in preference_source
+    assert '"/api/tma/me/notification-preferences"' in preference_source
+    assert 'method: "PUT"' in preference_source
+    assert "mention_in_prediction_reminders: requestedValue" in preference_source
+    assert "result?.notification_preferences || result" in preference_source
+    assert preference_source.count("input.checked = savedValue") >= 2
+    assert "input.disabled = true" in preference_source
+    assert "input.disabled = false" in preference_source
+    assert "Не удалось сохранить настройку упоминаний." in preference_source
+    assert "createNotificationPreferencesCard(bootstrap)" in home_source
+
+
+def test_new_match_start_is_empty_and_manual_open_still_focuses_the_form() -> None:
     local_format_source = _function_source("formatLocalDateTime")
-    default_time_source = _function_source("getDefaultDateTimeLocal")
     form_source = _function_source("createMatchFormCard")
+    full_source = _source()
 
     assert "date.getFullYear()" in local_format_source
     assert "date.getMonth() + 1" in local_format_source
@@ -524,12 +615,9 @@ def test_match_form_prefills_local_start_time_and_focuses_on_manual_open() -> No
     assert "date.getMinutes()" in local_format_source
     assert "toISOString()" not in local_format_source
 
-    assert "const startsAt = new Date(now.getTime())" in default_time_source
-    assert "startsAt.setSeconds(0, 0)" in default_time_source
-    assert "startsAt.setMinutes(startsAt.getMinutes() + 3)" in default_time_source
-    assert "return formatLocalDateTime(startsAt)" in default_time_source
-
-    assert "draft.startsAtLocal || getDefaultDateTimeLocal()" in form_source
+    assert 'startsAtInput.value = draft.startsAtLocal || ""' in form_source
+    assert "getDefaultDateTimeLocal" not in full_source
+    assert "getMinutes() + 3" not in full_source
     assert "const wasInitiallyOpen = disclosure.open" in form_source
     assert 'disclosure.addEventListener("toggle"' in form_source
     assert "disclosure.open" in form_source
@@ -558,14 +646,12 @@ def test_management_uses_tournament_team_list_and_ids_for_matches() -> None:
     assert "away_team_name: awayTeamName" not in match_source
 
 
-def test_empty_champion_deadline_uses_general_local_default() -> None:
+def test_empty_champion_deadline_stays_empty() -> None:
     settings_source = _function_source("createChampionPredictionSettingsDisclosure")
 
-    assert "formatDateTimeLocalValue(championPrediction.deadline_at)" in settings_source
-    assert "|| getDefaultDateTimeLocal()" in settings_source
-    assert settings_source.index(
-        "formatDateTimeLocalValue(championPrediction.deadline_at)"
-    ) < settings_source.index("|| getDefaultDateTimeLocal()")
+    assert "deadlineInput.value = formatDateTimeLocalValue(" in settings_source
+    assert "championPrediction.deadline_at," in settings_source
+    assert "getDefaultDateTimeLocal" not in settings_source
 
 
 def test_champion_settings_action_matches_the_persisted_enabled_state() -> None:
@@ -639,10 +725,91 @@ def test_shared_tournament_ui_owns_all_common_deadlines_and_results() -> None:
     assert "Вернуть в активные" in lifecycle_source
     assert "tournament.is_archived === true" in champion_source
     assert "tournament.is_archived === true" in swiss_source
+    for card_source in (champion_source, swiss_source):
+        assert "settings.is_deadline_passed === true" in card_source
+        assert "Date.now()" not in card_source
+        assert "new Date(settings.deadline_at)" not in card_source
     assert "getSwissStageCopy(tournament.template_key)" in swiss_source
     assert "hasFixedChampionsLeagueLimits" in swiss_source
     assert '["Активные"' in list_source
     assert '["Завершённые"' in list_source
+
+
+def test_shared_tournament_management_is_grouped_into_accessible_stages() -> None:
+    stage_source = _function_source("createSharedTournamentWorkflowStage")
+    screen_source = _function_source("renderSharedTournamentScreen")
+    workflow_source = _function_source("getSharedTournamentWorkflowState")
+    styles = (main.TMA_DIRECTORY / "styles.css").read_text(encoding="utf-8")
+
+    assert 'document.createElement("details")' in stage_source
+    assert 'document.createElement("summary")' in stage_source
+    assert "details.open = open" in stage_source
+    assert "summary.append(stepLabel, copy, statusElement)" in stage_source
+    assert "details.append(summary, body)" in stage_source
+    assert 'className: "shared-tournament-stage-description"' in stage_source
+    assert "className: `shared-tournament-stage-status is-${tone}`" in stage_source
+
+    stage_titles = [
+        'title: "Подготовка"',
+        'title: "Общий этап"',
+        'title: "Плей-офф"',
+        'title: "Завершение"',
+    ]
+    title_positions = [screen_source.index(title) for title in stage_titles]
+    assert title_positions == sorted(title_positions)
+    assert 'text: "Этапы управления общим турниром"' in screen_source
+    assert 'stage.addEventListener("toggle"' in screen_source
+    assert "otherStage.open = false" in screen_source
+    assert 'workflow.setAttribute("aria-labelledby"' in screen_source
+    assert "completionBlockers.join(" in workflow_source
+    assert '"Блокеров: ${completionBlockers.length}"' not in workflow_source
+    assert "`Блокеров: ${completionBlockers.length}`" in workflow_source
+
+    assert ".shared-tournament-workflow" in styles
+    assert ".shared-tournament-stage-summary" in styles
+    assert ".shared-tournament-stage-status.is-attention" in styles
+    assert ".shared-tournament-stage-body" in styles
+    assert "summary:focus-visible" in styles
+    assert "@media (max-width: 560px)" in styles
+    assert "grid-column: 2 / 4" in styles
+
+
+def test_shared_workflow_keeps_manual_paths_and_completion_guards_visible() -> None:
+    screen_source = _function_source("renderSharedTournamentScreen")
+    workflow_source = _function_source("getSharedTournamentWorkflowState")
+    final_source = _function_source("getCompletedSharedChampionsLeagueFinalWinnerId")
+    note_source = _function_source("createSharedPlayoffManagementNote")
+    roster_source = _function_source("createSharedTournamentTeamsCard")
+
+    assert "(tournament.matches || []).length === 0" in screen_source
+    assert "Результаты доступны для исправления" in workflow_source
+    assert "Нужен состав из 36 команд" in workflow_source
+    assert "incompleteStandaloneMatchCount" in workflow_source
+    assert "Не указан дедлайн: ${stageCopy.stageName}" in workflow_source
+    assert "Не указан дедлайн прогноза на чемпиона" in workflow_source
+    assert "Не завершён финал канонической сетки" in workflow_source
+    assert "Фактический чемпион не совпадает с победителем финала" in (workflow_source)
+    assert 'round?.key === "final"' in final_source
+    assert "node?.position === 1" in final_source
+    assert 'finalNode?.state !== "finished"' in final_source
+    assert 'finalEntity?.type !== "match"' in final_source
+    assert 'finalMatch?.round_key !== "final"' in final_source
+    assert "isSharedMatchCompleteForWorkflow(finalMatch)" in final_source
+
+    assert "football-data.org ничего" in note_source
+    assert "не перезаписывает" in note_source
+    assert "вручную добавить пропущенный" in note_source
+    assert "матч или пару" in note_source
+    assert "удалите матч или пару и создайте" in note_source
+    assert '+ "заново."' in note_source
+    assert "прямо заменить" not in note_source
+
+    assert "const teamsLocked = tournament.teams_locked === true" in roster_source
+    assert "input.disabled = teamsLocked" in roster_source
+    assert "submitButton.disabled = teamsLocked" in roster_source
+    assert "Состав зафиксирован после добавления матчей" in roster_source
+    styles = (main.TMA_DIRECTORY / "styles.css").read_text(encoding="utf-8")
+    assert ".teams-textarea:disabled" in styles
 
 
 def test_linked_contest_hides_local_tournament_admin_forms() -> None:
@@ -658,3 +825,13 @@ def test_linked_contest_hides_local_tournament_admin_forms() -> None:
         in management_source
     )
     assert "isSharedTournament ? null" in management_source
+
+
+def test_linked_contest_completion_waits_for_shared_tournament_archive() -> None:
+    completion_source = _function_source("createContestCompletionCard")
+
+    assert "contest.shared_tournament.is_archived !== true" in completion_source
+    assert "перевода общего турнира в архив" in completion_source
+    assert completion_source.index(
+        "contest.shared_tournament.is_archived !== true"
+    ) < completion_source.index("getChampionPrediction(contest).is_open")

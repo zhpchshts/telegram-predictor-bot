@@ -83,6 +83,7 @@ def test_two_legged_matches_save_only_the_score_after_ninety_minutes() -> None:
 
 def test_two_legged_pair_creation_uses_the_exact_local_and_shared_contract() -> None:
     form_source = _function_source("createTwoLeggedTieFormCard")
+    second_leg_default_source = _function_source("getDefaultSecondLegDateTimeLocal")
     local_source = _function_source("renderContestManagementScreen")
     shared_source = _function_source("renderSharedTournamentScreen")
 
@@ -97,6 +98,12 @@ def test_two_legged_pair_creation_uses_the_exact_local_and_shared_contract() -> 
     assert "[IDEMPOTENCY_KEY_HEADER]: idempotencyKey" in form_source
     assert "secondLegStartsAt.getTime() <= firstLegStartsAt.getTime()" in form_source
     assert "response?.two_legged_tie" in form_source
+    assert 'firstLegInput.value = ""' in form_source
+    assert "secondLegInput.value = getDefaultSecondLegDateTimeLocal(" in form_source
+    assert 'firstLegInput.addEventListener("change"' in form_source
+    assert "if (!firstLegValue)" in second_leg_default_source
+    assert 'return ""' in second_leg_default_source
+    assert "secondLeg.setDate(secondLeg.getDate() + 7)" in (second_leg_default_source)
 
     assert "`/api/tma/contests/${contest.id}/two-legged-ties`" in local_source
     assert (

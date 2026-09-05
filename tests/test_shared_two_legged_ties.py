@@ -435,7 +435,7 @@ def test_shared_pair_start_order_and_member_deletion_are_protected(
         )
 
 
-def test_shared_tournament_archive_requires_and_accepts_pair_resolution(
+def test_shared_tournament_archive_checks_pair_resolution_before_ucl_final(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "pair-archive.db"
@@ -493,14 +493,17 @@ def test_shared_tournament_archive_requires_and_accepts_pair_resolution(
         database_path=database_path,
         shared_tournament_id=shared.tournament.id,
     )
-    archived = archive_shared_tournament(
-        database_path=database_path,
-        shared_tournament_id=shared.tournament.id,
-        expected_version=complete.tournament.version,
-        actor_telegram_user_id=OWNER_ID,
-        now_utc=_time("2030-06-08T16:00:00Z"),
-    )
-    assert archived.tournament.is_archived is True
+    with pytest.raises(
+        SharedTournamentCompletionUnavailableError,
+        match="материализации и завершения финала",
+    ):
+        archive_shared_tournament(
+            database_path=database_path,
+            shared_tournament_id=shared.tournament.id,
+            expected_version=complete.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+            now_utc=_time("2030-06-08T16:00:00Z"),
+        )
 
 
 def test_shared_pair_delete_removes_both_legs_and_all_local_ties(

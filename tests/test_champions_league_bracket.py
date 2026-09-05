@@ -695,6 +695,98 @@ def test_external_ledgers_are_conflict_safe_and_tombstone_deleted_fixture(
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+def test_exact_conflict_self_heal_requires_explicit_provider_policy(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "exact-conflict-self-heal.db"
+    initialize_database(database_path)
+    shared = _create_ucl(database_path)
+    ensure_champions_league_bracket(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+    )
+    configured = _configure_playoff_node(database_path, shared)
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE shared_bracket_nodes
+            SET sync_status = 'conflict', sync_error = 'transient conflict',
+                version = version + 1
+            WHERE id = ?
+            """,
+            (configured.id,),
+        )
+    conflicted = _node(database_path, shared.tournament.id, "playoff", 1)
+
+    manual_noop = configure_bracket_node(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        round_key="playoff",
+        bracket_position=1,
+        first_source_node_id=conflicted.first_source_node_id,
+        second_source_node_id=conflicted.second_source_node_id,
+        resolved_first_team_id=conflicted.resolved_first_team_id,
+        resolved_second_team_id=conflicted.resolved_second_team_id,
+        first_leg_starts_at_utc=conflicted.first_leg_starts_at_utc,
+        second_leg_starts_at_utc=conflicted.second_leg_starts_at_utc,
+        expected_version=conflicted.version,
+    )
+
+    assert manual_noop.action == "noop"
+    assert manual_noop.node == conflicted
+
+    healed = configure_bracket_node(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        round_key="playoff",
+        bracket_position=1,
+        first_source_node_id=conflicted.first_source_node_id,
+        second_source_node_id=conflicted.second_source_node_id,
+        resolved_first_team_id=conflicted.resolved_first_team_id,
+        resolved_second_team_id=conflicted.resolved_second_team_id,
+        first_leg_starts_at_utc=conflicted.first_leg_starts_at_utc,
+        second_leg_starts_at_utc=conflicted.second_leg_starts_at_utc,
+        expected_version=conflicted.version,
+        resolve_exact_provider_conflict=True,
+    )
+
+    assert healed.action == "updated"
+    assert healed.node.sync_status == "pending"
+    assert healed.node.sync_error is None
+    assert healed.node.version == conflicted.version + 1
+    assert healed.node.materialized_shared_tie_id is None
+
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE shared_bracket_nodes
+            SET sync_status = 'conflict', sync_error = 'manual correction needed',
+                version = version + 1
+            WHERE id = ?
+            """,
+            (configured.id,),
+        )
+    manual_conflict = _node(database_path, shared.tournament.id, "playoff", 1)
+    manual_correction = configure_bracket_node(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        round_key="playoff",
+        bracket_position=1,
+        first_source_node_id=manual_conflict.first_source_node_id,
+        second_source_node_id=manual_conflict.second_source_node_id,
+        resolved_first_team_id=manual_conflict.resolved_first_team_id,
+        resolved_second_team_id=manual_conflict.resolved_second_team_id,
+        first_leg_starts_at_utc="2030-02-02T18:00:00Z",
+        second_leg_starts_at_utc=manual_conflict.second_leg_starts_at_utc,
+        expected_version=manual_conflict.version,
+    )
+
+    assert manual_correction.action == "updated"
+    assert manual_correction.node.sync_status == "pending"
+    assert manual_correction.node.sync_error is None
+    assert manual_correction.node.first_leg_starts_at_utc == "2030-02-02T18:00:00Z"
+
+
 def test_unbound_tie_is_tombstoned_by_bracket_position_after_crash(
     tmp_path: Path,
 ) -> None:

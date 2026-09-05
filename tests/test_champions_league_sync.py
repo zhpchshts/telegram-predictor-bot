@@ -816,6 +816,155 @@ def test_same_second_disable_reenable_invalidates_in_flight_generation(
     assert {item.external_fixture_id for item in imports} == {"101", "102"}
 
 
+def test_database_backend_self_heals_exact_unmaterialized_node_conflict(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "ucl-exact-conflict-self-heal.db"
+    tournament_id = _create_enabled_tournament(database_path)
+    details = get_shared_tournament_details(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+    )
+    team_ids = {team.name: team.id for team in details.teams}
+    bracket = ensure_champions_league_bracket(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+    )
+    node = next(
+        item
+        for item in bracket.nodes
+        if item.round_key == "playoff" and item.bracket_position == 1
+    )
+    configured = configure_bracket_node(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+        round_key="playoff",
+        bracket_position=1,
+        first_source_node_id=None,
+        second_source_node_id=None,
+        resolved_first_team_id=team_ids["Alpha FC"],
+        resolved_second_team_id=team_ids["Beta FC"],
+        first_leg_starts_at_utc="2027-02-10T20:00:00Z",
+        second_leg_starts_at_utc="2027-02-17T20:00:00Z",
+        expected_version=node.version,
+    ).node
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE shared_bracket_nodes
+            SET sync_status = 'conflict', sync_error = 'transient conflict',
+                version = version + 1
+            WHERE id = ?
+            """,
+            (configured.id,),
+        )
+
+    result = asyncio.run(
+        synchronize_champions_league_tournament_once(
+            database_path=database_path,
+            client=FakeClient(_playoff_snapshot()),  # type: ignore[arg-type]
+            shared_tournament_id=tournament_id,
+            season_start_year=2026,
+            now_utc=NOW,
+        )
+    )
+    healed = next(
+        item
+        for item in get_champions_league_bracket(
+            database_path=database_path,
+            shared_tournament_id=tournament_id,
+        ).nodes
+        if item.id == configured.id
+    )
+
+    assert result.conflict_count == 0
+    assert result.created_tie_count == 1
+    assert healed.sync_status == "materialized"
+    assert healed.sync_error is None
+    assert healed.materialized_shared_tie_id is not None
+
+
+def test_database_backend_keeps_different_unmaterialized_node_conflict(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "ucl-different-conflict.db"
+    tournament_id = _create_enabled_tournament(database_path)
+    details = get_shared_tournament_details(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+    )
+    team_ids = {team.name: team.id for team in details.teams}
+    bracket = ensure_champions_league_bracket(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+    )
+    node = next(
+        item
+        for item in bracket.nodes
+        if item.round_key == "playoff" and item.bracket_position == 1
+    )
+    configured = configure_bracket_node(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+        round_key="playoff",
+        bracket_position=1,
+        first_source_node_id=None,
+        second_source_node_id=None,
+        resolved_first_team_id=team_ids["Alpha FC"],
+        resolved_second_team_id=team_ids["Beta FC"],
+        first_leg_starts_at_utc="2027-02-11T20:00:00Z",
+        second_leg_starts_at_utc="2027-02-17T20:00:00Z",
+        expected_version=node.version,
+    ).node
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE shared_bracket_nodes
+            SET sync_status = 'conflict', sync_error = 'manual conflict',
+                version = version + 1
+            WHERE id = ?
+            """,
+            (configured.id,),
+        )
+    conflicted = next(
+        item
+        for item in get_champions_league_bracket(
+            database_path=database_path,
+            shared_tournament_id=tournament_id,
+        ).nodes
+        if item.id == configured.id
+    )
+
+    result = asyncio.run(
+        synchronize_champions_league_tournament_once(
+            database_path=database_path,
+            client=FakeClient(_playoff_snapshot()),  # type: ignore[arg-type]
+            shared_tournament_id=tournament_id,
+            season_start_year=2026,
+            now_utc=NOW,
+        )
+    )
+    preserved = next(
+        item
+        for item in get_champions_league_bracket(
+            database_path=database_path,
+            shared_tournament_id=tournament_id,
+        ).nodes
+        if item.id == configured.id
+    )
+
+    assert result.conflict_count == 1
+    assert result.created_tie_count == 0
+    assert preserved == conflicted
+    assert (
+        get_shared_tournament_details(
+            database_path=database_path,
+            shared_tournament_id=tournament_id,
+        ).two_legged_ties
+        == ()
+    )
+
+
 def test_database_backend_materializes_idempotently_and_saves_strict_90_results(
     tmp_path: Path,
 ) -> None:

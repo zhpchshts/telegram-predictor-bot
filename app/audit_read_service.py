@@ -11,9 +11,7 @@ from typing import Any
 
 from app.audit_service import AuditEntityType, AuditEventType
 from app.database import create_connection
-
-
-CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY = "champions_league_2026_27"
+from app.tournament_catalog import CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY
 
 
 @dataclass(frozen=True, slots=True)

@@ -37,9 +37,16 @@ from app.contest_service import (
 )
 from app.database import create_connection, initialize_database
 from app.shared_tournament_service import (
+    SharedTournamentCompletionUnavailableError,
+    SharedTournamentResultUnavailableError,
+    archive_shared_tournament,
+    create_shared_match,
     create_shared_tournament,
     create_shared_two_legged_tie,
     get_shared_tournament_details,
+    save_shared_champion_result,
+    save_shared_champion_settings,
+    save_shared_match_result,
     save_shared_tournament_teams,
 )
 from app.tma_context import TmaChatContext, TmaContext, TmaUserContext
@@ -394,6 +401,149 @@ def test_shared_final_position_is_reserved_before_insert_and_attach_failure_roll
             ).fetchone()[0]
             == 0
         )
+
+
+def test_shared_ucl_lifecycle_requires_completed_canonical_final_winner(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "shared-ucl-lifecycle.db"
+    initialize_database(database_path)
+    shared = _create_shared_ucl(database_path, team_count=3)
+    tournament_id = shared.tournament.id
+    ensure_champions_league_bracket(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+    )
+    shared = save_shared_champion_settings(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+        enabled=True,
+        deadline_at="2030-05-01T12:00:00Z",
+        points=5,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Owner",
+        actor_last_name=None,
+        actor_username=None,
+        now_utc=_time("2029-01-01T00:00:00Z"),
+    )
+
+    with pytest.raises(
+        SharedTournamentResultUnavailableError,
+        match="материализации и завершения финала",
+    ):
+        save_shared_champion_result(
+            database_path=database_path,
+            shared_tournament_id=tournament_id,
+            champion_team_id=shared.teams[0].id,
+            expected_version=shared.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+            actor_first_name="Owner",
+            actor_last_name=None,
+            actor_username=None,
+            now_utc=_time("2031-01-01T00:00:00Z"),
+        )
+    with pytest.raises(
+        SharedTournamentCompletionUnavailableError,
+        match="материализации и завершения финала",
+    ):
+        archive_shared_tournament(
+            database_path=database_path,
+            shared_tournament_id=tournament_id,
+            expected_version=shared.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+            now_utc=_time("2031-01-01T00:00:00Z"),
+        )
+
+    final_node = _bracket_node(database_path, tournament_id, "final", 1)
+    configured_final = configure_bracket_node(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+        round_key="final",
+        bracket_position=1,
+        first_source_node_id=None,
+        second_source_node_id=None,
+        resolved_first_team_id=shared.teams[0].id,
+        resolved_second_team_id=shared.teams[1].id,
+        first_leg_starts_at_utc="2030-06-01T18:00:00Z",
+        second_leg_starts_at_utc=None,
+        expected_version=final_node.version,
+    ).node
+    final_match = create_shared_match(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+        home_team_id=shared.teams[0].id,
+        away_team_id=shared.teams[1].id,
+        starts_at_utc="2030-06-01T18:00:00Z",
+        best_of=None,
+        actor_telegram_user_id=OWNER_ID,
+        now_utc=_time("2029-01-01T00:00:00Z"),
+        round_key="final",
+        bracket_position=1,
+    )
+    mark_bracket_node_materialized(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+        node_id=configured_final.id,
+        expected_version=configured_final.version,
+        shared_match_id=final_match.id,
+    )
+    final_match = save_shared_match_result(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+        shared_match_id=final_match.id,
+        home_score=1,
+        away_score=1,
+        advancing_team_id=shared.teams[0].id,
+        expected_version=final_match.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Owner",
+        actor_last_name=None,
+        actor_username=None,
+        now_utc=_time("2031-01-01T00:00:00Z"),
+    )
+    assert final_match.status == "finished"
+
+    shared = get_shared_tournament_details(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+    )
+    with pytest.raises(
+        SharedTournamentResultUnavailableError,
+        match="совпадать с победителем финала",
+    ):
+        save_shared_champion_result(
+            database_path=database_path,
+            shared_tournament_id=tournament_id,
+            champion_team_id=shared.teams[1].id,
+            expected_version=shared.tournament.version,
+            actor_telegram_user_id=OWNER_ID,
+            actor_first_name="Owner",
+            actor_last_name=None,
+            actor_username=None,
+            now_utc=_time("2031-01-01T00:00:00Z"),
+        )
+    shared = save_shared_champion_result(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+        champion_team_id=shared.teams[0].id,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        actor_first_name="Owner",
+        actor_last_name=None,
+        actor_username=None,
+        now_utc=_time("2031-01-01T00:00:00Z"),
+    )
+    assert shared.champion_prediction.actual_champion == shared.teams[0]
+
+    archived = archive_shared_tournament(
+        database_path=database_path,
+        shared_tournament_id=tournament_id,
+        expected_version=shared.tournament.version,
+        actor_telegram_user_id=OWNER_ID,
+        now_utc=_time("2031-01-01T00:00:00Z"),
+    )
+    assert archived.tournament.is_archived is True
 
 
 def test_manual_shared_tie_result_and_correction_propagate_to_next_round(

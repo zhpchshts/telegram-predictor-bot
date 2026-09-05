@@ -97,6 +97,8 @@ def test_participant_autosaves_are_flushed_and_serialized_across_renders() -> No
     assert "predictionSaveQueues.delete" in queue_source
     assert "predictionSaveFailures.set" in queue_source
     assert "predictionSaveFailures.delete" in queue_source
+    assert "predictionSaveRetryEntries.set(queueKey, retryEntry)" in queue_source
+    assert "predictionSaveRetryEntries.get(queueKey) === retryEntry" in queue_source
     assert "error?.status === 409" in queue_source
     assert "`${contestId}:match:${matchId}`" in match_queue_source
     assert "`${contestId}:two-legged-tie:${tieId}`" in tie_queue_source
@@ -115,7 +117,14 @@ def test_participant_autosaves_are_flushed_and_serialized_across_renders() -> No
     assert "while (true)" in wait_source
     assert "Promise.allSettled(" in wait_source
     assert "predictionSaveFailures.entries()" in wait_source
+    assert "const retriedFailureKeys = new Set()" in wait_source
+    assert "predictionSaveRetryEntries.get(failedQueueKey)" in wait_source
+    assert "!retriedFailureKeys.has(failedQueueKey)" in wait_source
+    assert "queuePredictionSave(" in wait_source
+    assert "retryEntry.path" in wait_source
+    assert "retryEntry.payload" in wait_source
     assert "predictionSaveFailures.delete(failedEntry[0])" in wait_source
+    assert "predictionSaveRetryEntries.delete(failedEntry[0])" in wait_source
     assert "throw failedEntry[1]" in wait_source
     assert "await Promise.resolve()" in wait_source
     assert "Promise.race([drainSaves(), timeout])" in wait_source
@@ -187,6 +196,30 @@ def test_match_autosave_closes_stale_form_after_deadline() -> None:
     assert "!form.isConnected" in prediction_source
     assert "window.clearTimeout(deadlineTimer)" in prediction_source
     assert "lastSavedFingerprint = null" not in prediction_source
+
+
+def test_match_and_tie_autosaves_skip_debounce_near_deadline() -> None:
+    prediction_source = _function_source("createMatchPredictionSection")
+    tie_prediction_source = _function_source("createTwoLeggedTiePredictionListItem")
+
+    assert "new Date(match.starts_at_utc).getTime()" in prediction_source
+    assert "remaining <= 1_000" in prediction_source
+    assert "? 0\n      : 400" in prediction_source
+    assert "}, debounceDelay);" in prediction_source
+
+    assert "new Date(deadlineAt).getTime()" in tie_prediction_source
+    assert "remaining <= 1_000" in tie_prediction_source
+    assert "? 0\n      : 250" in tie_prediction_source
+    assert "}, debounceDelay);" in tie_prediction_source
+
+
+def test_participant_match_card_shows_recorded_result_read_only() -> None:
+    item_source = _function_source("createMatchListItem")
+
+    assert "showPredictions && !showResults && Boolean(match.result)" in item_source
+    assert "if (showResults || showParticipantResult)" in item_source
+    assert "createMatchResultSection(" in item_source
+    assert "showParticipantResult ? false : canManageResults" in item_source
 
 
 def test_dynamic_content_uses_safe_text_and_accessible_statuses() -> None:

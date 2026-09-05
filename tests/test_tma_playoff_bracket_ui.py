@@ -64,8 +64,14 @@ def test_participant_bracket_groups_a_tie_and_both_legs_without_duplicates() -> 
     assert 'role", "tablist"' in bracket_source
     assert 'role", "tabpanel"' in bracket_source
     assert 'button.setAttribute("aria-label", round.name)' in bracket_source
+    assert 'column.setAttribute("aria-labelledby", button.id)' in bracket_source
     assert "?.selectorLabel || round.name" in bracket_source
     assert 'round.format === "single"' in bracket_source
+    assert 'event.key === "ArrowRight"' in bracket_source
+    assert 'event.key === "ArrowLeft"' in bracket_source
+    assert 'event.key === "Home"' in bracket_source
+    assert 'event.key === "End"' in bracket_source
+    assert "buttons[nextIndex].focus()" in bracket_source
 
     assert "createTwoLeggedTiePredictionListItem(container, tie)" in node_source
     assert "for (const match of [firstLeg, secondLeg].filter(Boolean))" in node_source
@@ -136,12 +142,19 @@ def test_bracket_falls_back_to_round_metadata_and_keeps_legacy_matches() -> None
 
 def test_shared_fixture_sync_ui_never_renders_the_provider_token() -> None:
     sync_source = _function_source("createFixtureSyncAdministrationCard")
+    state_label_source = _function_source("getFixtureSyncStateLabel")
     shared_screen_source = _function_source("renderSharedTournamentScreen")
     participant_screen_source = _function_source("renderContestDetailsScreen")
     local_management_source = _function_source("renderContestManagementScreen")
 
     assert 'text: "Автоматическое обновление"' in sync_source
     assert 'attributionLink.textContent = "football-data.org"' in sync_source
+    assert "только матчи, которые ещё не начались" in sync_source
+    assert "точно и однозначно совпадать" in sync_source
+    assert "пропущенные пары добавляются вручную" in sync_source
+    assert 'idle: "Ждём пары"' in state_label_source
+    assert "Источник доступен, но пары плей-офф ещё не опубликованы" in sync_source
+    assert "или пока не получены" in sync_source
     assert "sync.token_configured !== true" in sync_source
     assert "sync.token" not in sync_source.replace("sync.token_configured", "")
     assert "api_token" not in sync_source
@@ -195,4 +208,12 @@ def test_playoff_bracket_is_horizontal_on_desktop_and_one_round_on_mobile() -> N
     assert "min-height: 44px" in styles
     assert "@media (max-width: 560px)" in styles
     assert ".fixture-sync-card" in styles
+    assert ".fixture-sync-status--idle" in styles
+    idle_styles = styles[
+        styles.index(".fixture-sync-status--idle") : styles.index(
+            ".fixture-sync-status--syncing"
+        )
+    ]
+    assert "color: var(--muted)" in idle_styles
+    assert "var(--success)" not in idle_styles
     assert ".manual-correction-card" in styles

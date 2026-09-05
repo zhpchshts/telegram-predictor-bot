@@ -481,7 +481,48 @@ def test_champions_league_playoff_category_is_never_scored() -> None:
     assert awards[0].points == 0
 
 
-def test_champions_league_partial_and_empty_predictions_remain_visible(
+def test_new_empty_champions_league_selection_does_not_create_or_lock_prediction(
+    database_path: Path,
+) -> None:
+    contest_id, _candidate_ids = _configure_champions_league(database_path)
+
+    empty = save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=[],
+        elimination_team_ids=[],
+        now_utc=OPEN_TIME,
+    )
+
+    assert empty.is_complete is False
+    assert empty.direct_teams == ()
+    assert empty.elimination_teams == ()
+    details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=OPEN_TIME,
+    )
+    assert details.swiss_stage_prediction.prediction is None
+    assert details.swiss_stage_prediction.settings_locked is False
+    assert details.leaderboard == ()
+    with database_connection(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM swiss_stage_predictions WHERE contest_id = ?",
+                (contest_id,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_cleared_champions_league_prediction_retains_lock_but_is_not_official(
     database_path: Path,
 ) -> None:
     contest_id, candidate_ids = _configure_champions_league(database_path)
@@ -502,6 +543,15 @@ def test_champions_league_partial_and_empty_predictions_remain_visible(
     assert len(partial.direct_teams) == 5
     assert len(partial.elimination_teams) == 9
     assert partial.playoff_teams == ()
+    partial_details = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=OPEN_TIME,
+    )
+    assert partial_details.leaderboard[0].swiss_stage_prediction_count == 1
+    assert partial_details.leaderboard[0].calculated_predictions_count == 0
 
     emptied = save_swiss_stage_prediction(
         database_path=database_path,
@@ -528,10 +578,7 @@ def test_champions_league_partial_and_empty_predictions_remain_visible(
         now_utc=OPEN_TIME,
     )
     prediction = details.swiss_stage_prediction.prediction
-    assert prediction is not None
-    assert prediction.is_complete is False
-    assert prediction.direct_teams == ()
-    assert prediction.elimination_teams == ()
+    assert prediction is None
     assert details.swiss_stage_prediction.settings_locked is True
     assert details.leaderboard[0].swiss_stage_prediction_count == 0
     assert details.leaderboard[0].calculated_predictions_count == 0
@@ -544,10 +591,7 @@ def test_champions_league_partial_and_empty_predictions_remain_visible(
         now_utc=CLOSED_TIME,
     )
     history = after_deadline.leaderboard[0].swiss_stage_prediction_history
-    assert history is not None
-    assert history.prediction.is_complete is False
-    assert history.prediction.direct_teams == ()
-    assert history.prediction.elimination_teams == ()
+    assert history is None
 
 
 @pytest.mark.parametrize(
@@ -691,7 +735,7 @@ def test_champions_league_result_remains_exact_in_partial_mode(
             )
 
 
-def test_partial_champions_league_prediction_scores_but_is_not_complete(
+def test_partial_champions_league_prediction_scores_and_counts_but_is_not_complete(
     database_path: Path,
 ) -> None:
     contest_id, candidate_ids = _configure_champions_league(database_path)
@@ -721,7 +765,7 @@ def test_partial_champions_league_prediction_scores_but_is_not_complete(
     before_by_username = {
         entry.participant_username: entry for entry in before_result.leaderboard
     }
-    assert before_by_username["alice"].swiss_stage_prediction_count == 0
+    assert before_by_username["alice"].swiss_stage_prediction_count == 1
     assert before_by_username["bob"].swiss_stage_prediction_count == 1
     assert before_by_username["alice"].calculated_predictions_count == 0
     assert before_by_username["bob"].calculated_predictions_count == 0
@@ -746,8 +790,8 @@ def test_partial_champions_league_prediction_scores_but_is_not_complete(
         entry.participant_username: entry for entry in scored.leaderboard
     }
     assert scored_by_username["alice"].total_points == 27
-    assert scored_by_username["alice"].swiss_stage_prediction_count == 0
-    assert scored_by_username["alice"].calculated_predictions_count == 0
+    assert scored_by_username["alice"].swiss_stage_prediction_count == 1
+    assert scored_by_username["alice"].calculated_predictions_count == 1
     assert scored_by_username["bob"].total_points == 28
     assert scored_by_username["bob"].swiss_stage_prediction_count == 1
     assert scored_by_username["bob"].calculated_predictions_count == 1
@@ -759,6 +803,60 @@ def test_partial_champions_league_prediction_scores_but_is_not_complete(
             elimination_points=11,
             total_points=27,
         )
+    )
+
+
+def test_single_champions_league_choice_is_an_official_incomplete_prediction(
+    database_path: Path,
+) -> None:
+    contest_id, candidate_ids = _configure_champions_league(database_path)
+    saved = save_swiss_stage_prediction(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        first_name="Алиса",
+        last_name=None,
+        username="alice",
+        direct_team_ids=[candidate_ids[0]],
+        elimination_team_ids=[],
+        now_utc=OPEN_TIME,
+    )
+
+    assert saved.is_complete is False
+    before_result = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=OPEN_TIME,
+    )
+    assert before_result.leaderboard[0].swiss_stage_prediction_count == 1
+    assert before_result.leaderboard[0].calculated_predictions_count == 0
+
+    save_swiss_stage_result(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        direct_team_ids=list(candidate_ids[:8]),
+        elimination_team_ids=list(candidate_ids[8:20]),
+        audit_actor=AUDIT_ACTOR,
+        now_utc=CLOSED_TIME,
+    )
+    scored = get_contest_details(
+        database_path=database_path,
+        telegram_chat_id=CHAT_ID,
+        contest_id=contest_id,
+        telegram_user_id=ALICE_ID,
+        now_utc=CLOSED_TIME,
+    )
+    assert scored.leaderboard[0].total_points == 2
+    assert scored.leaderboard[0].swiss_stage_prediction_count == 1
+    assert scored.leaderboard[0].calculated_predictions_count == 1
+    assert scored.leaderboard[0].swiss_stage_prediction_history is not None
+    assert (
+        scored.leaderboard[0].swiss_stage_prediction_history.prediction.is_complete
+        is False
     )
 
 

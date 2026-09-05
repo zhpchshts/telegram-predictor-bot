@@ -13,9 +13,12 @@ from app import tma_api
 from app.audit_service import AuditActor, AuditActorRole
 from app.champions_league_bracket import (
     configure_bracket_node,
+    configure_external_source,
     ensure_champions_league_bracket,
     mark_bracket_node_materialized,
+    record_sync_success,
 )
+from app.champions_league_sync import ChampionsLeagueSyncCycleResult
 from app.contest_service import (
     create_champions_league_2026_27_contest,
     get_contest_details,
@@ -100,6 +103,7 @@ def test_shared_ucl_payload_contains_full_empty_bracket_and_safe_sync_status(
     ]
     assert payload["fixture_sync"]["state"] == "disabled"
     assert payload["fixture_sync"]["token_configured"] is False
+    assert payload["teams_locked"] is False
     serialized = json.dumps(payload, ensure_ascii=False)
     assert "api_token" not in serialized
     assert "X-Auth-Token" not in serialized
@@ -248,3 +252,131 @@ def test_fixture_sync_toggle_uses_tournament_version_and_never_returns_token(
             )
         )
     assert token_error.value.status_code == 503
+
+
+def test_successful_empty_fixture_snapshot_stays_in_waiting_state(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "empty-snapshot-ucl.db"
+    initialize_database(database_path)
+    shared = _create_shared_ucl(database_path)
+    completed_at = _time("2029-01-01T12:00:00Z")
+    configure_external_source(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        source="football-data.org",
+        external_event_id="CL:2026",
+        sync_enabled=True,
+        expected_tournament_version=shared.tournament.version,
+        now_utc=_time("2029-01-01T11:55:00Z"),
+    )
+    record_sync_success(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+        source="football-data.org",
+        completed_at=completed_at,
+    )
+    details = get_shared_tournament_details(
+        database_path=database_path,
+        shared_tournament_id=shared.tournament.id,
+    )
+
+    payload = tma_api._serialize_shared_tournament_details(
+        details,
+        database_path=database_path,
+        football_data_token_configured=True,
+        sync_interval_minutes=10,
+        now_utc=completed_at,
+    )
+
+    assert payload["fixture_sync"]["last_success_at"] == "2029-01-01T12:00:00Z"
+    assert payload["fixture_sync"]["stats"]["fixtures_seen"] == 0
+    assert payload["fixture_sync"]["state"] == "idle"
+
+
+def test_manual_fixture_sync_returns_domain_conflicts_but_rejects_apply_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "manual-sync-result.db"
+    initialize_database(database_path)
+    shared = _create_shared_ucl(database_path)
+    monkeypatch.setattr(
+        tma_api,
+        "load_settings",
+        lambda: _settings(database_path, token="football-data-token"),
+    )
+
+    result = ChampionsLeagueSyncCycleResult(
+        target_count=1,
+        fetched=True,
+        successful_target_count=1,
+        failed_target_count=0,
+        provider_conflict_count=1,
+        created_tie_count=2,
+        created_match_count=0,
+        updated_start_count=1,
+        saved_result_count=0,
+        conflict_count=2,
+    )
+
+    async def synchronize_with_conflicts(**_kwargs) -> ChampionsLeagueSyncCycleResult:
+        return result
+
+    monkeypatch.setattr(
+        tma_api,
+        "synchronize_champions_league_tournament_once",
+        synchronize_with_conflicts,
+    )
+    response = asyncio.run(
+        tma_api.run_tma_shared_fixture_sync(
+            shared.tournament.id,
+            tma_api.SharedTournamentVersionRequest(
+                expected_version=shared.tournament.version
+            ),
+            object(),
+        )
+    )
+
+    assert response["sync_result"] == {
+        "fixtures_fetched": True,
+        "ties_created": 2,
+        "matches_created": 0,
+        "matches_updated": 1,
+        "results_saved": 0,
+        "conflicts": 3,
+    }
+    assert response["shared_tournament"]["id"] == shared.tournament.id
+
+    async def synchronize_with_apply_failure(
+        **_kwargs,
+    ) -> ChampionsLeagueSyncCycleResult:
+        return ChampionsLeagueSyncCycleResult(
+            target_count=1,
+            fetched=True,
+            successful_target_count=0,
+            failed_target_count=1,
+            provider_conflict_count=0,
+            created_tie_count=0,
+            created_match_count=0,
+            updated_start_count=0,
+            saved_result_count=0,
+            conflict_count=0,
+        )
+
+    monkeypatch.setattr(
+        tma_api,
+        "synchronize_champions_league_tournament_once",
+        synchronize_with_apply_failure,
+    )
+    with pytest.raises(HTTPException) as failure:
+        asyncio.run(
+            tma_api.run_tma_shared_fixture_sync(
+                shared.tournament.id,
+                tma_api.SharedTournamentVersionRequest(
+                    expected_version=shared.tournament.version
+                ),
+                object(),
+            )
+        )
+    assert failure.value.status_code == 502

@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
-from aiogram.exceptions import TelegramAPIError
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from app.access_control import (
     AccessDecision,
@@ -31,7 +28,6 @@ from app.audit_service import (
 )
 from app.config import load_settings
 from app.champions_league_bracket import (
-    CHAMPIONS_LEAGUE_ROUNDS,
     ChampionsLeagueBracketConflictError,
     ChampionsLeagueBracketError,
     configure_bracket_node,
@@ -129,7 +125,42 @@ from app.shared_tournament_service import (
     update_shared_match_start,
 )
 from app.tma_context import TmaContext, TmaContextError, build_tma_context
-from app.tma_entrypoint import create_tma_launch_keyboard
+from app.tma_contracts import (
+    SQLITE_SIGNED_64_MAX,
+    CreateContestRequest,
+    CreateMatchRequest,
+    CreateSharedMatchRequest,
+    CreateSharedTournamentRequest,
+    CreateSharedTwoLeggedTieRequest,
+    CreateTwoLeggedTieRequest,
+    ResolveRoleTargetRequest,
+    SaveChampionPredictionRequest,
+    SaveChampionPredictionSettingsRequest,
+    SaveChatSettingsRequest,
+    SaveContestChampionRequest,
+    SaveMatchPredictionPublicationSettingsRequest,
+    SaveMatchPredictionRequest,
+    SaveMatchResultRequest,
+    SaveNotificationPreferencesRequest,
+    SavePredictionReminderSettingsRequest,
+    SaveSharedChampionResultRequest,
+    SaveSharedChampionSettingsRequest,
+    SaveSharedFixtureSyncRequest,
+    SaveSharedMatchResultRequest,
+    SaveSharedSwissResultRequest,
+    SaveSharedSwissSettingsRequest,
+    SaveSharedTournamentTeamsRequest,
+    SaveSharedTwoLeggedTieResultRequest,
+    SaveSwissStagePredictionSettingsRequest,
+    SaveSwissStageSelectionRequest,
+    SaveTournamentTeamsRequest,
+    SaveTwoLeggedTiePredictionRequest,
+    SaveTwoLeggedTieResultRequest,
+    SharedTournamentVersionRequest,
+    SqliteInteger,
+    UpdateMatchStartRequest,
+    UpdateSharedMatchStartRequest,
+)
 from app.supermoderator_service import (
     ActiveSupermoderatorAssignment,
     SupermoderatorAssignmentNotFoundError,
@@ -147,11 +178,31 @@ from app.telegram_username_resolver import (
     UsernameResolutionUnavailableError,
     UsernameTargetNotSupportedError,
 )
+from app.tournament_catalog import (
+    CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY,
+    CHAMPIONS_LEAGUE_ROUNDS,
+    CONTEST_TEMPLATE_OPTIONS,
+    CREATABLE_TEMPLATE_KEYS,
+    SUPPORTED_TEMPLATE_KEYS,
+    THE_INTERNATIONAL_2026_TEMPLATE_KEY,
+    WORLD_CUP_2026_TEMPLATE_KEY,
+)
+from app.prediction_reminder_store import (
+    PredictionReminderStoreError,
+    ReminderPreference,
+    ReminderSettings,
+    get_manual_prediction_reminder_request,
+    get_reminder_preference,
+    get_reminder_settings,
+    queue_manual_prediction_reminder,
+    reconcile_prediction_reminder_occurrences,
+    save_reminder_preference,
+    save_reminder_settings,
+)
 from app.prediction_reminders import (
     NoOpenPredictionRemindersError,
     PredictionReminderMessageTooLongError,
-    TelegramPredictionReminderClient,
-    publish_prediction_reminders,
+    build_prediction_reminder_message,
 )
 from app.leaderboard_publications import (
     IntermediateLeaderboardUnavailableError,
@@ -169,41 +220,6 @@ from app.user_service import (
 
 TMA_INIT_DATA_HEADER = "X-Telegram-Init-Data"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
-SQLITE_SIGNED_64_MIN = -(2**63)
-SQLITE_SIGNED_64_MAX = 2**63 - 1
-CONTEST_TEMPLATE_OPTIONS = (
-    {
-        "key": "world_cup_2026",
-        "label": "Чемпионат мира 2026",
-    },
-    {
-        "key": "the_international_2026",
-        "label": "The International 2026",
-    },
-    {
-        "key": "champions_league_2026_27",
-        "label": "Лига чемпионов 2026/27",
-    },
-)
-SUPPORTED_TEMPLATE_KEYS = frozenset(
-    option["key"] for option in CONTEST_TEMPLATE_OPTIONS
-)
-# Completed seasonal templates remain supported for historical data. Only the
-# current Champions League season is available for creating new contests.
-CREATABLE_TEMPLATE_KEYS: frozenset[str] = frozenset({"champions_league_2026_27"})
-
-
-def _reject_boolean_integer(value: object) -> object:
-    if isinstance(value, bool):
-        raise ValueError("Boolean values are not valid integers.")
-    return value
-
-
-SqliteInteger = Annotated[
-    int,
-    BeforeValidator(_reject_boolean_integer),
-    Field(ge=SQLITE_SIGNED_64_MIN, le=SQLITE_SIGNED_64_MAX),
-]
 
 
 def _utc_now() -> datetime:
@@ -497,233 +513,6 @@ router = APIRouter(
 )
 
 
-class CreateContestRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    template_key: str
-    shared_tournament_id: SqliteInteger | None = None
-
-
-class CreateMatchRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    home_team_id: SqliteInteger
-    away_team_id: SqliteInteger
-    starts_at_utc: str
-    best_of: Literal[3, 5] | None = None
-    round_key: (
-        Literal["playoff", "round_of_16", "quarterfinal", "semifinal", "final"] | None
-    ) = None
-
-
-class CreateTwoLeggedTieRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    first_team_id: SqliteInteger
-    second_team_id: SqliteInteger
-    first_leg_starts_at_utc: str
-    second_leg_starts_at_utc: str
-    round_key: Literal["playoff", "round_of_16", "quarterfinal", "semifinal"] | None = (
-        None
-    )
-
-
-class CreateSharedTwoLeggedTieRequest(CreateTwoLeggedTieRequest):
-    bracket_position: SqliteInteger | None = Field(default=None, gt=0)
-
-
-class SaveTournamentTeamsRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    team_names: list[str]
-
-
-class UpdateMatchStartRequest(BaseModel):
-    starts_at_utc: str
-
-
-class SaveMatchPredictionRequest(BaseModel):
-    predicted_home_score: SqliteInteger = Field(
-        description=(
-            "Для футбольного матча — прогноз счёта хозяев строго после 90 минут."
-        )
-    )
-    predicted_away_score: SqliteInteger = Field(
-        description=(
-            "Для футбольного матча — прогноз счёта гостей строго после 90 минут."
-        )
-    )
-    predicted_advancing_team_id: SqliteInteger | None = Field(
-        default=None,
-        description=(
-            "Победитель или прошедшая команда. Для футбольного матча хранится "
-            "отдельно от счёта после 90 минут."
-        ),
-    )
-
-
-class SaveMatchResultRequest(BaseModel):
-    home_score: SqliteInteger = Field(
-        description="Для футбольного матча — счёт хозяев строго после 90 минут."
-    )
-    away_score: SqliteInteger = Field(
-        description="Для футбольного матча — счёт гостей строго после 90 минут."
-    )
-    advancing_team_id: SqliteInteger | None = Field(
-        default=None,
-        description=(
-            "Победитель или прошедшая команда. Для футбольного матча хранится "
-            "отдельно от счёта после 90 минут."
-        ),
-    )
-
-
-class SaveTwoLeggedTiePredictionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    predicted_advancing_team_id: SqliteInteger
-
-
-class SaveTwoLeggedTieResultRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    advancing_team_id: SqliteInteger | None = None
-    second_leg_extra_time_home_score: SqliteInteger | None = None
-    second_leg_extra_time_away_score: SqliteInteger | None = None
-    second_leg_home_penalty_score: SqliteInteger | None = None
-    second_leg_away_penalty_score: SqliteInteger | None = None
-
-
-class SaveChampionPredictionSettingsRequest(BaseModel):
-    enabled: bool
-    deadline_at: str | None = None
-    points: SqliteInteger
-
-
-class SaveMatchPredictionPublicationSettingsRequest(BaseModel):
-    enabled: bool
-
-
-class SaveChampionPredictionRequest(BaseModel):
-    predicted_team_id: SqliteInteger
-
-
-class SaveContestChampionRequest(BaseModel):
-    champion_team_id: SqliteInteger
-
-
-class SaveSwissStagePredictionSettingsRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool
-    deadline_at: str | None = None
-    direct_qualifier_count: SqliteInteger = 3
-    elimination_qualifier_count: SqliteInteger = 5
-
-
-class SaveSwissStageSelectionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    direct_team_ids: list[SqliteInteger]
-    elimination_team_ids: list[SqliteInteger]
-
-
-class ResolveRoleTargetRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    target: str
-
-
-class SaveChatSettingsRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    app_button_text: str
-
-
-class CreateSharedTournamentRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    template_key: str
-
-
-class SaveSharedTournamentTeamsRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    team_names: list[str]
-    expected_version: SqliteInteger
-
-
-class SharedTournamentVersionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    expected_version: SqliteInteger
-
-
-class SaveSharedFixtureSyncRequest(SharedTournamentVersionRequest):
-    enabled: bool
-
-
-class SaveSharedChampionSettingsRequest(SaveChampionPredictionSettingsRequest):
-    expected_version: SqliteInteger
-
-
-class SaveSharedChampionResultRequest(SaveContestChampionRequest):
-    expected_version: SqliteInteger
-
-
-class SaveSharedSwissSettingsRequest(SaveSwissStagePredictionSettingsRequest):
-    expected_version: SqliteInteger
-
-
-class SaveSharedSwissResultRequest(SaveSwissStageSelectionRequest):
-    expected_version: SqliteInteger
-
-
-class CreateSharedMatchRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    home_team_id: SqliteInteger
-    away_team_id: SqliteInteger
-    starts_at_utc: str
-    best_of: Literal[3, 5] | None = None
-    round_key: (
-        Literal["playoff", "round_of_16", "quarterfinal", "semifinal", "final"] | None
-    ) = None
-    bracket_position: SqliteInteger | None = Field(default=None, gt=0)
-
-
-class UpdateSharedMatchStartRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    starts_at_utc: str
-    expected_version: SqliteInteger
-
-
-class SaveSharedMatchResultRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    home_score: SqliteInteger = Field(
-        description="Для футбольного матча — счёт хозяев строго после 90 минут."
-    )
-    away_score: SqliteInteger = Field(
-        description="Для футбольного матча — счёт гостей строго после 90 минут."
-    )
-    advancing_team_id: SqliteInteger | None = Field(
-        default=None,
-        description=(
-            "Победитель или прошедшая команда. Для футбольного матча хранится "
-            "отдельно от счёта после 90 минут."
-        ),
-    )
-    expected_version: SqliteInteger
-
-
-class SaveSharedTwoLeggedTieResultRequest(SaveTwoLeggedTieResultRequest):
-    expected_version: SqliteInteger
-
-
 class TelegramUserIdInvalidError(ValueError):
     pass
 
@@ -762,17 +551,6 @@ class SharedTournamentManagementContext:
 def get_telegram_administrators_client(
     request: Request,
 ) -> TelegramAdministratorsClient:
-    try:
-        return request.app.state.telegram_bot
-    except AttributeError as error:
-        raise RuntimeError(
-            "Telegram bot is unavailable outside application lifespan."
-        ) from error
-
-
-def get_telegram_prediction_reminder_client(
-    request: Request,
-) -> TelegramPredictionReminderClient:
     try:
         return request.app.state.telegram_bot
     except AttributeError as error:
@@ -922,6 +700,20 @@ async def get_tma_bootstrap(
         x_telegram_init_data=x_telegram_init_data,
     )
     settings = load_settings()
+    actor = upsert_chat_actor(
+        database_path=settings.database_path,
+        telegram_chat_id=context.chat.telegram_chat_id,
+        chat_title=context.chat.title,
+        telegram_user_id=context.user.telegram_user_id,
+        username=context.user.username,
+        first_name=context.user.first_name,
+        last_name=context.user.last_name,
+    )
+    notification_preferences = get_reminder_preference(
+        database_path=settings.database_path,
+        chat_id=actor.chat_id,
+        user_id=actor.actor_user_id,
+    )
     active_contests = get_active_contests(
         database_path=settings.database_path,
         telegram_chat_id=context.chat.telegram_chat_id,
@@ -940,6 +732,9 @@ async def get_tma_bootstrap(
     return {
         "context": _serialize_context(context),
         "access": _serialize_access(access),
+        "notification_preferences": _serialize_notification_preferences(
+            notification_preferences
+        ),
         "active_contests": [
             _serialize_active_contest(contest) for contest in active_contests
         ],
@@ -947,6 +742,37 @@ async def get_tma_bootstrap(
             _serialize_active_contest(contest) for contest in completed_contests
         ],
     }
+
+
+@router.put("/me/notification-preferences")
+async def save_tma_notification_preferences(
+    payload: SaveNotificationPreferencesRequest,
+    x_telegram_init_data: Annotated[
+        str | None,
+        Header(alias=TMA_INIT_DATA_HEADER),
+    ] = None,
+) -> dict[str, object]:
+    context = _get_verified_tma_context(
+        x_telegram_init_data=x_telegram_init_data,
+    )
+    settings = load_settings()
+    actor = upsert_chat_actor(
+        database_path=settings.database_path,
+        telegram_chat_id=context.chat.telegram_chat_id,
+        chat_title=context.chat.title,
+        telegram_user_id=context.user.telegram_user_id,
+        username=context.user.username,
+        first_name=context.user.first_name,
+        last_name=context.user.last_name,
+    )
+    preference = save_reminder_preference(
+        database_path=settings.database_path,
+        chat_id=actor.chat_id,
+        user_id=actor.actor_user_id,
+        mention_in_prediction_reminders=(payload.mention_in_prediction_reminders),
+        now_utc=_utc_now(),
+    )
+    return {"notification_preferences": _serialize_notification_preferences(preference)}
 
 
 @router.get("/management/contests")
@@ -1342,11 +1168,11 @@ async def create_tma_contest(
     _require_creatable_template(payload.template_key)
     settings = load_settings()
     try:
-        if payload.template_key == "world_cup_2026":
+        if payload.template_key == WORLD_CUP_2026_TEMPLATE_KEY:
             create_contest = create_world_cup_2026_contest
-        elif payload.template_key == "the_international_2026":
+        elif payload.template_key == THE_INTERNATIONAL_2026_TEMPLATE_KEY:
             create_contest = create_the_international_2026_contest
-        elif payload.template_key == "champions_league_2026_27":
+        elif payload.template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
             create_contest = create_champions_league_2026_27_contest
         else:  # pragma: no cover - guarded by _require_creatable_template
             raise RuntimeError("Unsupported creatable contest template.")
@@ -1436,7 +1262,7 @@ async def create_tma_shared_tournament(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
         ) from error
-    if details.tournament.template_key == "champions_league_2026_27":
+    if details.tournament.template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
         ensure_champions_league_bracket(
             database_path=settings.database_path,
             shared_tournament_id=details.tournament.id,
@@ -1543,7 +1369,7 @@ async def run_tma_shared_fixture_sync(
             status_code=status.HTTP_409_CONFLICT,
             detail="Общий турнир уже изменился; перечитайте данные и повторите действие.",
         )
-    if details_before.tournament.template_key != "champions_league_2026_27":
+    if details_before.tournament.template_key != CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Автоматическая сетка доступна только для Лиги чемпионов.",
@@ -1588,7 +1414,7 @@ async def run_tma_shared_fixture_sync(
             ),
         },
     }
-    if sync_result.failed:
+    if sync_result.retryable_failure:
         raise _application_http_error(
             status_code=status.HTTP_502_BAD_GATEWAY,
             code="fixture_sync_failed",
@@ -3046,62 +2872,191 @@ async def save_tma_match_prediction_publication_settings(
     )
 
 
-@router.post("/contests/{contest_id}/prediction-reminders/publish")
-async def publish_tma_prediction_reminders(
+@router.put("/contests/{contest_id}/prediction-reminders/settings")
+async def save_tma_prediction_reminder_settings(
     contest_id: SqliteInteger,
+    payload: SavePredictionReminderSettingsRequest,
     context: Annotated[
         ContestManagementContext, Depends(_authorize_contest_management)
     ],
-    telegram_client: Annotated[
-        TelegramPredictionReminderClient,
-        Depends(get_telegram_prediction_reminder_client),
-    ],
-) -> JSONResponse:
+) -> dict[str, object]:
     settings = load_settings()
     try:
-        message = await asyncio.wait_for(
-            publish_prediction_reminders(
-                bot=telegram_client,
-                database_path=settings.database_path,
-                telegram_chat_id=context.chat.telegram_chat_id,
-                contest_id=contest_id,
-                reply_markup=create_tma_launch_keyboard(
-                    database_path=settings.database_path,
-                    telegram_chat_id=context.chat.telegram_chat_id,
-                    chat_type=context.chat.chat_type,
-                    chat_title=context.chat.title,
-                    bot_username=settings.bot_username,
-                    bot_token=settings.bot_token,
-                ),
-                now_utc=_utc_now(),
-            ),
-            timeout=30.0,
+        contest = get_contest_details(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            now_utc=_utc_now(),
         )
     except ContestNotFoundError as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
+    if not contest.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Для завершённого конкурса нельзя менять напоминания.",
+        )
+
+    actor = upsert_chat_actor(
+        database_path=settings.database_path,
+        telegram_chat_id=context.chat.telegram_chat_id,
+        chat_title=context.chat.title,
+        telegram_user_id=context.user.telegram_user_id,
+        username=context.user.username,
+        first_name=context.user.first_name,
+        last_name=context.user.last_name,
+    )
+    try:
+        reminder_settings = save_reminder_settings(
+            database_path=settings.database_path,
+            contest_id=contest_id,
+            enabled=payload.enabled,
+            lead_time_minutes=payload.lead_time_minutes,
+            actor_user_id=actor.actor_user_id,
+            now_utc=_utc_now(),
+        )
+    except PredictionReminderStoreError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    reconcile_prediction_reminder_occurrences(
+        database_path=settings.database_path,
+        now_utc=_utc_now(),
+    )
+    return {
+        "prediction_reminders": _serialize_prediction_reminder_settings(
+            reminder_settings,
+            database_path=settings.database_path,
+        )
+    }
+
+
+@router.post("/contests/{contest_id}/prediction-reminders/publish")
+async def publish_tma_prediction_reminders(
+    contest_id: SqliteInteger,
+    context: Annotated[
+        ContestManagementContext, Depends(_authorize_contest_management)
+    ],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias=IDEMPOTENCY_KEY_HEADER),
+    ] = None,
+) -> JSONResponse:
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Не передан ключ идемпотентности напоминания.",
+        )
+    settings = load_settings()
+    now_utc = _utc_now()
+    try:
+        contest = get_contest_details(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            telegram_user_id=context.user.telegram_user_id,
+            now_utc=now_utc,
+        )
+    except ContestNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    if not contest.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Для завершённого конкурса нельзя публиковать напоминания.",
+        )
+    actor = upsert_chat_actor(
+        database_path=settings.database_path,
+        telegram_chat_id=context.chat.telegram_chat_id,
+        chat_title=context.chat.title,
+        telegram_user_id=context.user.telegram_user_id,
+        username=context.user.username,
+        first_name=context.user.first_name,
+        last_name=context.user.last_name,
+    )
+    try:
+        existing = get_manual_prediction_reminder_request(
+            database_path=settings.database_path,
+            contest_id=contest_id,
+            actor_user_id=actor.actor_user_id,
+            idempotency_key=idempotency_key,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+    if existing is not None:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "queued": True,
+                "request_id": existing.request_id,
+                "was_created": False,
+            },
+        )
+    try:
+        build_prediction_reminder_message(
+            database_path=settings.database_path,
+            telegram_chat_id=context.chat.telegram_chat_id,
+            contest_id=contest_id,
+            now_utc=now_utc,
+        )
     except (
         ContestCompletedError,
         NoOpenPredictionRemindersError,
         PredictionReminderMessageTooLongError,
     ) as error:
+        existing = get_manual_prediction_reminder_request(
+            database_path=settings.database_path,
+            contest_id=contest_id,
+            actor_user_id=actor.actor_user_id,
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                content={
+                    "queued": True,
+                    "request_id": existing.request_id,
+                    "was_created": False,
+                },
+            )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
         ) from error
-    except (TelegramAPIError, TimeoutError) as error:
+    try:
+        queued = queue_manual_prediction_reminder(
+            database_path=settings.database_path,
+            contest_id=contest_id,
+            actor_user_id=actor.actor_user_id,
+            idempotency_key=idempotency_key,
+            now_utc=now_utc,
+        )
+    except ValueError as error:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Не удалось опубликовать напоминания. Попробуйте ещё раз.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+    except PredictionReminderStoreError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
         ) from error
 
     return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
         content={
-            "published": True,
-            "reminder_count": message.reminder_count,
-            "match_count": message.match_count,
+            "queued": True,
+            "request_id": queued.request_id,
+            "was_created": queued.was_created,
         },
     )
 
@@ -3629,6 +3584,7 @@ def _serialize_shared_tournament_for_api(details, settings) -> dict[str, object]
         database_path=settings.database_path,
         football_data_token_configured=(settings.football_data_api_token is not None),
         sync_interval_minutes=settings.champions_league_sync_interval_minutes,
+        now_utc=_utc_now(),
     )
 
 
@@ -3679,10 +3635,22 @@ def _serialize_shared_tournament_details(
     database_path: Path | None = None,
     football_data_token_configured: bool = False,
     sync_interval_minutes: int = 10,
+    now_utc: datetime | None = None,
 ) -> dict[str, object]:
+    resolved_now_utc = now_utc or _utc_now()
+    champion_deadline = _parse_optional_utc_datetime(
+        details.champion_prediction.deadline_at
+    )
+    swiss_stage_deadline = _parse_optional_utc_datetime(
+        details.swiss_stage_prediction.deadline_at
+    )
     swiss_stage_prediction = {
         "is_enabled": details.swiss_stage_prediction.is_enabled,
         "deadline_at": details.swiss_stage_prediction.deadline_at,
+        "is_deadline_passed": (
+            swiss_stage_deadline is not None
+            and swiss_stage_deadline <= resolved_now_utc
+        ),
         "direct_qualifier_count": (
             details.swiss_stage_prediction.direct_qualifier_count
         ),
@@ -3704,17 +3672,21 @@ def _serialize_shared_tournament_details(
         ),
         "settings_locked": details.swiss_stage_prediction.settings_locked,
     }
-    if details.tournament.template_key == "champions_league_2026_27":
+    if details.tournament.template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
         swiss_stage_prediction["playoff_team_ids"] = list(
             details.swiss_stage_prediction.playoff_team_ids
         )
     result = {
         **_serialize_shared_tournament_summary(details.tournament),
         "teams": [{"id": team.id, "name": team.name} for team in details.teams],
+        "teams_locked": details.teams_locked,
         "matches": [_serialize_shared_match(match) for match in details.matches],
         "champion_prediction": {
             "is_enabled": details.champion_prediction.is_enabled,
             "deadline_at": details.champion_prediction.deadline_at,
+            "is_deadline_passed": (
+                champion_deadline is not None and champion_deadline <= resolved_now_utc
+            ),
             "points": details.champion_prediction.points,
             "actual_champion": (
                 {
@@ -3733,7 +3705,7 @@ def _serialize_shared_tournament_details(
         ]
     if (
         database_path is not None
-        and details.tournament.template_key == "champions_league_2026_27"
+        and details.tournament.template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY
     ):
         playoff_bracket = _serialize_champions_league_playoff_bracket(
             database_path=database_path,
@@ -4313,7 +4285,7 @@ def _serialize_champions_league_fixture_sync(
         state = "needs_attention"
     elif source is not None and source.last_error is not None:
         state = "error"
-    elif last_success is None:
+    elif last_success is None or not fixture_imports:
         state = "idle"
     elif resolved_now - last_success > timedelta(minutes=interval_minutes * 2):
         state = "stale"
@@ -4394,6 +4366,7 @@ def _serialize_contest_details(
             {
                 "id": contest.shared_tournament_id,
                 "name": contest.shared_tournament_name,
+                "is_archived": contest.shared_tournament_is_archived,
             }
             if contest.shared_tournament_id is not None
             else None
@@ -4402,6 +4375,22 @@ def _serialize_contest_details(
         "match_prediction_publication": _serialize_match_prediction_publication(
             contest.match_prediction_publication
         ),
+        "prediction_reminders": _serialize_prediction_reminder_settings(
+            get_reminder_settings(
+                database_path=database_path,
+                contest_id=contest.id,
+            ),
+            database_path=database_path,
+        )
+        if database_path is not None
+        else {
+            "is_enabled": False,
+            "lead_time_minutes": 180,
+            "revision": 0,
+            "next_due_at": None,
+            "last_delivery_status": None,
+            "last_manual_delivery_status": None,
+        },
         "champion_prediction": _serialize_champion_prediction(
             contest.champion_prediction
         ),
@@ -4429,7 +4418,7 @@ def _serialize_contest_details(
         result["swiss_stage_prediction"] = _serialize_swiss_stage_prediction(
             contest.swiss_stage_prediction
         )
-    if contest.template_key == "champions_league_2026_27":
+    if contest.template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
         if database_path is not None and contest.shared_tournament_id is not None:
             playoff_bracket = _serialize_champions_league_playoff_bracket(
                 database_path=database_path,
@@ -4456,6 +4445,95 @@ def _serialize_match_prediction_publication(
 ) -> dict[str, object]:
     return {
         "is_enabled": match_prediction_publication.is_enabled,
+    }
+
+
+def _serialize_prediction_reminder_settings(
+    reminder_settings: ReminderSettings,
+    *,
+    database_path: Path | None = None,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "is_enabled": reminder_settings.enabled,
+        "lead_time_minutes": reminder_settings.lead_time_minutes,
+        "revision": reminder_settings.revision,
+        "next_due_at": None,
+        "last_delivery_status": None,
+        "last_manual_delivery_status": None,
+    }
+    if database_path is None:
+        return result
+    with database_connection(database_path) as connection:
+        next_occurrence = (
+            connection.execute(
+                """
+                SELECT due_at
+                FROM (
+                    SELECT due_at, id, 0 AS source_order
+                    FROM prediction_reminder_occurrences
+                    WHERE contest_id = ? AND status = 'scheduled'
+                    UNION ALL
+                    SELECT due_at, id, 1 AS source_order
+                    FROM prediction_reminder_deadline_occurrences
+                    WHERE contest_id = ? AND status = 'scheduled'
+                )
+                ORDER BY due_at, source_order, id
+                LIMIT 1
+                """,
+                (reminder_settings.contest_id, reminder_settings.contest_id),
+            ).fetchone()
+            if reminder_settings.enabled
+            else None
+        )
+        last_delivery = connection.execute(
+            """
+            SELECT status
+            FROM prediction_reminder_deliveries
+            WHERE original_contest_id = ? AND source = 'auto'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (reminder_settings.contest_id,),
+        ).fetchone()
+        last_manual_delivery = connection.execute(
+            """
+            SELECT status
+            FROM prediction_reminder_deliveries
+            WHERE original_contest_id = ? AND source = 'manual'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (reminder_settings.contest_id,),
+        ).fetchone()
+    result["next_due_at"] = (
+        _serialize_api_utc_datetime(next_occurrence["due_at"])
+        if next_occurrence is not None
+        else None
+    )
+    result["last_delivery_status"] = (
+        str(last_delivery["status"]) if last_delivery is not None else None
+    )
+    result["last_manual_delivery_status"] = (
+        str(last_manual_delivery["status"])
+        if last_manual_delivery is not None
+        else None
+    )
+    return result
+
+
+def _serialize_api_utc_datetime(value: object) -> str:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RuntimeError("Stored reminder timestamp does not include a timezone.")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _serialize_notification_preferences(
+    preference: ReminderPreference,
+) -> dict[str, object]:
+    return {
+        "mention_in_prediction_reminders": (preference.mention_in_prediction_reminders),
+        "revision": preference.revision,
     }
 
 

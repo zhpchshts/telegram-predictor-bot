@@ -9,7 +9,6 @@ from urllib.parse import urlencode
 
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import GetChatAdministrators
-from aiogram.types import InlineKeyboardMarkup, InputRichMessage
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
@@ -24,7 +23,7 @@ from app.access_control import (
 )
 from app.audit_service import AuditActor, AuditActorRole
 from app.contest_service import save_match_prediction, save_match_result
-from app.database import create_connection, initialize_database
+from app.database import create_connection, database_connection, initialize_database
 from app.main import create_app as create_application
 from app.supermoderator_service import (
     SupermoderatorAssignment,
@@ -49,7 +48,6 @@ from app.tma_api import (
     _audit_actor,
     _parse_telegram_user_id_target,
     get_telegram_administrators_client,
-    get_telegram_prediction_reminder_client,
     get_telegram_username_resolver,
 )
 from app.tma_auth import calculate_init_data_hash
@@ -81,27 +79,6 @@ class AdminTelegramAdministratorsClient:
         assert chat_id == TELEGRAM_CHAT_ID
         self.calls += 1
         return [SimpleNamespace(user=SimpleNamespace(id=123))]
-
-
-class RecordingPredictionReminderClient:
-    def __init__(self) -> None:
-        self.sent: list[dict[str, object]] = []
-
-    async def send_rich_message(
-        self,
-        chat_id: int,
-        *,
-        rich_message: InputRichMessage,
-        reply_markup: InlineKeyboardMarkup,
-    ) -> SimpleNamespace:
-        self.sent.append(
-            {
-                "chat_id": chat_id,
-                "rich_message": rich_message,
-                "reply_markup": reply_markup,
-            }
-        )
-        return SimpleNamespace(message_id=1000 + len(self.sent))
 
 
 class MutableTelegramAdministratorsClient:
@@ -830,6 +807,10 @@ def test_bootstrap_returns_verified_context_and_empty_active_contests(
             "role": "telegram_admin",
             "can_manage_contests": True,
             "can_manage_roles": True,
+        },
+        "notification_preferences": {
+            "mention_in_prediction_reminders": False,
+            "revision": 0,
         },
         "active_contests": [],
         "completed_contests": [],
@@ -1840,6 +1821,7 @@ def test_participants_and_supermoderators_cannot_use_role_management_routes(
 def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> None:
     expected_routes = {
         ("GET", "/api/tma/bootstrap"): "read",
+        ("PUT", "/api/tma/me/notification-preferences"): "prediction",
         ("GET", "/api/tma/management/contests"): "contest_management",
         ("PUT", "/api/tma/management/chat-settings"): "contest_management",
         (
@@ -1983,6 +1965,10 @@ def test_tma_route_registry_is_complete_and_uses_expected_authorization() -> Non
             "/api/tma/contests/{contest_id}/prediction-reminders/publish",
         ): "contest_management",
         (
+            "PUT",
+            "/api/tma/contests/{contest_id}/prediction-reminders/settings",
+        ): "contest_management",
+        (
             "POST",
             "/api/tma/contests/{contest_id}/leaderboard-publications",
         ): "contest_management",
@@ -2110,6 +2096,62 @@ def test_shared_tournament_api_archives_and_restores_read_only_tournament(
     assert restored_response.json()["shared_tournament"]["is_archived"] is False
 
 
+def test_shared_tournament_api_rejects_restore_after_linked_contest_completion(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "completed-linked-contest.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    monkeypatch.setenv("SHARED_TOURNAMENT_ADMIN_IDS", "123")
+    client = TestClient(create_app())
+
+    created_response = client.post(
+        "/api/tma/shared-tournaments",
+        headers=build_tma_headers(),
+        json={"name": "Общий завершённый ЧМ", "template_key": "world_cup_2026"},
+    )
+    assert created_response.status_code == 201
+    tournament = created_response.json()["shared_tournament"]
+    contest_response = client.post(
+        "/api/tma/contests",
+        headers=build_tma_headers(idempotency_key="completed-linked-contest"),
+        json={
+            "name": "Завершённый связанный конкурс",
+            "template_key": "world_cup_2026",
+            "shared_tournament_id": tournament["id"],
+        },
+    )
+    assert contest_response.status_code == 201
+    contest = contest_response.json()["contest"]
+    archived_response = client.post(
+        f"/api/tma/shared-tournaments/{tournament['id']}/archive",
+        headers=build_tma_headers(),
+        json={"expected_version": tournament["version"]},
+    )
+    assert archived_response.status_code == 200
+    archived = archived_response.json()["shared_tournament"]
+    completion_response = client.post(
+        f"/api/tma/contests/{contest['id']}/complete",
+        headers=build_tma_headers(),
+    )
+    assert completion_response.status_code == 200
+
+    restored_response = client.post(
+        f"/api/tma/shared-tournaments/{tournament['id']}/restore",
+        headers=build_tma_headers(),
+        json={"expected_version": archived["version"]},
+    )
+
+    assert restored_response.status_code == 409
+    assert restored_response.json() == {
+        "detail": (
+            "Нельзя восстановить общий турнир: один из связанных конкурсов "
+            "уже завершён и не может быть восстановлен."
+        )
+    }
+
+
 def test_shared_tournament_api_creates_linked_contest_and_blocks_local_edits(
     monkeypatch,
     tmp_path: Path,
@@ -2204,11 +2246,21 @@ def test_shared_tournament_api_creates_linked_contest_and_blocks_local_edits(
     assert details["shared_tournament"] == {
         "id": tournament["id"],
         "name": "Общий ЧМ",
+        "is_archived": False,
     }
     assert len(details["matches"]) == 1
     assert details["champion_prediction"]["points"] == 7
     assert details["champion_prediction"]["is_enabled"] is True
     assert details["swiss_stage_prediction"]["direct_qualifier_count"] == 1
+
+    blocked_completion = client.post(
+        f"/api/tma/contests/{contest_id}/complete",
+        headers=build_tma_headers(),
+    )
+    assert blocked_completion.status_code == 409
+    assert blocked_completion.json() == {
+        "detail": ("Связанный конкурс можно завершить после завершения общего турнира.")
+    }
 
     local_update = client.put(
         f"/api/tma/contests/{contest_id}/matches/{details['matches'][0]['id']}",
@@ -2228,6 +2280,83 @@ def test_shared_tournament_api_creates_linked_contest_and_blocks_local_edits(
         },
     )
     assert local_champion_settings.status_code == 409
+
+
+def test_shared_tournament_api_serializes_server_deadline_state(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    monkeypatch.setenv("SHARED_TOURNAMENT_ADMIN_IDS", "123")
+    current_time = {"value": datetime(2030, 8, 1, tzinfo=timezone.utc)}
+    monkeypatch.setattr(
+        "app.tma_api._utc_now",
+        lambda: current_time["value"],
+    )
+    client = TestClient(create_app())
+
+    create_response = client.post(
+        "/api/tma/shared-tournaments",
+        headers=build_tma_headers(),
+        json={
+            "name": "Общая Лига чемпионов 2026/27",
+            "template_key": "champions_league_2026_27",
+        },
+    )
+    assert create_response.status_code == 201
+    shared = create_response.json()["shared_tournament"]
+    assert shared["champion_prediction"]["is_deadline_passed"] is False
+    assert shared["swiss_stage_prediction"]["is_deadline_passed"] is False
+
+    teams_response = client.put(
+        f"/api/tma/shared-tournaments/{shared['id']}/teams",
+        headers=build_tma_headers(),
+        json={
+            "team_names": [f"Команда {number:02d}" for number in range(1, 37)],
+            "expected_version": shared["version"],
+        },
+    )
+    assert teams_response.status_code == 200
+    shared = teams_response.json()["shared_tournament"]
+    champion_response = client.put(
+        f"/api/tma/shared-tournaments/{shared['id']}/champion-prediction/settings",
+        headers=build_tma_headers(),
+        json={
+            "enabled": True,
+            "deadline_at": "2030-09-01T12:00:00Z",
+            "points": 5,
+            "expected_version": shared["version"],
+        },
+    )
+    assert champion_response.status_code == 200
+    shared = champion_response.json()["shared_tournament"]
+    swiss_response = client.put(
+        f"/api/tma/shared-tournaments/{shared['id']}/swiss-stage/settings",
+        headers=build_tma_headers(),
+        json={
+            "enabled": True,
+            "deadline_at": "2030-09-01T12:00:00Z",
+            "direct_qualifier_count": 8,
+            "elimination_qualifier_count": 12,
+            "expected_version": shared["version"],
+        },
+    )
+    assert swiss_response.status_code == 200
+    shared = swiss_response.json()["shared_tournament"]
+    assert shared["champion_prediction"]["is_deadline_passed"] is False
+    assert shared["swiss_stage_prediction"]["is_deadline_passed"] is False
+
+    current_time["value"] = datetime(2030, 9, 2, tzinfo=timezone.utc)
+    details_response = client.get(
+        f"/api/tma/shared-tournaments/{shared['id']}",
+        headers=build_tma_headers(),
+    )
+    assert details_response.status_code == 200
+    shared = details_response.json()["shared_tournament"]
+    assert shared["champion_prediction"]["is_deadline_passed"] is True
+    assert shared["swiss_stage_prediction"]["is_deadline_passed"] is True
 
 
 def test_participant_predictions_remain_available_without_management_access(
@@ -3235,6 +3364,14 @@ def test_get_contest_returns_details_with_empty_matches(
             "match_prediction_publication": {
                 "is_enabled": False,
             },
+            "prediction_reminders": {
+                "is_enabled": False,
+                "lead_time_minutes": 180,
+                "revision": 0,
+                "next_due_at": None,
+                "last_delivery_status": None,
+                "last_manual_delivery_status": None,
+            },
             "champion_prediction": {
                 "is_enabled": False,
                 "deadline_at": None,
@@ -3366,7 +3503,151 @@ def test_match_prediction_publication_settings_can_be_enabled(
     }
 
 
-def test_prediction_reminder_endpoint_publishes_one_rich_message(
+def test_notification_preferences_are_self_scoped_and_returned_by_bootstrap(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    client = TestClient(create_app())
+
+    response = client.put(
+        "/api/tma/me/notification-preferences",
+        headers=build_tma_headers(),
+        json={"mention_in_prediction_reminders": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "notification_preferences": {
+            "mention_in_prediction_reminders": True,
+            "revision": 1,
+        }
+    }
+    bootstrap = client.get("/api/tma/bootstrap", headers=build_tma_headers())
+    assert bootstrap.status_code == 200
+    assert (
+        bootstrap.json()["notification_preferences"]
+        == response.json()["notification_preferences"]
+    )
+
+    forged_target = client.put(
+        "/api/tma/me/notification-preferences",
+        headers=build_tma_headers(),
+        json={
+            "mention_in_prediction_reminders": False,
+            "telegram_user_id": 999,
+        },
+    )
+    assert forged_target.status_code == 422
+
+
+def test_prediction_reminder_settings_use_presets_and_expose_schedule_status(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    monkeypatch.setattr(
+        tma_api,
+        "_utc_now",
+        lambda: datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client, idempotency_key="reminder-settings")
+    match_response = client.post(
+        f"/api/tma/contests/{contest['id']}/matches",
+        headers=build_tma_headers(idempotency_key="reminder-settings-match"),
+        json=build_tma_match_payload(
+            client,
+            contest_id=int(contest["id"]),
+            home_team_name="Франция",
+            away_team_name="Испания",
+            starts_at_utc="2030-01-02T18:00:00Z",
+        ),
+    )
+    assert match_response.status_code == 201
+
+    response = client.put(
+        f"/api/tma/contests/{contest['id']}/prediction-reminders/settings",
+        headers=build_tma_headers(),
+        json={"enabled": True, "lead_time_minutes": 360},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "prediction_reminders": {
+            "is_enabled": True,
+            "lead_time_minutes": 360,
+            "revision": 1,
+            "next_due_at": "2030-01-02T12:00:00Z",
+            "last_delivery_status": None,
+            "last_manual_delivery_status": None,
+        }
+    }
+    contest_response = client.get(
+        f"/api/tma/contests/{contest['id']}", headers=build_tma_headers()
+    )
+    assert contest_response.status_code == 200
+    assert (
+        contest_response.json()["contest"]["prediction_reminders"]
+        == (response.json()["prediction_reminders"])
+    )
+    invalid = client.put(
+        f"/api/tma/contests/{contest['id']}/prediction-reminders/settings",
+        headers=build_tma_headers(),
+        json={"enabled": True, "lead_time_minutes": 5},
+    )
+    assert invalid.status_code == 422
+    disabled = client.put(
+        f"/api/tma/contests/{contest['id']}/prediction-reminders/settings",
+        headers=build_tma_headers(),
+        json={"enabled": False, "lead_time_minutes": 360},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["prediction_reminders"]["next_due_at"] is None
+
+
+def test_prediction_reminder_settings_expose_champion_only_next_due(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    monkeypatch.setattr(
+        tma_api,
+        "_utc_now",
+        lambda: datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client, idempotency_key="reminder-champion-due")
+    with database_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE contests
+            SET champion_prediction_enabled = 1,
+                champion_prediction_deadline_at = '2030-01-02T18:00:00.000000Z'
+            WHERE id = ?
+            """,
+            (contest["id"],),
+        )
+
+    response = client.put(
+        f"/api/tma/contests/{contest['id']}/prediction-reminders/settings",
+        headers=build_tma_headers(),
+        json={"enabled": True, "lead_time_minutes": 360},
+    )
+
+    assert response.status_code == 200
+    assert (
+        response.json()["prediction_reminders"]["next_due_at"] == "2030-01-02T12:00:00Z"
+    )
+
+
+def test_prediction_reminder_endpoint_queues_idempotently(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -3381,12 +3662,7 @@ def test_prediction_reminder_endpoint_publishes_one_rich_message(
         "_utc_now",
         lambda: datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc),
     )
-    telegram_client = RecordingPredictionReminderClient()
-    app = create_app()
-    app.dependency_overrides[get_telegram_prediction_reminder_client] = lambda: (
-        telegram_client
-    )
-    client = TestClient(app)
+    client = TestClient(create_app())
     contest = create_tma_contest(client)
     settings_response = client.put(
         "/api/tma/management/chat-settings",
@@ -3407,29 +3683,106 @@ def test_prediction_reminder_endpoint_publishes_one_rich_message(
     )
     assert match_response.status_code == 201
 
-    response = client.post(
+    missing_key = client.post(
         f"/api/tma/contests/{contest['id']}/prediction-reminders/publish",
         headers=build_tma_headers(),
     )
+    response = client.post(
+        f"/api/tma/contests/{contest['id']}/prediction-reminders/publish",
+        headers=build_tma_headers(idempotency_key="manual-reminder"),
+    )
+    status_response = client.get(
+        f"/api/tma/contests/{contest['id']}",
+        headers=build_tma_headers(),
+    )
 
-    assert response.status_code == 200
-    assert response.json() == {
-        "published": True,
-        "reminder_count": 1,
-        "match_count": 1,
+    repeated = client.post(
+        f"/api/tma/contests/{contest['id']}/prediction-reminders/publish",
+        headers=build_tma_headers(idempotency_key="manual-reminder"),
+    )
+    with create_connection(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE matches
+            SET status = 'started', starts_at_utc = '2030-01-01T11:00:00Z'
+            WHERE id = ?
+            """,
+            (match_response.json()["match"]["id"],),
+        )
+    closed_replay = client.post(
+        f"/api/tma/contests/{contest['id']}/prediction-reminders/publish",
+        headers=build_tma_headers(idempotency_key="manual-reminder"),
+    )
+
+    assert missing_key.status_code == 400
+    assert response.status_code == 202
+    assert response.json()["queued"] is True
+    assert response.json()["was_created"] is True
+    assert status_response.status_code == 200
+    assert (
+        status_response.json()["contest"]["prediction_reminders"][
+            "last_manual_delivery_status"
+        ]
+        == "pending"
+    )
+    assert repeated.status_code == 202
+    assert repeated.json() == {
+        "queued": True,
+        "request_id": response.json()["request_id"],
+        "was_created": False,
     }
-    assert len(telegram_client.sent) == 1
-    assert telegram_client.sent[0]["chat_id"] == TELEGRAM_CHAT_ID
-    rich_message = telegram_client.sent[0]["rich_message"]
-    assert isinstance(rich_message, InputRichMessage)
-    assert "Франция — Испания" in rich_message.html
-    assert "Начало: 02.01.2030, 18:00 UTC" in rich_message.html
-    reply_markup = telegram_client.sent[0]["reply_markup"]
-    assert isinstance(reply_markup, InlineKeyboardMarkup)
-    button = reply_markup.inline_keyboard[0][0]
-    assert button.text == "Сделать прогноз"
-    assert button.url is not None
-    assert button.url.startswith("https://t.me/ZhpchshtsPredictorBot?startapp=")
+    assert closed_replay.status_code == 202
+    assert closed_replay.json() == repeated.json()
+    with create_connection(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM prediction_reminder_manual_requests"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_prediction_reminder_endpoint_rejects_empty_contest_before_enqueue(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "predictor.db"
+    initialize_database(database_path)
+    configure_test_environment(
+        monkeypatch=monkeypatch,
+        database_path=database_path,
+    )
+    monkeypatch.setattr(
+        tma_api,
+        "_utc_now",
+        lambda: datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    client = TestClient(create_app())
+    contest = create_tma_contest(client)
+
+    response = client.post(
+        f"/api/tma/contests/{contest['id']}/prediction-reminders/publish",
+        headers=build_tma_headers(idempotency_key="empty-manual-reminder"),
+    )
+
+    assert response.status_code == 409
+    assert "Нет открытых прогнозов" in response.json()["detail"]
+    with create_connection(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM prediction_reminder_manual_requests"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM prediction_reminder_deliveries
+                WHERE source = 'manual'
+                """
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_intermediate_leaderboard_endpoint_is_authorized_and_idempotent(

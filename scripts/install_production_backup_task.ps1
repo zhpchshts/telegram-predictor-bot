@@ -12,7 +12,7 @@ if (-not (Test-Path -LiteralPath $syncScript -PathType Leaf)) {
     throw "Backup synchronization script was not found: $syncScript"
 }
 
-$powershellPath = Join-Path $PSHOME "powershell.exe"
+$powershellPath = (Get-Command powershell.exe -ErrorAction Stop).Source
 $actionArguments = (
     "-NoProfile -NonInteractive -ExecutionPolicy Bypass " +
     "-File `"$syncScript`""
@@ -26,6 +26,8 @@ $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 15) `
     -MultipleInstances IgnoreNew
 $userId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal `
@@ -40,8 +42,8 @@ Register-ScheduledTask `
     -Settings $settings `
     -Principal $principal `
     -Description (
-        "Downloads verified Klever production database backups from the VPS " +
-        "and keeps them locally for 14 days."
+        "Downloads verified predictor, reminder, and Partyathlon production " +
+        "database backups from the VPS and keeps them locally for 14 days."
     ) `
     -Force | Out-Null
 

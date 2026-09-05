@@ -21,39 +21,16 @@ from app.scoring_service import (
     recalculate_tie_prediction_scores,
     resolve_two_legged_tie_result,
 )
-
-
-CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY = "champions_league_2026_27"
-CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT = 8
-CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT = 12
-DEFAULT_SWISS_SELECTION_MODE = "exact"
-DEFAULT_SWISS_DIRECT_CORRECT_POINTS = 2
-DEFAULT_SWISS_ELIMINATION_CORRECT_POINTS = 2
-DEFAULT_SWISS_CROSS_CATEGORY_POINTS = 1
-CHAMPIONS_LEAGUE_2026_27_SWISS_SELECTION_MODE = "up_to_limits"
-CHAMPIONS_LEAGUE_2026_27_DIRECT_CORRECT_POINTS = 2
-CHAMPIONS_LEAGUE_2026_27_ELIMINATION_CORRECT_POINTS = 1
-CHAMPIONS_LEAGUE_2026_27_CROSS_CATEGORY_POINTS = 0
-CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS: dict[str, tuple[str, int, str]] = {
-    "playoff": ("Стыковые матчи", 10, "knockout"),
-    "round_of_16": ("1/8 финала", 20, "knockout"),
-    "quarterfinal": ("1/4 финала", 30, "knockout"),
-    "semifinal": ("1/2 финала", 40, "knockout"),
-    "final": ("Финал", 50, "final"),
-}
-CHAMPIONS_LEAGUE_KNOCKOUT_ROUND_CAPACITIES: dict[str, int] = {
-    "playoff": 8,
-    "round_of_16": 8,
-    "quarterfinal": 4,
-    "semifinal": 2,
-    "final": 1,
-}
-SUPPORTED_TEMPLATE_KEYS = frozenset(
-    {
-        "world_cup_2026",
-        "the_international_2026",
-        CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY,
-    }
+from app.team_store import resolve_team_ids
+from app.tournament_catalog import (
+    CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT,
+    CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT,
+    CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY,
+    CHAMPIONS_LEAGUE_KNOCKOUT_ROUND_CAPACITIES,
+    CHAMPIONS_LEAGUE_KNOCKOUT_ROUNDS,
+    SUPPORTED_TEMPLATE_KEYS,
+    THE_INTERNATIONAL_2026_TEMPLATE_KEY,
+    TOURNAMENT_TEMPLATES_BY_KEY,
 )
 
 
@@ -208,6 +185,7 @@ class SharedSwissStageSettings:
 class SharedTournamentDetails:
     tournament: SharedTournamentSummary
     teams: tuple[SharedTeam, ...]
+    teams_locked: bool
     matches: tuple[SharedMatch, ...]
     two_legged_ties: tuple[SharedTwoLeggedTie, ...]
     champion_prediction: SharedChampionSettings
@@ -416,6 +394,20 @@ def archive_shared_tournament(
                 "Сначала завершите все двухматчевые противостояния общего турнира."
             )
 
+        champions_league_final_winner_id: int | None = None
+        if str(tournament_row["template_key"]) == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
+            champions_league_final_winner_id = (
+                _get_completed_champions_league_final_winner_id(
+                    connection,
+                    shared_tournament_id=shared_tournament_id,
+                )
+            )
+            if champions_league_final_winner_id is None:
+                raise SharedTournamentCompletionUnavailableError(
+                    "Общий турнир Лиги чемпионов можно завершить только после "
+                    "материализации и завершения финала."
+                )
+
         settings = _get_shared_settings_row(
             connection, shared_tournament_id=shared_tournament_id
         )
@@ -432,6 +424,15 @@ def archive_shared_tournament(
             if settings["champion_team_id"] is None:
                 raise SharedTournamentCompletionUnavailableError(
                     "Сначала укажите фактического чемпиона."
+                )
+            if (
+                champions_league_final_winner_id is not None
+                and int(settings["champion_team_id"])
+                != champions_league_final_winner_id
+            ):
+                raise SharedTournamentCompletionUnavailableError(
+                    "Исправьте фактического чемпиона: он должен совпадать "
+                    "с победителем финала."
                 )
 
         if bool(settings["swiss_stage_prediction_enabled"]):
@@ -503,6 +504,22 @@ def restore_shared_tournament(
         )
         if not bool(tournament_row["is_archived"]):
             raise SharedTournamentConflictError("Общий турнир уже активен.")
+        completed_linked_contest = connection.execute(
+            """
+            SELECT contests.id
+            FROM contest_shared_tournaments AS link
+            JOIN contests ON contests.id = link.contest_id
+            WHERE link.shared_tournament_id = ?
+              AND contests.is_active = 0
+            LIMIT 1
+            """,
+            (shared_tournament_id,),
+        ).fetchone()
+        if completed_linked_contest is not None:
+            raise SharedTournamentConflictError(
+                "Нельзя восстановить общий турнир: один из связанных конкурсов "
+                "уже завершён и не может быть восстановлен."
+            )
         duplicate = connection.execute(
             """
             SELECT 1
@@ -588,52 +605,8 @@ def save_shared_tournament_teams(
         _require_expected_tournament_version(
             tournament_row, expected_version=expected_version
         )
-        dependency = connection.execute(
-            """
-            SELECT
-                EXISTS (
-                    SELECT 1 FROM shared_matches
-                    WHERE shared_tournament_id = ?
-                ) AS match_exists,
-                EXISTS (
-                    SELECT 1
-                    FROM contest_shared_tournaments AS link
-                    JOIN champion_predictions AS prediction
-                      ON prediction.contest_id = link.contest_id
-                    WHERE link.shared_tournament_id = ?
-                ) OR EXISTS (
-                    SELECT 1
-                    FROM contest_shared_tournaments AS link
-                    JOIN swiss_stage_predictions AS prediction
-                      ON prediction.contest_id = link.contest_id
-                    WHERE link.shared_tournament_id = ?
-                ) OR EXISTS (
-                    SELECT 1
-                    FROM shared_tournament_settings
-                    WHERE shared_tournament_id = ?
-                      AND (
-                          champion_team_id IS NOT NULL
-                          OR EXISTS (
-                              SELECT 1
-                              FROM contest_shared_tournaments AS link
-                              JOIN swiss_stage_results AS result
-                                ON result.contest_id = link.contest_id
-                              WHERE link.shared_tournament_id = ?
-                          )
-                      )
-                ) AS long_prediction_exists
-            """,
-            (
-                shared_tournament_id,
-                shared_tournament_id,
-                shared_tournament_id,
-                shared_tournament_id,
-                shared_tournament_id,
-            ),
-        ).fetchone()
-        if dependency is not None and (
-            bool(dependency["match_exists"])
-            or bool(dependency["long_prediction_exists"])
+        if _shared_tournament_teams_locked(
+            connection, shared_tournament_id=shared_tournament_id
         ):
             raise SharedTournamentLockedError(
                 "Список команд общего турнира заблокирован после добавления "
@@ -660,10 +633,7 @@ def save_shared_tournament_teams(
                 "Сумма лимитов швейцарского этапа не может превышать "
                 "количество команд турнира."
             )
-        team_ids = [
-            _find_or_create_team(connection, team_name=name)
-            for name in normalized_names
-        ]
+        team_ids = resolve_team_ids(connection, team_names=normalized_names)
         connection.execute(
             "DELETE FROM shared_tournament_teams WHERE shared_tournament_id = ?",
             (shared_tournament_id,),
@@ -786,7 +756,7 @@ def create_shared_two_legged_tie(
         tournament_row = _get_active_tournament_row(
             connection, shared_tournament_id=shared_tournament_id
         )
-        if str(tournament_row["template_key"]) == "the_international_2026":
+        if str(tournament_row["template_key"]) == THE_INTERNATIONAL_2026_TEMPLATE_KEY:
             raise ValueError("Двухматчевые противостояния доступны только для футбола.")
         normalized_round_key = _normalize_shared_round_key(
             template_key=str(tournament_row["template_key"]),
@@ -1917,6 +1887,19 @@ def save_shared_champion_result(
             now_utc=resolved_now,
             field_name="прогноза на чемпиона",
         )
+        champions_league_final_winner_id: int | None = None
+        if str(tournament_row["template_key"]) == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
+            champions_league_final_winner_id = (
+                _get_completed_champions_league_final_winner_id(
+                    connection,
+                    shared_tournament_id=shared_tournament_id,
+                )
+            )
+            if champions_league_final_winner_id is None:
+                raise SharedTournamentResultUnavailableError(
+                    "Фактического чемпиона Лиги чемпионов можно указать только "
+                    "после материализации и завершения финала."
+                )
         unfinished = connection.execute(
             """
             SELECT 1 FROM shared_matches
@@ -1935,6 +1918,13 @@ def save_shared_champion_result(
             shared_tournament_id=shared_tournament_id,
             team_id=normalized_team_id,
         )
+        if (
+            champions_league_final_winner_id is not None
+            and normalized_team_id != champions_league_final_winner_id
+        ):
+            raise SharedTournamentResultUnavailableError(
+                "Фактический чемпион должен совпадать с победителем финала."
+            )
         previous_team_id = settings["champion_team_id"]
         if (
             previous_team_id == normalized_team_id
@@ -3470,6 +3460,9 @@ def _get_shared_tournament_details(
         teams=tuple(
             SharedTeam(id=int(item["id"]), name=str(item["name"])) for item in team_rows
         ),
+        teams_locked=_shared_tournament_teams_locked(
+            connection, shared_tournament_id=shared_tournament_id
+        ),
         matches=tuple(_shared_match_from_row(item) for item in match_rows),
         two_legged_ties=tuple(
             _get_shared_two_legged_tie_details(
@@ -4200,6 +4193,59 @@ def _get_shared_settings_row(
     return row
 
 
+def _get_completed_champions_league_final_winner_id(
+    connection: sqlite3.Connection,
+    *,
+    shared_tournament_id: int,
+) -> int | None:
+    row = connection.execute(
+        """
+        SELECT
+            node.sync_status,
+            match.shared_tie_id,
+            match.home_team_id,
+            match.away_team_id,
+            match.status,
+            match.home_score_final,
+            match.away_score_final,
+            match.advancing_team_id,
+            match.round_key,
+            match.bracket_position
+        FROM shared_bracket_nodes AS node
+        LEFT JOIN shared_matches AS match
+          ON match.id = node.materialized_shared_match_id
+         AND match.shared_tournament_id = node.shared_tournament_id
+        WHERE node.shared_tournament_id = ?
+          AND node.round_key = 'final'
+          AND node.bracket_position = 1
+          AND node.node_format = 'single'
+        """,
+        (shared_tournament_id,),
+    ).fetchone()
+    if (
+        row is None
+        or str(row["sync_status"]) != "materialized"
+        or row["shared_tie_id"] is not None
+        or row["home_team_id"] is None
+        or row["away_team_id"] is None
+        or str(row["status"]) != "finished"
+        or row["home_score_final"] is None
+        or row["away_score_final"] is None
+        or row["advancing_team_id"] is None
+        or str(row["round_key"]) != "final"
+        or row["bracket_position"] is None
+        or int(row["bracket_position"]) != 1
+    ):
+        return None
+    winner_id = int(row["advancing_team_id"])
+    if winner_id not in {
+        int(row["home_team_id"]),
+        int(row["away_team_id"]),
+    }:
+        return None
+    return winner_id
+
+
 def _shared_settings_snapshot(row: sqlite3.Row) -> dict[str, object]:
     return {
         "champion_prediction_enabled": bool(row["champion_prediction_enabled"]),
@@ -4281,6 +4327,54 @@ def _shared_team_count(
         (shared_tournament_id,),
     ).fetchone()
     return int(row["value"]) if row is not None else 0
+
+
+def _shared_tournament_teams_locked(
+    connection: sqlite3.Connection, *, shared_tournament_id: int
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT
+            EXISTS (
+                SELECT 1 FROM shared_matches
+                WHERE shared_tournament_id = ?
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM contest_shared_tournaments AS link
+                JOIN champion_predictions AS prediction
+                  ON prediction.contest_id = link.contest_id
+                WHERE link.shared_tournament_id = ?
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM contest_shared_tournaments AS link
+                JOIN swiss_stage_predictions AS prediction
+                  ON prediction.contest_id = link.contest_id
+                WHERE link.shared_tournament_id = ?
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM shared_tournament_settings AS settings
+                WHERE settings.shared_tournament_id = ?
+                  AND settings.champion_team_id IS NOT NULL
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM shared_swiss_stage_result_selections AS result
+                WHERE result.shared_tournament_id = ?
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM contest_shared_tournaments AS link
+                JOIN swiss_stage_results AS result
+                  ON result.contest_id = link.contest_id
+                WHERE link.shared_tournament_id = ?
+            ) AS is_locked
+        """,
+        (shared_tournament_id,) * 6,
+    ).fetchone()
+    return bool(row["is_locked"])
 
 
 def _require_shared_team(
@@ -4698,29 +4792,21 @@ def _normalize_template_key(value: str) -> str:
 
 
 def _shared_template_defaults(template_key: str) -> tuple[int, int, int]:
-    champion_points = 4 if template_key == "the_international_2026" else 5
-    if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
-        return (
-            champion_points,
-            CHAMPIONS_LEAGUE_2026_27_DIRECT_COUNT,
-            CHAMPIONS_LEAGUE_2026_27_ELIMINATED_COUNT,
-        )
-    return champion_points, 3, 5
+    template = TOURNAMENT_TEMPLATES_BY_KEY[template_key]
+    return (
+        template.champion_prediction_points,
+        template.swiss_direct_qualifier_count,
+        template.swiss_elimination_qualifier_count,
+    )
 
 
 def _shared_swiss_scoring_defaults(template_key: str) -> tuple[str, int, int, int]:
-    if template_key == CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY:
-        return (
-            CHAMPIONS_LEAGUE_2026_27_SWISS_SELECTION_MODE,
-            CHAMPIONS_LEAGUE_2026_27_DIRECT_CORRECT_POINTS,
-            CHAMPIONS_LEAGUE_2026_27_ELIMINATION_CORRECT_POINTS,
-            CHAMPIONS_LEAGUE_2026_27_CROSS_CATEGORY_POINTS,
-        )
+    template = TOURNAMENT_TEMPLATES_BY_KEY[template_key]
     return (
-        DEFAULT_SWISS_SELECTION_MODE,
-        DEFAULT_SWISS_DIRECT_CORRECT_POINTS,
-        DEFAULT_SWISS_ELIMINATION_CORRECT_POINTS,
-        DEFAULT_SWISS_CROSS_CATEGORY_POINTS,
+        template.swiss_selection_mode,
+        template.swiss_direct_correct_points,
+        template.swiss_elimination_correct_points,
+        template.swiss_cross_category_points,
     )
 
 
@@ -4751,20 +4837,8 @@ def _normalize_team_names(values: list[str]) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _find_or_create_team(connection: sqlite3.Connection, *, team_name: str) -> int:
-    rows = connection.execute("SELECT id, name FROM teams ORDER BY id").fetchall()
-    for row in rows:
-        if str(row["name"]).casefold() == team_name.casefold():
-            return int(row["id"])
-    return int(
-        connection.execute(
-            "INSERT INTO teams (name) VALUES (?)", (team_name,)
-        ).lastrowid
-    )
-
-
 def _normalize_best_of(value: int | None, *, template_key: str) -> int | None:
-    if template_key == "the_international_2026":
+    if template_key == THE_INTERNATIONAL_2026_TEMPLATE_KEY:
         if isinstance(value, bool) or value not in (3, 5):
             raise ValueError("Для серии The International выберите Bo3 или Bo5.")
         return value
@@ -4842,7 +4916,7 @@ def _resolve_advancing_team(
 
     home_team_id = int(match_row["home_team_id"])
     away_team_id = int(match_row["away_team_id"])
-    if template_key == "the_international_2026":
+    if template_key == THE_INTERNATIONAL_2026_TEMPLATE_KEY:
         best_of = int(match_row["best_of"])
         wins_required = best_of // 2 + 1
         if home_score == wins_required and 0 <= away_score < wins_required:

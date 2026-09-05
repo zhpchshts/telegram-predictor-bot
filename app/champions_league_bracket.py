@@ -8,41 +8,18 @@ from pathlib import Path
 from typing import Literal
 
 from app.database import database_connection
+from app.tournament_catalog import (
+    CHAMPIONS_LEAGUE_2026_27_TEMPLATE_KEY as CHAMPIONS_LEAGUE_TEMPLATE_KEY,
+    CHAMPIONS_LEAGUE_BRACKET_NODE_COUNT as CHAMPIONS_LEAGUE_BRACKET_NODE_COUNT,
+    CHAMPIONS_LEAGUE_ROUNDS,
+    ChampionsLeagueRound,
+    NodeFormat,
+    RoundKey,
+)
 
 
-CHAMPIONS_LEAGUE_TEMPLATE_KEY = "champions_league_2026_27"
-
-RoundKey = Literal[
-    "playoff",
-    "round_of_16",
-    "quarterfinal",
-    "semifinal",
-    "final",
-]
-NodeFormat = Literal["two_legged", "single"]
 NodeSyncStatus = Literal["pending", "materialized", "conflict"]
 FixtureImportStatus = Literal["pending", "imported", "conflict", "tombstoned"]
-
-
-@dataclass(frozen=True, slots=True)
-class ChampionsLeagueRound:
-    key: RoundKey
-    name: str
-    stage_position: int
-    node_format: NodeFormat
-    node_count: int
-
-
-CHAMPIONS_LEAGUE_ROUNDS: tuple[ChampionsLeagueRound, ...] = (
-    ChampionsLeagueRound("playoff", "Стыковые матчи", 10, "two_legged", 8),
-    ChampionsLeagueRound("round_of_16", "1/8 финала", 20, "two_legged", 8),
-    ChampionsLeagueRound("quarterfinal", "1/4 финала", 30, "two_legged", 4),
-    ChampionsLeagueRound("semifinal", "1/2 финала", 40, "two_legged", 2),
-    ChampionsLeagueRound("final", "Финал", 50, "single", 1),
-)
-CHAMPIONS_LEAGUE_BRACKET_NODE_COUNT = sum(
-    round_definition.node_count for round_definition in CHAMPIONS_LEAGUE_ROUNDS
-)
 EXTERNAL_TIE_CLAIM_TIMEOUT = timedelta(minutes=15)
 _ROUND_BY_KEY = {
     round_definition.key: round_definition
@@ -209,6 +186,7 @@ def configure_bracket_node(
     first_leg_starts_at_utc: str | None,
     second_leg_starts_at_utc: str | None,
     expected_version: int,
+    resolve_exact_provider_conflict: bool = False,
 ) -> NodeReconciliation:
     """Apply provider/draw metadata without rewriting a materialized fixture."""
 
@@ -235,6 +213,7 @@ def configure_bracket_node(
             first_leg_starts_at_utc=first_leg_starts_at_utc,
             second_leg_starts_at_utc=second_leg_starts_at_utc,
             expected_version=expected_version,
+            resolve_exact_provider_conflict=resolve_exact_provider_conflict,
         )
 
 
@@ -281,6 +260,7 @@ def reconcile_bracket_node_from_sources(
             first_leg_starts_at_utc=_optional_str(row["first_leg_starts_at_utc"]),
             second_leg_starts_at_utc=_optional_str(row["second_leg_starts_at_utc"]),
             expected_version=int(row["version"]),
+            resolve_exact_provider_conflict=False,
         )
 
 
@@ -1524,6 +1504,7 @@ def _configure_node_in_connection(
     first_leg_starts_at_utc: str | None,
     second_leg_starts_at_utc: str | None,
     expected_version: int,
+    resolve_exact_provider_conflict: bool,
 ) -> NodeReconciliation:
     _require_version(row, expected_version=expected_version)
     tournament_id = int(row["shared_tournament_id"])
@@ -1582,7 +1563,39 @@ def _configure_node_in_connection(
         or row["materialized_shared_match_id"] is not None
     )
     if requested == current:
+        if (
+            resolve_exact_provider_conflict
+            and not is_materialized
+            and str(row["sync_status"]) == "conflict"
+        ):
+            updated = connection.execute(
+                """
+                UPDATE shared_bracket_nodes
+                SET sync_status = 'pending', sync_error = NULL,
+                    version = version + 1, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND version = ?
+                """,
+                (int(row["id"]), expected_version),
+            )
+            if updated.rowcount != 1:
+                raise ChampionsLeagueBracketConflictError("Узел сетки уже изменился.")
+            return NodeReconciliation(
+                node=_node_from_row(
+                    _get_node_row(
+                        connection,
+                        shared_tournament_id=tournament_id,
+                        node_id=int(row["id"]),
+                    )
+                ),
+                action="updated",
+            )
         return NodeReconciliation(node=_node_from_row(row), action="noop")
+    if (
+        resolve_exact_provider_conflict
+        and not is_materialized
+        and str(row["sync_status"]) == "conflict"
+    ):
+        return NodeReconciliation(node=_node_from_row(row), action="conflict")
     if is_materialized:
         if requested[:4] == current[:4]:
             try:

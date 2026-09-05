@@ -22,9 +22,11 @@ def test_initialize_database_creates_current_schema(tmp_path: Path) -> None:
         "contest_creation_requests",
         "contest_publication_messages",
         "contest_publications",
+        "contest_prediction_reminder_settings",
         "contest_teams",
         "contests",
         "event_log",
+        "chat_user_prediction_reminder_preferences",
         "leaderboard_publication_snapshots",
         "match_creation_requests",
         "match_prediction_publication_messages",
@@ -32,6 +34,13 @@ def test_initialize_database_creates_current_schema(tmp_path: Path) -> None:
         "match_prediction_scores",
         "match_predictions",
         "matches",
+        "prediction_reminder_deliveries",
+        "prediction_reminder_deadline_occurrences",
+        "prediction_reminder_delivery_items",
+        "prediction_reminder_delivery_parts",
+        "prediction_reminder_delivery_recipients",
+        "prediction_reminder_manual_requests",
+        "prediction_reminder_occurrences",
         "scoring_rule_sets",
         "stages",
         "supermoderator_assignments",
@@ -100,7 +109,7 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
             """
         ).fetchone()[0]
 
-    assert tables_count == 48
+    assert tables_count == 57
 
 
 def test_initialize_database_rolls_back_all_schema_changes_on_failure(

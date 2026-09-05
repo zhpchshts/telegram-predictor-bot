@@ -152,6 +152,7 @@ const AUDIT_ROLE_LABELS = Object.freeze({
 const AUDIT_PAGE_SIZE = 30;
 const predictionSaveQueues = new Map();
 const predictionSaveFailures = new Map();
+const predictionSaveRetryEntries = new Map();
 
 const chatSummaryElement = document.querySelector("#chat-summary");
 const appContentElement = document.querySelector("#app-content");
@@ -201,6 +202,8 @@ async function apiRequestForCurrentView(path, options = {}) {
 
 function queuePredictionSave(queueKey, path, payload) {
   predictionSaveFailures.delete(queueKey);
+  const retryEntry = { path, payload };
+  predictionSaveRetryEntries.set(queueKey, retryEntry);
   const sendSave = () => apiRequest(
     path,
     {
@@ -217,11 +220,17 @@ function queuePredictionSave(queueKey, path, payload) {
   const requestWithFailureTracking = request.then(
     (result) => {
       predictionSaveFailures.delete(queueKey);
+      if (predictionSaveRetryEntries.get(queueKey) === retryEntry) {
+        predictionSaveRetryEntries.delete(queueKey);
+      }
       return result;
     },
     (error) => {
       if (error?.status === 409) {
         predictionSaveFailures.delete(queueKey);
+        if (predictionSaveRetryEntries.get(queueKey) === retryEntry) {
+          predictionSaveRetryEntries.delete(queueKey);
+        }
       } else {
         predictionSaveFailures.set(queueKey, error);
       }
@@ -241,11 +250,13 @@ function queuePredictionSave(queueKey, path, payload) {
 
 function clearPredictionSaveFailure(queueKey) {
   predictionSaveFailures.delete(queueKey);
+  predictionSaveRetryEntries.delete(queueKey);
 }
 
 function recordPredictionSaveFailure(queueKey, error) {
   if (error?.status === 409) {
     predictionSaveFailures.delete(queueKey);
+    predictionSaveRetryEntries.delete(queueKey);
     return;
   }
   predictionSaveFailures.set(queueKey, error);
@@ -285,6 +296,7 @@ function queueChampionPredictionSave(contestId, payload) {
 
 async function waitForPredictionSaves(contestId) {
   const queuePrefix = `${contestId}:`;
+  const retriedFailureKeys = new Set();
   const drainSaves = async () => {
     while (true) {
       const pendingEntries = [...predictionSaveQueues.entries()]
@@ -293,7 +305,21 @@ async function waitForPredictionSaves(contestId) {
         const failedEntry = [...predictionSaveFailures.entries()]
           .find(([queueKey]) => queueKey.startsWith(queuePrefix));
         if (failedEntry) {
+          const [failedQueueKey] = failedEntry;
+          const retryEntry = predictionSaveRetryEntries.get(failedQueueKey);
+          if (retryEntry && !retriedFailureKeys.has(failedQueueKey)) {
+            retriedFailureKeys.add(failedQueueKey);
+            predictionSaveFailures.delete(failedQueueKey);
+            void queuePredictionSave(
+              failedQueueKey,
+              retryEntry.path,
+              retryEntry.payload,
+            );
+            await Promise.resolve();
+            continue;
+          }
           predictionSaveFailures.delete(failedEntry[0]);
+          predictionSaveRetryEntries.delete(failedEntry[0]);
           throw failedEntry[1];
         }
         return;
@@ -808,7 +834,24 @@ function createContestFormCard(bootstrap, state) {
     Array.isArray(state.managementData?.shared_tournaments)
       ? state.managementData.shared_tournaments
       : []
-  ).filter((tournament) => creatableTemplateKeys.has(tournament.template_key));
+  ).filter(
+    (tournament) => (
+      tournament.is_archived !== true
+      && creatableTemplateKeys.has(tournament.template_key)
+    ),
+  );
+  const activeChampionsLeagueTournaments = sharedTournaments.filter(
+    (tournament) => tournament.template_key === "champions_league_2026_27",
+  );
+  const hasDraftSharedTournament = Object.prototype.hasOwnProperty.call(
+    state,
+    "draftSharedTournamentId",
+  );
+  const defaultSharedTournamentId = (
+    !hasDraftSharedTournament && activeChampionsLeagueTournaments.length === 1
+  )
+    ? activeChampionsLeagueTournaments[0].id
+    : null;
   const sourceField = createElement("label", {
     className: "form-field",
   });
@@ -831,8 +874,11 @@ function createContestFormCard(bootstrap, state) {
     option.dataset.templateKey = tournament.template_key;
     sourceInput.append(option);
   }
-  sourceInput.value = state.draftSharedTournamentId
-    ? String(state.draftSharedTournamentId)
+  const selectedSharedTournamentId = hasDraftSharedTournament
+    ? state.draftSharedTournamentId
+    : defaultSharedTournamentId;
+  sourceInput.value = selectedSharedTournamentId
+    ? String(selectedSharedTournamentId)
     : "";
   const fieldLabel = createElement("span", {
     className: "form-field-label",
@@ -898,7 +944,7 @@ function createContestFormCard(bootstrap, state) {
     );
     if (sharedTemplateKey) {
       description.textContent = isChampionsLeague
-        ? "Состав, дедлайн и итог общего этапа будут синхронизироваться с общим турниром."
+        ? "Состав, общий этап, чемпион и весь плей-офф — пары, расписание и результаты — будут синхронизироваться с общим турниром."
         : "Команды, матчи, дедлайны и результаты будут синхронизироваться с общим турниром.";
     } else if (isTi) {
       description.textContent = "Конкурс прогнозов на The International 2026.";
@@ -916,7 +962,7 @@ function createContestFormCard(bootstrap, state) {
     } else if (isWorldCup) {
       hint.textContent = "Счёт строго после 90 минут: 3 очка за точный счёт, 2 — за разницу голов, 1 — за исход.";
     } else if (isChampionsLeague) {
-      hint.textContent = "Общий этап без матчей: для каждой из 36 команд доступны варианты «Напрямую», «Стыки» и «Вылет». В полном прогнозе — 8 команд напрямую в 1/8, 16 в стыках и 12 на вылет. Баллы начисляются только за верный прямой выход и верный вылет; максимум — 28 баллов.";
+      hint.textContent = "Общий этап без матчей: для каждой из 36 команд доступны варианты «Напрямую», «Стыки» и «Вылет». Прогноз сохраняется с первого выбора «Напрямую» или «Вылет»; полностью заполненный набор — 8 команд напрямую в 1/8, 16 в стыках и 12 на вылет. Баллы начисляются только за верный прямой выход и верный вылет; максимум — 28 баллов.";
     } else {
       hint.textContent = "Параметры матчей и начисления зависят от выбранного шаблона.";
     }
@@ -1017,7 +1063,7 @@ function createContestConfirmationCard(bootstrap, state) {
   } else if (state.draftTemplateKey === "world_cup_2026") {
     details.textContent = "Будет создан конкурс Чемпионата мира 2026 со стандартными футбольными правилами.";
   } else if (state.draftTemplateKey === "champions_league_2026_27") {
-    details.textContent = "Будет создан конкурс Лиги чемпионов 2026/27 без матчей общего этапа: один прогноз с тремя вариантами для каждой команды — 8 напрямую в 1/8, 16 в стыках и 12 на вылет. Баллы начисляются только за верный прямой выход и верный вылет; максимум — 28 баллов.";
+    details.textContent = "Будет создан конкурс Лиги чемпионов 2026/27 без матчей общего этапа: один прогноз с тремя вариантами для каждой команды. Он сохранится с первого выбора «Напрямую» или «Вылет»; полностью заполненный набор — 8 напрямую в 1/8, 16 в стыках и 12 на вылет. Баллы начисляются только за верный прямой выход и верный вылет; максимум — 28 баллов.";
   } else {
     details.textContent = `Будет создан конкурс по шаблону «${selectedTemplate.label}».`;
   }
@@ -1028,7 +1074,7 @@ function createContestConfirmationCard(bootstrap, state) {
     details.textContent = state.draftTemplateKey === "champions_league_2026_27"
       ? (
         `Конкурс будет связан с общим турниром «${tournament?.name || "Без названия"}». `
-        + "Состав, дедлайн и итог общего этапа редактируются только в глобальном разделе."
+        + "Состав, дедлайны, итоги общего этапа, чемпион, пары, расписание и результаты плей-офф редактируются только в глобальном разделе."
       )
       : (
         `Конкурс будет связан с общим турниром «${tournament?.name || "Без названия"}». `
@@ -1240,6 +1286,24 @@ function createContestCompletionCard(bootstrap, contest, state) {
     state.completionMessage || "",
     state.completionMessageType || "",
   );
+
+  if (
+    contest.shared_tournament
+    && contest.shared_tournament.is_archived !== true
+  ) {
+    card.append(
+      heading,
+      createElement("p", {
+        className: "subtitle",
+        text: (
+          `Конкурс связан с общим турниром «${contest.shared_tournament.name}». `
+          + "Завершить его можно после перевода общего турнира в архив."
+        ),
+      }),
+      message,
+    );
+    return card;
+  }
 
   if (getChampionPrediction(contest).is_open) {
     card.append(
@@ -2025,9 +2089,35 @@ function createLeaderboardSwissStagePredictionHistory(prediction, templateKey) {
         .join(", ") || "—",
     ),
   ];
-  if (prediction?.prediction?.is_complete === false) {
+  if (
+    templateKey === "champions_league_2026_27"
+    && Array.isArray(prediction?.prediction?.playoff_teams)
+    && prediction.prediction.playoff_teams.length > 0
+  ) {
+    predictionRows.splice(
+      1,
+      0,
+      createLeaderboardHistoryRow(
+        copy.playoffChoice,
+        prediction.prediction.playoff_teams
+          .map((team) => team.name)
+          .join(", "),
+      ),
+    );
+  }
+  if (!hasSwissStageSelectedTeams(prediction?.prediction)) {
     predictionRows.push(
-      createLeaderboardHistoryRow("Статус", "Черновик не заполнен полностью"),
+      createLeaderboardHistoryRow(
+        "Статус",
+        "Команды для прямого выхода или вылета не выбирались",
+      ),
+    );
+  } else if (prediction?.prediction?.is_complete === false) {
+    predictionRows.push(
+      createLeaderboardHistoryRow(
+        "Статус",
+        "Прогноз сохранён. Заполнен не полностью",
+      ),
     );
   }
   item.append(header, ...predictionRows);
@@ -4020,10 +4110,15 @@ function createMatchPredictionSection(contest, match) {
     }
 
     setSaveStatus("Изменения будут сохранены…", "draft");
+    const deadline = new Date(match.starts_at_utc).getTime();
+    const remaining = deadline - Date.now();
+    const debounceDelay = Number.isFinite(remaining) && remaining <= 1_000
+      ? 0
+      : 400;
     saveTimer = window.setTimeout(() => {
       saveTimer = null;
       void savePrediction();
-    }, 400);
+    }, debounceDelay);
   }
 
   async function savePrediction() {
@@ -4493,10 +4588,15 @@ function createTwoLeggedTiePredictionListItem(contest, tie) {
       return;
     }
     setSaveStatus("Изменения будут сохранены…", "draft");
+    const deadline = new Date(deadlineAt).getTime();
+    const remaining = deadline - Date.now();
+    const debounceDelay = Number.isFinite(remaining) && remaining <= 1_000
+      ? 0
+      : 250;
     saveTimer = window.setTimeout(() => {
       saveTimer = null;
       void savePrediction();
-    }, 250);
+    }, debounceDelay);
   }
 
   actions.append(retryButton);
@@ -4721,6 +4821,15 @@ function getSwissStageSelectionIds(selection, key) {
   );
 }
 
+function hasSwissStageSelectedTeams(selection) {
+  return (
+    (Array.isArray(selection?.direct_teams)
+      && selection.direct_teams.length > 0)
+    || (Array.isArray(selection?.elimination_teams)
+      && selection.elimination_teams.length > 0)
+  );
+}
+
 function syncSwissStageStatus(status, prediction) {
   status.classList.remove(
     "champion-card-status--disabled",
@@ -4834,6 +4943,10 @@ function createSwissStageTeamSelector(
   const progress = createElement("div", {
     className: "swiss-stage-progress",
   });
+  progress.setAttribute("role", "status");
+  progress.setAttribute("aria-live", "polite");
+  progress.setAttribute("aria-atomic", "true");
+  progress.setAttribute("aria-label", "Заполнение прогноза");
   const directProgress = createElement("strong");
   const eliminationProgress = createElement("strong");
   const selectionHint = isChampionsLeague
@@ -4845,7 +4958,12 @@ function createSwissStageTeamSelector(
   const autosaveHint = isAutosave
     ? createElement("p", {
         className: "form-hint",
-        text: "Изменения сохраняются автоматически.",
+        text: allowPartial
+          ? (
+            "Изменения сохраняются автоматически. Если напоминания включены, "
+            + "они продолжат приходить до полного заполнения 8+12."
+          )
+          : "Изменения сохраняются автоматически.",
       })
     : null;
   const list = createElement("ul", {
@@ -4928,11 +5046,19 @@ function createSwissStageTeamSelector(
     );
   }
 
+  function hasSelectedTeams() {
+    return directIds.size + eliminationIds.size > 0;
+  }
+
   function isPayloadReady() {
     return allowPartial || isSelectionComplete();
   }
 
   const initialFingerprint = getPayloadFingerprint(readPredictionPayload());
+  const emptySelectionFingerprint = getPayloadFingerprint({
+    direct_team_ids: [],
+    elimination_team_ids: [],
+  });
   let lastSavedFingerprint = (
     initialSelection && typeof initialSelection === "object"
   )
@@ -4950,9 +5076,22 @@ function createSwissStageTeamSelector(
   }
 
   function getSavedMessage() {
-    return allowPartial && !isSelectionComplete()
-      ? "Черновик сохранён."
-      : (successMessage || "Прогноз сохранён.");
+    if (!allowPartial) {
+      return successMessage || "Прогноз сохранён.";
+    }
+    if (!hasSelectedTeams()) {
+      return (
+        "Выборов пока нет. Отметьте хотя бы одну команду «Напрямую» "
+        + "или «Вылет»."
+      );
+    }
+    return isSelectionComplete()
+      ? "Прогноз сохранён и заполнен полностью."
+      : "Прогноз сохранён. Можно дополнить до 8+12.";
+  }
+
+  function getSavedState() {
+    return allowPartial && !hasSelectedTeams() ? "empty" : "saved";
   }
 
   function setSaveStatus(statusMessage, state = "") {
@@ -4967,6 +5106,14 @@ function createSwissStageTeamSelector(
       retryButton.hidden = state !== "error";
       actions.hidden = state !== "error";
     }
+  }
+
+  function showCurrentSavedStatus() {
+    if (lastSavedFingerprint === null && !allowPartial) {
+      setSaveStatus("", "draft");
+      return;
+    }
+    setSaveStatus(getSavedMessage(), getSavedState());
   }
 
   function isPredictionDeadlineReached() {
@@ -5002,13 +5149,16 @@ function createSwissStageTeamSelector(
       currentFingerprint === lastSavedFingerprint
     );
     let deadlineMessage;
-    if (isSaved) {
+    if (isSaved && (!allowPartial || hasSelectedTeams())) {
       deadlineMessage = allowPartial && !isSelectionComplete()
-        ? "Сохранён неполный черновик. Приём прогнозов завершён."
+        ? "Прогноз сохранён. Заполнен не полностью. Приём прогнозов завершён."
         : "Прогноз сохранён. Приём прогнозов завершён.";
     } else if (
-      lastSavedFingerprint === null &&
-      currentFingerprint === initialFingerprint
+      (allowPartial && !hasSelectedTeams() && isSaved)
+      || (
+        lastSavedFingerprint === null
+        && currentFingerprint === initialFingerprint
+      )
     ) {
       deadlineMessage = "Приём прогнозов завершён. Прогноз не был сохранён.";
     } else {
@@ -5018,7 +5168,7 @@ function createSwissStageTeamSelector(
     }
     setSaveStatus(
       deadlineMessage,
-      isSaved ? "saved" : "closed",
+      isSaved && (!allowPartial || hasSelectedTeams()) ? "saved" : "closed",
     );
     return true;
   }
@@ -5097,6 +5247,9 @@ function createSwissStageTeamSelector(
         `На вылет: ${eliminationIds.size}/` +
         `${prediction.elimination_qualifier_count}`
       );
+      progress.dataset.fillState = !hasSelectedTeams()
+        ? "empty"
+        : isSelectionComplete() ? "complete" : "partial";
     } else {
       directProgress.textContent = (
         `${directProgressLabel}: ${directIds.size} из ` +
@@ -5171,10 +5324,7 @@ function createSwissStageTeamSelector(
     const payload = readPredictionPayload();
     if (!isSaving && !isDirty(payload)) {
       clearPredictionSaveFailure(saveQueueKey);
-      setSaveStatus(
-        lastSavedFingerprint === null ? "" : getSavedMessage(),
-        lastSavedFingerprint === null ? "draft" : "saved",
-      );
+      showCurrentSavedStatus();
       return;
     }
     if (!isPayloadReady()) {
@@ -5212,10 +5362,7 @@ function createSwissStageTeamSelector(
     }
     if (!isDirty(payload)) {
       clearPredictionSaveFailure(saveQueueKey);
-      setSaveStatus(
-        lastSavedFingerprint === null ? "" : getSavedMessage(),
-        lastSavedFingerprint === null ? "draft" : "saved",
-      );
+      showCurrentSavedStatus();
       return;
     }
 
@@ -5228,9 +5375,12 @@ function createSwissStageTeamSelector(
         payload,
       );
       const savedPrediction = result?.swiss_stage_prediction;
-      const savedFingerprint = getSavedSelectionFingerprint(
-        savedPrediction?.prediction,
-      );
+      const savedSelection = savedPrediction?.prediction;
+      const savedFingerprint = (
+        savedSelection === null && fingerprint === emptySelectionFingerprint
+      )
+        ? emptySelectionFingerprint
+        : getSavedSelectionFingerprint(savedSelection);
       if (
         !savedPrediction ||
         typeof savedPrediction.is_open !== "boolean" ||
@@ -5264,10 +5414,10 @@ function createSwissStageTeamSelector(
           void savePrediction();
         } else if (lastSavedFingerprint !== null) {
           clearPredictionSaveFailure(saveQueueKey);
-          setSaveStatus(getSavedMessage(), "saved");
+          setSaveStatus(getSavedMessage(), getSavedState());
         } else {
           clearPredictionSaveFailure(saveQueueKey);
-          setSaveStatus("", "draft");
+          showCurrentSavedStatus();
         }
         return;
       }
@@ -5296,7 +5446,7 @@ function createSwissStageTeamSelector(
       void savePrediction();
       return;
     }
-    setSaveStatus(getSavedMessage(), "saved");
+    setSaveStatus(getSavedMessage(), getSavedState());
   }
 
   for (const team of prediction.candidates) {
@@ -5328,11 +5478,23 @@ function createSwissStageTeamSelector(
     );
     directButton.type = "button";
     eliminationButton.type = "button";
+    directButton.setAttribute(
+      "aria-label",
+      `${team.name}: ${directActionLabel}`,
+    );
+    eliminationButton.setAttribute(
+      "aria-label",
+      `${team.name}: ${eliminationActionLabel}`,
+    );
     directButton.dataset.category = "direct";
     eliminationButton.dataset.category = "elimination";
     if (playoffButton) {
       playoffButton.type = "button";
       playoffButton.dataset.category = "playoff";
+      playoffButton.setAttribute(
+        "aria-label",
+        `${team.name}: ${playoffActionLabel}`,
+      );
     }
     directButton.addEventListener("click", () => {
       setCategory(team.id, "direct");
@@ -5401,9 +5563,7 @@ function createSwissStageTeamSelector(
         if (successMessage) {
           setFormMessage(
             message,
-            allowPartial && !isSelectionComplete()
-              ? "Черновик сохранён."
-              : successMessage,
+            allowPartial ? getSavedMessage() : successMessage,
             "success",
           );
           submitButton.textContent = savedSubmitLabel;
@@ -5440,9 +5600,19 @@ function createSwissStageTeamSelector(
   } else {
     actions.append(submitButton);
   }
-  form.append(progress);
-  if (autosaveHint) {
-    form.append(autosaveHint, message, actions);
+  const stickyStatus = isChampionsLeague && isAutosave
+    ? createElement("div", {
+        className: "swiss-stage-sticky-status",
+      })
+    : null;
+  if (stickyStatus) {
+    stickyStatus.append(progress, autosaveHint, message, actions);
+    form.append(stickyStatus);
+  } else {
+    form.append(progress);
+    if (autosaveHint) {
+      form.append(autosaveHint, message, actions);
+    }
   }
   if (selectionHint) {
     form.append(selectionHint);
@@ -5461,10 +5631,7 @@ function createSwissStageTeamSelector(
   });
   sync();
   if (isAutosave) {
-    setSaveStatus(
-      lastSavedFingerprint === null ? "" : getSavedMessage(),
-      lastSavedFingerprint === null ? "draft" : "saved",
-    );
+    showCurrentSavedStatus();
   }
   if (!resultMode && !syncPredictionDeadline()) {
     schedulePredictionDeadlineSync();
@@ -5489,6 +5656,20 @@ function createSwissStageReadonlySelection(
       ),
     }),
   ];
+  if (
+    templateKey === "champions_league_2026_27"
+    && Array.isArray(selection?.playoff_teams)
+    && selection.playoff_teams.length > 0
+  ) {
+    selectionRows.push(
+      createElement("p", {
+        text: (
+          `${copy.playoffResult}: `
+          + selection.playoff_teams.map((team) => team.name).join(", ")
+        ),
+      }),
+    );
+  }
   selectionRows.push(
     createElement("p", {
       text: (
@@ -5503,7 +5684,11 @@ function createSwissStageReadonlySelection(
   );
   if (selection?.is_complete === false) {
     selectionRows.push(
-      createElement("p", { text: "Черновик не заполнен полностью." }),
+      createElement("p", {
+        text: hasSwissStageSelectedTeams(selection)
+          ? "Прогноз сохранён. Заполнен не полностью."
+          : "Команды для прямого выхода или вылета не выбирались.",
+      }),
     );
   }
   section.append(createElement("strong", { text: title }), ...selectionRows);
@@ -5686,7 +5871,7 @@ function createSwissStagePredictionCard(contest) {
   }
   if (!prediction.is_open || contest.is_active === false) {
     item.append(
-      prediction.prediction
+      hasSwissStageSelectedTeams(prediction.prediction)
         ? createSwissStageReadonlySelection(
           "Ваш прогноз",
           prediction.prediction,
@@ -5810,6 +5995,29 @@ function getMatchPredictionPublication(contest) {
   };
 }
 
+function getPredictionReminderSettings(contest) {
+  const reminders = contest?.prediction_reminders;
+  const leadTimeMinutes = Number(reminders?.lead_time_minutes);
+  const supportedLeadTimes = [60, 180, 360, 1440];
+
+  return {
+    is_enabled: reminders?.is_enabled === true,
+    lead_time_minutes: supportedLeadTimes.includes(leadTimeMinutes)
+      ? leadTimeMinutes
+      : 180,
+    next_due_at: typeof reminders?.next_due_at === "string"
+      ? reminders.next_due_at
+      : null,
+    last_delivery_status: typeof reminders?.last_delivery_status === "string"
+      ? reminders.last_delivery_status
+      : null,
+    last_manual_delivery_status:
+      typeof reminders?.last_manual_delivery_status === "string"
+        ? reminders.last_manual_delivery_status
+        : null,
+  };
+}
+
 function formatDateTimeLocalValue(utcValue) {
   // datetime-local expects the device's local wall-clock value, not UTC.
   if (typeof utcValue !== "string") {
@@ -5833,15 +6041,6 @@ function formatLocalDateTime(date) {
   const minutes = String(date.getMinutes()).padStart(2, "0");
 
   return `${year}-${month}-${day}T${hours}:${minutes}`;
-}
-
-function getDefaultDateTimeLocal(now = new Date()) {
-  const startsAt = new Date(now.getTime());
-
-  startsAt.setSeconds(0, 0);
-  startsAt.setMinutes(startsAt.getMinutes() + 3);
-
-  return formatLocalDateTime(startsAt);
 }
 
 function createChampionTeamSelect(
@@ -5989,9 +6188,9 @@ function createChampionPredictionSettingsDisclosure(
   deadlineInput.name = `contest-${contest.id}-champion-deadline`;
   deadlineInput.type = "datetime-local";
   deadlineInput.step = "60";
-  deadlineInput.value =
-    formatDateTimeLocalValue(championPrediction.deadline_at)
-    || getDefaultDateTimeLocal();
+  deadlineInput.value = formatDateTimeLocalValue(
+    championPrediction.deadline_at,
+  );
 
   pointsInput.id = `contest-${contest.id}-champion-points`;
   pointsInput.name = `contest-${contest.id}-champion-points`;
@@ -6820,7 +7019,8 @@ function createMatchPredictionPublicationSettingsDisclosure(
   return disclosure;
 }
 
-function createPredictionReminderPublicationSection(contest) {
+function createPredictionReminderPublicationSection(contest, onUpdated) {
+  const reminders = getPredictionReminderSettings(contest);
   const swissStageName = getSwissStageCopy(contest.template_key)
     .stageName.toLowerCase();
   const section = createElement("div", {
@@ -6830,7 +7030,7 @@ function createPredictionReminderPublicationSection(contest) {
     className: "form-hint",
     text: (
       `Бот соберёт открытые прогнозы на ${swissStageName} и чемпиона, `
-      + "а также все ещё не начавшиеся матчи, и отправит одно сообщение."
+      + "а также все ещё не начавшиеся матчи и поставит отправку в очередь."
     ),
   });
   const message = createElement("p", {
@@ -6843,23 +7043,52 @@ function createPredictionReminderPublicationSection(contest) {
     "Опубликовать напоминания",
     "secondary-action-button",
   );
+  const refreshButton = createActionButton(
+    "Обновить статус",
+    "secondary-action-button",
+  );
+  const deliveryStatus = createElement("p", {
+    className: "match-meta prediction-reminder-manual-status",
+    text: reminders.last_manual_delivery_status
+      ? (
+        "Последняя ручная отправка: "
+        + getPredictionReminderDeliveryStatusLabel(
+          reminders.last_manual_delivery_status,
+        )
+      )
+      : "Последняя ручная отправка: ещё не запускалась.",
+  });
+  let idempotencyKey = null;
+
+  refreshButton.addEventListener("click", () => {
+    onUpdated();
+  });
 
   publishButton.addEventListener("click", async () => {
+    idempotencyKey = idempotencyKey
+      || createIdempotencyKey("prediction-reminder-publication");
     publishButton.disabled = true;
-    publishButton.textContent = "Собираем напоминания…";
+    publishButton.textContent = "Ставим в очередь…";
     setFormMessage(message, "");
 
     try {
       const result = await apiRequestForCurrentView(
         `/api/tma/contests/${contest.id}/prediction-reminders/publish`,
-        { method: "POST" },
+        {
+          method: "POST",
+          headers: {
+            [IDEMPOTENCY_KEY_HEADER]: idempotencyKey,
+          },
+        },
       );
-      if (result?.published !== true) {
+      if (result?.queued !== true) {
         throw new Error(
-          "Сервер вернул некорректный ответ при публикации напоминаний.",
+          "Сервер вернул некорректный ответ при постановке напоминания в очередь.",
         );
       }
-      setFormMessage(message, "Напоминания опубликованы одним сообщением.", "success");
+      idempotencyKey = null;
+      setFormMessage(message, "Напоминание поставлено в очередь.", "success");
+      onUpdated();
     } catch (error) {
       if (handleManagementRequestError(error)) {
         return;
@@ -6868,7 +7097,7 @@ function createPredictionReminderPublicationSection(contest) {
         message,
         error instanceof Error
           ? error.message
-          : "Не удалось опубликовать напоминания.",
+          : "Не удалось поставить напоминание в очередь.",
         "error",
       );
     } finally {
@@ -6877,9 +7106,206 @@ function createPredictionReminderPublicationSection(contest) {
     }
   });
 
-  actions.append(publishButton);
-  section.append(hint, message, actions);
+  actions.append(publishButton, refreshButton);
+  section.append(hint, deliveryStatus, message, actions);
   return section;
+}
+
+function getPredictionReminderDeliveryStatusLabel(status) {
+  const labels = {
+    queued: "поставлено в очередь",
+    pending: "ожидает отправки",
+    preparing: "готовится",
+    sending: "отправляется",
+    retry: "будет повторено",
+    sent: "отправлено",
+    partial: "отправлено частично",
+    cancelled: "отменено",
+    expired: "просрочено",
+    terminal_failed: "ошибка отправки",
+    delivery_unknown: "результат отправки неизвестен",
+    unknown: "результат отправки неизвестен",
+  };
+
+  return labels[status] || status;
+}
+
+function createPredictionReminderAdministrationCard(contest, onUpdated) {
+  const reminders = getPredictionReminderSettings(contest);
+  const item = createElement("li", {
+    className: "match-list-item prediction-reminder-settings-card",
+  });
+  const header = createElement("div", {
+    className: "match-card-header",
+  });
+  const title = createElement("strong", {
+    className: "match-teams",
+    text: "Автоматические напоминания",
+  });
+  const status = createElement("span", {
+    className: "champion-card-status prediction-reminder-settings-status",
+    text: reminders.is_enabled ? "Включены" : "Выключены",
+  });
+  const description = createElement("p", {
+    className: "match-prediction-closed",
+    text: reminders.is_enabled
+      ? (
+          "Бот автоматически напоминает о ближайших дедлайнах матчей, "
+          + "общего или швейцарского этапа и чемпиона."
+        )
+      : "Автоматические напоминания о ближайших дедлайнах выключены.",
+  });
+  const form = createElement("form", {
+    className: "form-fields prediction-reminder-settings-form",
+  });
+  const enabledField = createElement("label", {
+    className: "champion-enable-option prediction-reminder-enable-option",
+  });
+  const enabledInput = createElement("input");
+  const enabledText = createElement("span", {
+    text: "Отправлять напоминания автоматически",
+  });
+  const leadTimeField = createElement("label", {
+    className: "form-field",
+  });
+  const leadTimeLabel = createElement("span", {
+    className: "form-field-label",
+    text: "Когда напоминать",
+  });
+  const leadTimeSelect = createElement("select", {
+    className: "text-input prediction-reminder-lead-time-select",
+  });
+  const deliveryDetails = createElement("div", {
+    className: "prediction-reminder-delivery-details",
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+  const actions = createElement("div", {
+    className: "form-actions",
+  });
+  const submitButton = createActionButton(
+    "Сохранить настройки",
+    "primary-action-button",
+    "submit",
+  );
+
+  status.classList.add(
+    reminders.is_enabled
+      ? "champion-card-status--open"
+      : "champion-card-status--disabled",
+  );
+  enabledInput.id = `contest-${contest.id}-prediction-reminders-enabled`;
+  enabledInput.name = `contest-${contest.id}-prediction-reminders-enabled`;
+  enabledInput.type = "checkbox";
+  enabledInput.checked = reminders.is_enabled;
+  enabledField.append(enabledInput, enabledText);
+
+  for (const [minutes, label] of [
+    [60, "За 1 час"],
+    [180, "За 3 часа"],
+    [360, "За 6 часов"],
+    [1440, "За 24 часа"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = String(minutes);
+    option.textContent = label;
+    option.selected = minutes === reminders.lead_time_minutes;
+    leadTimeSelect.append(option);
+  }
+  leadTimeSelect.id = `contest-${contest.id}-prediction-reminders-lead-time`;
+  leadTimeSelect.name = `contest-${contest.id}-prediction-reminders-lead-time`;
+  leadTimeField.append(
+    leadTimeLabel,
+    leadTimeSelect,
+    createElement("span", {
+      className: "form-hint",
+      text: (
+        "Интервал применяется к матчам, общему или швейцарскому этапу "
+        + "и прогнозу на чемпиона."
+      ),
+    }),
+  );
+
+  if (reminders.next_due_at) {
+    deliveryDetails.append(
+      createElement("p", {
+        className: "match-meta",
+        text: `Следующее напоминание: ${formatMatchStartsAt(reminders.next_due_at)}`,
+      }),
+    );
+  }
+  if (reminders.last_delivery_status) {
+    deliveryDetails.append(
+      createElement("p", {
+        className: "match-meta",
+        text: (
+          "Последняя отправка: "
+          + getPredictionReminderDeliveryStatusLabel(
+            reminders.last_delivery_status,
+          )
+        ),
+      }),
+    );
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    enabledInput.disabled = true;
+    leadTimeSelect.disabled = true;
+    submitButton.disabled = true;
+    submitButton.textContent = "Сохраняем…";
+    setFormMessage(message, "");
+
+    try {
+      const result = await apiRequestForCurrentView(
+        `/api/tma/contests/${contest.id}/prediction-reminders/settings`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            enabled: enabledInput.checked,
+            lead_time_minutes: Number(leadTimeSelect.value),
+          }),
+        },
+      );
+      if (!result || !result.prediction_reminders) {
+        throw new Error(
+          "Сервер вернул некорректный ответ при сохранении напоминаний.",
+        );
+      }
+      onUpdated();
+    } catch (error) {
+      if (handleManagementRequestError(error)) {
+        return;
+      }
+      setFormMessage(
+        message,
+        error instanceof Error
+          ? error.message
+          : "Не удалось сохранить автоматические напоминания.",
+        "error",
+      );
+      enabledInput.disabled = false;
+      leadTimeSelect.disabled = false;
+      submitButton.disabled = false;
+      submitButton.textContent = "Сохранить настройки";
+    }
+  });
+
+  header.append(title, status);
+  actions.append(submitButton);
+  form.append(
+    enabledField,
+    leadTimeField,
+    deliveryDetails,
+    message,
+    actions,
+  );
+  item.append(header, description, form);
+  return item;
 }
 
 function createIntermediateLeaderboardPublicationSection(contest) {
@@ -6989,7 +7415,7 @@ function createMatchPredictionPublicationAdministrationCard(contest, onUpdated) 
         )
         : "Публикация прогнозов при начале матча выключена.",
     }),
-    createPredictionReminderPublicationSection(contest),
+    createPredictionReminderPublicationSection(contest, onUpdated),
     createIntermediateLeaderboardPublicationSection(contest),
     createMatchPredictionPublicationSettingsDisclosure(
       contest,
@@ -7138,7 +7564,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
     text: prediction.settings_locked
       ? "До наступления текущего дедлайна его можно изменить. Остальные настройки зафиксированы."
       : hasFixedChampionsLeagueLimits
-        ? "Добавьте 36 команд и задайте начало первого матча общего этапа. Для каждой команды участнику доступны варианты «Напрямую», «Стыки» и «Вылет»; частичный черновик сохраняется в пределах 8 прямых выходов и 12 вылетов."
+        ? "Добавьте 36 команд и задайте начало первого матча общего этапа. Для каждой команды участнику доступны варианты «Напрямую», «Стыки» и «Вылет»; прогноз сохраняется после первого выбора «Напрямую» или «Вылет», а затем его можно дополнить до 8 прямых выходов и 12 вылетов."
         : (
         "Укажите, до какого времени можно выбрать команды и сколько команд пройдёт " +
         "напрямую и через стыковой раунд."
@@ -7163,9 +7589,7 @@ function createSwissStageSettingsForm(contest, prediction, onUpdated) {
   deadlineInput.className = "text-input";
   deadlineInput.type = "datetime-local";
   deadlineInput.step = "60";
-  deadlineInput.value =
-    formatDateTimeLocalValue(prediction.deadline_at)
-    || getDefaultDateTimeLocal();
+  deadlineInput.value = formatDateTimeLocalValue(prediction.deadline_at);
   deadlineField.append(
     createElement("span", {
       className: "form-field-label",
@@ -7870,14 +8294,17 @@ function createMatchListItem(
     sections.push(createMatchPredictionSection(contest, match));
   }
 
-  if (showResults) {
+  const showParticipantResult = (
+    showPredictions && !showResults && Boolean(match.result)
+  );
+  if (showResults || showParticipantResult) {
     sections.push(
       createMatchResultSection(
         contest,
         match,
         state,
         onResultSaved,
-        canManageResults,
+        showParticipantResult ? false : canManageResults,
       ),
     );
   }
@@ -8149,6 +8576,7 @@ function createPlayoffBracketCard(
       .get(round.key)?.selectorLabel || round.name;
     const button = createActionButton(selectorLabel, "playoff-round-button");
     button.type = "button";
+    button.id = `${columnId}-tab`;
     button.setAttribute("role", "tab");
     button.setAttribute("aria-label", round.name);
     button.setAttribute("aria-controls", columnId);
@@ -8157,7 +8585,7 @@ function createPlayoffBracketCard(
     });
     column.id = columnId;
     column.setAttribute("role", "tabpanel");
-    column.setAttribute("aria-label", round.name);
+    column.setAttribute("aria-labelledby", button.id);
     const roundHeading = createElement("h3", {
       className: "playoff-round-heading",
       text: round.name,
@@ -8211,6 +8639,24 @@ function createPlayoffBracketCard(
   }
   for (const [index, button] of buttons.entries()) {
     button.addEventListener("click", () => selectRound(index));
+    button.addEventListener("keydown", (event) => {
+      let nextIndex = null;
+      if (event.key === "ArrowRight") {
+        nextIndex = (index + 1) % buttons.length;
+      } else if (event.key === "ArrowLeft") {
+        nextIndex = (index - 1 + buttons.length) % buttons.length;
+      } else if (event.key === "Home") {
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        nextIndex = buttons.length - 1;
+      }
+      if (nextIndex === null) {
+        return;
+      }
+      event.preventDefault();
+      selectRound(nextIndex);
+      buttons[nextIndex].focus();
+    });
   }
   const selectedRoundIndex = bracket.rounds.findIndex(
     (round) => round.key === selectedRoundKey,
@@ -8287,6 +8733,7 @@ function createContestPublicationsCard(contest, onUpdated) {
   });
 
   list.append(
+    createPredictionReminderAdministrationCard(contest, onUpdated),
     createMatchPredictionPublicationAdministrationCard(contest, onUpdated),
   );
   card.append(heading, description, list);
@@ -8509,8 +8956,7 @@ function createMatchFormCard(bootstrap, contest, state) {
   startsAtInput.name = "match-starts-at";
   startsAtInput.type = "datetime-local";
   startsAtInput.step = "60";
-  startsAtInput.value =
-    draft.startsAtLocal || getDefaultDateTimeLocal();
+  startsAtInput.value = draft.startsAtLocal || "";
   startsAtInput.required = true;
 
   setFormMessage(
@@ -8688,13 +9134,14 @@ function getTwoLeggedTieCreationTeams(container) {
 }
 
 function getDefaultSecondLegDateTimeLocal(firstLegValue = null) {
-  const firstLeg = firstLegValue ? new Date(firstLegValue) : new Date();
-  const base = Number.isNaN(firstLeg.getTime()) ? new Date() : firstLeg;
-  const secondLeg = new Date(base.getTime());
   if (!firstLegValue) {
-    secondLeg.setSeconds(0, 0);
-    secondLeg.setMinutes(secondLeg.getMinutes() + 3);
+    return "";
   }
+  const firstLeg = new Date(firstLegValue);
+  if (Number.isNaN(firstLeg.getTime())) {
+    return "";
+  }
+  const secondLeg = new Date(firstLeg.getTime());
   secondLeg.setDate(secondLeg.getDate() + 7);
   return formatLocalDateTime(secondLeg);
 }
@@ -8777,7 +9224,7 @@ function createTwoLeggedTieFormCard(
   firstLegInput.type = "datetime-local";
   firstLegInput.step = "60";
   firstLegInput.required = true;
-  firstLegInput.value = getDefaultDateTimeLocal();
+  firstLegInput.value = "";
   secondLegInput.type = "datetime-local";
   secondLegInput.step = "60";
   secondLegInput.required = true;
@@ -11843,9 +12290,11 @@ function createSharedTournamentTeamsCard(bootstrap, tournament, state = {}) {
   const form = createElement("form", { className: "form-fields" });
   const field = createElement("label", { className: "form-field" });
   const input = document.createElement("textarea");
+  const teamsLocked = tournament.teams_locked === true;
   input.className = "text-input teams-textarea";
   input.rows = Math.max(4, Math.min(12, tournament.teams.length + 1));
   input.value = tournament.teams.map((team) => team.name).join("\n");
+  input.disabled = teamsLocked;
   field.append(
     createElement("span", {
       className: "form-field-label",
@@ -11860,7 +12309,18 @@ function createSharedTournamentTeamsCard(bootstrap, tournament, state = {}) {
     "primary-action-button",
     "submit",
   );
-  form.append(field, submitButton, message);
+  submitButton.disabled = teamsLocked;
+  form.append(field);
+  if (teamsLocked) {
+    form.append(createElement("p", {
+      className: "form-hint",
+      text: (
+        "Состав зафиксирован после добавления матчей, сохранения прогнозов "
+        + "или внесения результатов. Изменить его больше нельзя."
+      ),
+    }));
+  }
+  form.append(submitButton, message);
   card.append(heading, form);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -11963,12 +12423,15 @@ function createSharedChampionCard(bootstrap, tournament) {
   });
   card.append(form);
 
-  const deadlinePassed = settings.deadline_at
-    && new Date(settings.deadline_at).getTime() <= Date.now();
   const matchesFinished = (tournament.matches || []).every(
     (match) => ["finished", "cancelled"].includes(match.status),
   );
-  if (settings.is_enabled && deadlinePassed && matchesFinished && tournament.teams.length) {
+  if (
+    settings.is_enabled
+    && settings.is_deadline_passed === true
+    && matchesFinished
+    && tournament.teams.length
+  ) {
     const resultForm = createElement("form", { className: "form-fields" });
     const champion = document.createElement("select");
     champion.className = "text-input";
@@ -12120,9 +12583,11 @@ function createSharedSwissStageCard(bootstrap, tournament) {
   });
   card.append(form);
 
-  const deadlinePassed = settings.deadline_at
-    && new Date(settings.deadline_at).getTime() <= Date.now();
-  if (settings.is_enabled && deadlinePassed && tournament.teams.length) {
+  if (
+    settings.is_enabled
+    && settings.is_deadline_passed === true
+    && tournament.teams.length
+  ) {
     const resultForm = createElement("form", { className: "form-fields" });
     const direct = document.createElement("select");
     const elimination = document.createElement("select");
@@ -12222,7 +12687,7 @@ function createSharedSwissStageCard(bootstrap, tournament) {
 function getFixtureSyncStateLabel(state) {
   const labels = {
     disabled: "Выключена",
-    idle: "Готова",
+    idle: "Ждём пары",
     ok: "Работает",
     syncing: "Обновляется",
     stale: "Давно не обновлялась",
@@ -12269,8 +12734,29 @@ function createFixtureSyncAdministrationCard(bootstrap, tournament) {
   attributionLink.rel = "noreferrer noopener";
   attributionLink.textContent = "football-data.org";
   attribution.append("Данные предоставлены ", attributionLink, ".");
+  const importConstraintsHint = createElement("p", {
+    className: "form-hint fixture-sync-import-hint",
+    text: (
+      "Синхронизация импортирует только матчи, которые ещё не начались на момент включения. "
+      + "Названия команд должны точно и однозначно совпадать с football-data.org; "
+      + "пропущенные пары добавляются вручную."
+    ),
+  });
+  const waitingForFixturesHint = state === "idle"
+    ? createElement("p", {
+        className: "form-hint fixture-sync-waiting-hint",
+        text: (
+          "Источник доступен, но пары плей-офф ещё не опубликованы "
+          + "или пока не получены."
+        ),
+      })
+    : null;
   header.append(heading, status);
   card.append(header, attribution);
+  if (waitingForFixturesHint) {
+    card.append(waitingForFixturesHint);
+  }
+  card.append(importConstraintsHint);
 
   const details = createElement("dl", {
     className: "fixture-sync-details",
@@ -12843,6 +13329,383 @@ function createSharedMatchAdministrationCard(bootstrap, tournament, match) {
   return card;
 }
 
+function hasSharedSwissStageResult(settings) {
+  const directTeamIds = Array.isArray(settings?.direct_qualifier_team_ids)
+    ? settings.direct_qualifier_team_ids
+    : [];
+  const eliminationTeamIds = Array.isArray(
+    settings?.elimination_qualifier_team_ids,
+  )
+    ? settings.elimination_qualifier_team_ids
+    : [];
+  return (
+    settings?.is_enabled === true
+    && directTeamIds.length === settings.direct_qualifier_count
+    && eliminationTeamIds.length === settings.elimination_qualifier_count
+  );
+}
+
+function isSharedMatchCompleteForWorkflow(match, requiresAdvancingTeam = true) {
+  const result = match?.result;
+  if (
+    match?.status !== "finished"
+    || !Number.isSafeInteger(result?.home_score)
+    || !Number.isSafeInteger(result?.away_score)
+  ) {
+    return false;
+  }
+  if (!requiresAdvancingTeam) {
+    return true;
+  }
+  const teamIds = [match?.home_team?.id, match?.away_team?.id];
+  return teamIds.includes(result?.advancing_team_id);
+}
+
+function isSharedTwoLeggedTieCompleteForWorkflow(tournament, tie) {
+  const result = getTwoLeggedTieResult(tie);
+  const teamIds = [tie?.first_team?.id, tie?.second_team?.id];
+  const { firstLeg, secondLeg } = getTwoLeggedTieMatches(tournament, tie);
+  return (
+    teamIds.includes(result?.advancing_team_id)
+    && typeof result?.resolution_method === "string"
+    && result.resolution_method.length > 0
+    && isSharedMatchCompleteForWorkflow(firstLeg, false)
+    && isSharedMatchCompleteForWorkflow(secondLeg, false)
+  );
+}
+
+function getCompletedSharedChampionsLeagueFinalWinnerId(tournament) {
+  const finalRound = tournament?.playoff_bracket?.rounds?.find(
+    (round) => round?.key === "final",
+  );
+  const finalNode = finalRound?.nodes?.find((node) => node?.position === 1);
+  const finalEntity = finalNode?.entity;
+  if (
+    finalNode?.state !== "finished"
+    || finalEntity?.type !== "match"
+    || !Number.isSafeInteger(finalEntity.id)
+  ) {
+    return null;
+  }
+  const finalMatch = (tournament.matches || []).find(
+    (match) => match?.id === finalEntity.id,
+  );
+  if (
+    finalMatch?.round_key !== "final"
+    || finalMatch?.bracket_position !== 1
+    || isTwoLeggedMatch(finalMatch)
+    || !isSharedMatchCompleteForWorkflow(finalMatch)
+  ) {
+    return null;
+  }
+  return finalMatch.result.advancing_team_id;
+}
+
+function getSharedTournamentWorkflowState(tournament) {
+  const isArchived = tournament.is_archived === true;
+  const isChampionsLeague = (
+    tournament.template_key === "champions_league_2026_27"
+  );
+  const teams = Array.isArray(tournament.teams) ? tournament.teams : [];
+  const matches = Array.isArray(tournament.matches) ? tournament.matches : [];
+  const completedMatchCount = matches.filter((match) => (
+    isSharedMatchCompleteForWorkflow(match, !isTwoLeggedMatch(match))
+  )).length;
+  const incompleteMatchCount = matches.length - completedMatchCount;
+  const incompleteStandaloneMatchCount = matches.filter(
+    (match) => (
+      !isTwoLeggedMatch(match)
+      && !isSharedMatchCompleteForWorkflow(match)
+    ),
+  ).length;
+  const twoLeggedTies = getTwoLeggedTies(tournament);
+  const incompleteTieCount = twoLeggedTies.filter(
+    (tie) => !isSharedTwoLeggedTieCompleteForWorkflow(tournament, tie),
+  ).length;
+  const requiredTeamCount = isChampionsLeague ? 36 : 2;
+  const preparationReady = isChampionsLeague
+    ? teams.length === requiredTeamCount
+    : teams.length >= requiredTeamCount;
+  const preparationStatus = isChampionsLeague
+    ? `Состав: ${teams.length}/${requiredTeamCount}`
+    : (
+      `Состав: ${teams.length} `
+      + getRussianPlural(teams.length, "команда", "команды", "команд")
+    );
+
+  const swissSettings = tournament.swiss_stage_prediction || {};
+  const championSettings = tournament.champion_prediction || {};
+  const stageCopy = getSwissStageCopy(tournament.template_key);
+  const hasSwissResult = hasSharedSwissStageResult(swissSettings);
+  const hasChampionResult = Boolean(championSettings.actual_champion);
+  const swissNeedsResult = (
+    swissSettings.is_enabled === true
+    && swissSettings.is_deadline_passed === true
+    && !hasSwissResult
+  );
+  const championNeedsResult = (
+    championSettings.is_enabled === true
+    && !hasChampionResult
+    && (
+      championSettings.is_deadline_passed === true
+      || (matches.length > 0 && incompleteMatchCount === 0)
+    )
+  );
+  const generalStatusParts = [
+    swissSettings.is_enabled !== true
+      ? `${stageCopy.stageName}: выключен`
+      : hasSwissResult
+        ? `${stageCopy.stageName}: итог внесён`
+        : swissSettings.is_deadline_passed === true
+          ? `${stageCopy.stageName}: нужен итог`
+          : `${stageCopy.stageName}: прогноз открыт`,
+    championSettings.is_enabled !== true
+      ? "Чемпион: выключен"
+      : hasChampionResult
+        ? "Чемпион: указан"
+        : championSettings.is_deadline_passed === true
+          ? "Чемпион: нужен результат"
+          : "Чемпион: прогноз открыт",
+  ];
+
+  const sync = tournament.fixture_sync || {};
+  const reportedSyncState = typeof sync.state === "string" ? sync.state : "";
+  const syncState = reportedSyncState || (sync.enabled === true ? "idle" : "disabled");
+  const reportedConflictCount = Number.isSafeInteger(sync.conflict_detail_count)
+    ? sync.conflict_detail_count
+    : 0;
+  const statsConflictCount = Number.isSafeInteger(sync.stats?.conflicts)
+    ? sync.stats.conflicts
+    : 0;
+  const conflictCount = Math.max(reportedConflictCount, statsConflictCount);
+  const syncNeedsAttention = (
+    ["error", "needs_attention", "stale"].includes(syncState)
+    || conflictCount > 0
+  );
+  const playoffStatusParts = [
+    matches.length > 0
+      ? `Матчи: ${completedMatchCount}/${matches.length}`
+      : "Пары ещё не добавлены",
+  ];
+  if (isChampionsLeague) {
+    playoffStatusParts.push(
+      `Синхронизация: ${getFixtureSyncStateLabel(syncState).toLowerCase()}`,
+    );
+  }
+  if (conflictCount > 0) {
+    playoffStatusParts.push(
+      `${conflictCount} ${getRussianPlural(
+        conflictCount,
+        "конфликт",
+        "конфликта",
+        "конфликтов",
+      )}`,
+    );
+  }
+  if (
+    matches.length > 0
+    && incompleteMatchCount === 0
+    && incompleteTieCount === 0
+  ) {
+    playoffStatusParts.push("Результаты доступны для исправления");
+  }
+
+  const completionBlockers = [];
+  if (!preparationReady) {
+    completionBlockers.push(
+      isChampionsLeague
+        ? "Нужен состав из 36 команд"
+        : "Нужно добавить команды",
+    );
+  }
+  if (incompleteStandaloneMatchCount > 0) {
+    completionBlockers.push(
+      `${incompleteStandaloneMatchCount} ${getRussianPlural(
+        incompleteStandaloneMatchCount,
+        "матч без результата",
+        "матча без результата",
+        "матчей без результата",
+      )}`,
+    );
+  }
+  if (incompleteTieCount > 0) {
+    completionBlockers.push(
+      `${incompleteTieCount} ${getRussianPlural(
+        incompleteTieCount,
+        "пара не завершена",
+        "пары не завершены",
+        "пар не завершены",
+      )}`,
+    );
+  }
+  if (
+    swissSettings.is_enabled === true
+    && !swissSettings.deadline_at
+  ) {
+    completionBlockers.push(`Не указан дедлайн: ${stageCopy.stageName}`);
+  } else if (
+    swissSettings.is_enabled === true
+    && swissSettings.is_deadline_passed !== true
+  ) {
+    completionBlockers.push(`Ещё открыт прогноз: ${stageCopy.stageName}`);
+  } else if (swissSettings.is_enabled === true && !hasSwissResult) {
+    completionBlockers.push(`Не внесён итог: ${stageCopy.stageName}`);
+  }
+  if (
+    championSettings.is_enabled === true
+    && !championSettings.deadline_at
+  ) {
+    completionBlockers.push("Не указан дедлайн прогноза на чемпиона");
+  } else if (
+    championSettings.is_enabled === true
+    && championSettings.is_deadline_passed !== true
+  ) {
+    completionBlockers.push("Ещё открыт прогноз на чемпиона");
+  } else if (championSettings.is_enabled === true && !hasChampionResult) {
+    completionBlockers.push("Не указан фактический чемпион");
+  }
+  if (isChampionsLeague) {
+    const finalWinnerId = getCompletedSharedChampionsLeagueFinalWinnerId(
+      tournament,
+    );
+    if (finalWinnerId === null) {
+      completionBlockers.push("Не завершён финал канонической сетки");
+    } else if (
+      championSettings.is_enabled === true
+      && hasChampionResult
+      && championSettings.actual_champion.id !== finalWinnerId
+    ) {
+      completionBlockers.push("Фактический чемпион не совпадает с победителем финала");
+    }
+  }
+
+  const preparationOpen = !isArchived && !preparationReady;
+  const generalOpen = (
+    !isArchived
+    && preparationReady
+    && (swissNeedsResult || championNeedsResult || matches.length === 0)
+  );
+  const playoffOpen = (
+    !isArchived
+    && preparationReady
+    && (
+      syncNeedsAttention
+      || (matches.length > 0 && incompleteMatchCount > 0)
+      || incompleteTieCount > 0
+    )
+  );
+  const completionOpen = (
+    isArchived
+    || (!preparationOpen && !generalOpen && !playoffOpen)
+  );
+
+  return {
+    preparation: {
+      status: preparationStatus,
+      tone: preparationReady ? "ready" : "attention",
+      open: preparationOpen,
+    },
+    general: {
+      status: generalStatusParts.join(" · "),
+      tone: swissNeedsResult || championNeedsResult ? "attention" : "neutral",
+      open: generalOpen,
+    },
+    playoff: {
+      status: playoffStatusParts.join(" · "),
+      tone: syncNeedsAttention ? "attention" : "neutral",
+      open: playoffOpen,
+    },
+    completion: {
+      status: isArchived
+        ? "Турнир завершён"
+        : completionBlockers.length > 0
+          ? `Блокеров: ${completionBlockers.length}`
+          : "Готов к проверке",
+      description: isArchived
+        ? "Данные доступны только для просмотра."
+        : completionBlockers.length > 0
+          ? completionBlockers.join(" · ")
+          : "Все обязательные результаты внесены по текущим данным.",
+      tone: isArchived || completionBlockers.length === 0
+        ? "ready"
+        : "attention",
+      open: completionOpen,
+    },
+  };
+}
+
+function createSharedTournamentWorkflowStage({
+  step,
+  title,
+  description,
+  status,
+  tone = "neutral",
+  open = false,
+  cards = [],
+}) {
+  const details = document.createElement("details");
+  details.className = "shared-tournament-stage";
+  details.open = open;
+  const summary = document.createElement("summary");
+  summary.className = "shared-tournament-stage-summary";
+  const stepLabel = createElement("span", {
+    className: "shared-tournament-stage-step",
+    text: `Этап ${step}`,
+  });
+  const copy = createElement("span", {
+    className: "shared-tournament-stage-copy",
+  });
+  copy.append(
+    createElement("span", {
+      className: "shared-tournament-stage-title",
+      text: title,
+    }),
+    createElement("span", {
+      className: "shared-tournament-stage-description",
+      text: description,
+    }),
+  );
+  const statusElement = createElement("span", {
+    className: `shared-tournament-stage-status is-${tone}`,
+    text: status,
+  });
+  const body = createElement("div", {
+    className: "shared-tournament-stage-body",
+  });
+  body.append(...cards.filter(Boolean));
+  summary.append(stepLabel, copy, statusElement);
+  details.append(summary, body);
+  return details;
+}
+
+function createSharedPlayoffManagementNote(tournament) {
+  if (
+    tournament.template_key !== "champions_league_2026_27"
+    || tournament.is_archived === true
+  ) {
+    return null;
+  }
+  const note = createElement("aside", {
+    className: "shared-playoff-management-note",
+  });
+  note.setAttribute("aria-label", "Источники данных плей-офф");
+  note.append(
+    createElement("strong", {
+      text: "Автоматизация помогает, но не заменяет ручное управление",
+    }),
+    createElement("p", {
+      text: (
+        "При конфликте названия команды или пары football-data.org ничего "
+        + "не перезаписывает. Администратор может вручную добавить пропущенный "
+        + "матч или пару, скорректировать расписание или результат там, где это "
+        + "доступно. Чтобы заменить команды, удалите матч или пару и создайте "
+        + "заново."
+      ),
+    }),
+  );
+  return note;
+}
+
 function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
   setChatSummary();
   const cards = [
@@ -12861,24 +13724,21 @@ function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
   if (state.message) {
     cards.push(createInfoCard("Готово", [state.message]));
   }
-  cards.push(
-    createSharedTournamentLifecycleCard(bootstrap, tournament),
+  const workflowState = getSharedTournamentWorkflowState(tournament);
+  const preparationCards = [
     createSharedTournamentTeamsCard(bootstrap, tournament, state),
-    createSharedChampionCard(bootstrap, tournament),
+  ];
+  const generalCards = [
     createSharedSwissStageCard(bootstrap, tournament),
-  );
+    createSharedChampionCard(bootstrap, tournament),
+  ];
+  const playoffCards = [createSharedPlayoffManagementNote(tournament)];
   const fixtureSyncCard = createFixtureSyncAdministrationCard(
     bootstrap,
     tournament,
   );
   if (fixtureSyncCard) {
-    cards.push(fixtureSyncCard);
-  }
-  const bracketCard = createPlayoffBracketCard(tournament, {
-    mode: "management",
-  });
-  if (bracketCard) {
-    cards.push(bracketCard);
+    playoffCards.push(fixtureSyncCard);
   }
   if (tournament.is_archived !== true) {
     const manualCards = [
@@ -12904,18 +13764,27 @@ function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
         ),
       );
     }
-    cards.push(
+    playoffCards.push(
       createManualCorrectionCard(manualCards, {
         open: Boolean(
-          state.matchMessage
+          (tournament.matches || []).length === 0
+          || state.matchMessage
           || state.matchMessageType
           || state.twoLeggedTieMessage
         ),
       }),
     );
   }
+  const bracketCard = createPlayoffBracketCard(tournament, {
+    mode: "management",
+  });
+  if (bracketCard) {
+    playoffCards.push(bracketCard);
+  }
   for (const match of tournament.matches || []) {
-    cards.push(createSharedMatchAdministrationCard(bootstrap, tournament, match));
+    playoffCards.push(
+      createSharedMatchAdministrationCard(bootstrap, tournament, match),
+    );
   }
   const twoLeggedTiesCard = createTwoLeggedTiesAdministrationCard(
     tournament,
@@ -12937,8 +13806,65 @@ function renderSharedTournamentScreen(bootstrap, tournament, state = {}) {
     },
   );
   if (twoLeggedTiesCard) {
-    cards.push(twoLeggedTiesCard);
+    playoffCards.push(twoLeggedTiesCard);
   }
+  const workflow = createElement("section", {
+    className: "shared-tournament-workflow",
+  });
+  const workflowHeading = createElement("h2", {
+    className: "visually-hidden",
+    text: "Этапы управления общим турниром",
+  });
+  workflowHeading.id = `shared-tournament-${tournament.id}-workflow-title`;
+  workflow.setAttribute("aria-labelledby", workflowHeading.id);
+  const workflowStages = [
+    createSharedTournamentWorkflowStage({
+      step: 1,
+      title: "Подготовка",
+      description: "Состав турнира и связь с конкурсами в чатах.",
+      cards: preparationCards,
+      ...workflowState.preparation,
+    }),
+    createSharedTournamentWorkflowStage({
+      step: 2,
+      title: "Общий этап",
+      description: (
+        "Настройки долгосрочных прогнозов и фактические итоги."
+      ),
+      cards: generalCards,
+      ...workflowState.general,
+    }),
+    createSharedTournamentWorkflowStage({
+      step: 3,
+      title: "Плей-офф",
+      description: (
+        "Синхронизация, сетка, ручные пары, расписание и результаты."
+      ),
+      cards: playoffCards,
+      ...workflowState.playoff,
+    }),
+    createSharedTournamentWorkflowStage({
+      step: 4,
+      title: "Завершение",
+      description: workflowState.completion.description,
+      cards: [createSharedTournamentLifecycleCard(bootstrap, tournament)],
+      ...workflowState.completion,
+    }),
+  ];
+  for (const stage of workflowStages) {
+    stage.addEventListener("toggle", () => {
+      if (!stage.open) {
+        return;
+      }
+      for (const otherStage of workflowStages) {
+        if (otherStage !== stage) {
+          otherStage.open = false;
+        }
+      }
+    });
+  }
+  workflow.append(workflowHeading, ...workflowStages);
+  cards.push(workflow);
   replaceAppContent(...cards);
 }
 
@@ -13093,6 +14019,100 @@ async function openContestList(bootstrap, state = {}) {
   }
 }
 
+function createNotificationPreferencesCard(bootstrap) {
+  const preferences = bootstrap?.notification_preferences || {};
+  let savedValue = preferences.mention_in_prediction_reminders === true;
+  const card = createElement("section", {
+    className: "info-card notification-preferences-card",
+  });
+  const heading = createElement("h2", {
+    text: "Напоминания",
+  });
+  const description = createElement("p", {
+    className: "subtitle",
+    text: (
+      "Настройка действует только в этом Telegram-чате и сохраняется "
+      + "автоматически."
+    ),
+  });
+  const option = createElement("label", {
+    className: "notification-preference-option",
+  });
+  const input = createElement("input");
+  const label = createElement("span", {
+    text: "Упоминать меня в напоминаниях этого чата",
+  });
+  const hint = createElement("p", {
+    className: "form-hint",
+    text: (
+      "Бот сможет упомянуть вас, если вы участвовали в конкурсе этого чата "
+      + "и ещё не заполнили все открытые прогнозы."
+    ),
+  });
+  const message = createElement("p", {
+    className: "form-message",
+  });
+
+  input.id = "mention-in-prediction-reminders";
+  input.name = "mention-in-prediction-reminders";
+  input.type = "checkbox";
+  input.checked = savedValue;
+  option.append(input, label);
+
+  input.addEventListener("change", async () => {
+    const requestedValue = input.checked;
+    input.disabled = true;
+    setFormMessage(message, "Сохраняем…");
+
+    try {
+      const result = await apiRequestForCurrentView(
+        "/api/tma/me/notification-preferences",
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            mention_in_prediction_reminders: requestedValue,
+          }),
+        },
+      );
+      const savedPreferences = result?.notification_preferences || result;
+      if (
+        typeof savedPreferences?.mention_in_prediction_reminders !== "boolean"
+      ) {
+        throw new Error(
+          "Сервер вернул некорректный ответ при сохранении настройки.",
+        );
+      }
+      savedValue = savedPreferences.mention_in_prediction_reminders;
+      input.checked = savedValue;
+      bootstrap.notification_preferences = {
+        ...preferences,
+        ...savedPreferences,
+      };
+      setFormMessage(message, "Настройка сохранена.", "success");
+    } catch (error) {
+      if (error instanceof StaleViewRequestError) {
+        return;
+      }
+      input.checked = savedValue;
+      setFormMessage(
+        message,
+        error instanceof Error
+          ? error.message
+          : "Не удалось сохранить настройку упоминаний.",
+        "error",
+      );
+    } finally {
+      input.disabled = false;
+    }
+  });
+
+  card.append(heading, description, option, hint, message);
+  return card;
+}
+
 function renderContestScreen(bootstrap, state = {}) {
   const { user, chat } = bootstrap.context;
   const chatTitle = chat.title || "этого чата";
@@ -13113,7 +14133,10 @@ function renderContestScreen(bootstrap, state = {}) {
       void openContest(bootstrap, contestId);
     },
   );
-  const cards = [contestCard];
+  const cards = [
+    contestCard,
+    createNotificationPreferencesCard(bootstrap),
+  ];
   if (state.contestListMessage) {
     cards.push(
       createInfoCard(

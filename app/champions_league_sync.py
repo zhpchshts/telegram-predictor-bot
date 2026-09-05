@@ -725,15 +725,6 @@ def _apply_external_entity(
         node.materialized_shared_tie_id is not None
         or node.materialized_shared_match_id is not None
     )
-    if not is_materialized and node.sync_status == "conflict":
-        _mark_imports_conflict(
-            database_path=database_path,
-            fixture_imports=fixture_imports,
-            message=(
-                node.sync_error or "Конфликт узла сетки требует ручного разрешения."
-            ),
-        )
-        return TournamentSyncResult(conflict_count=1)
     if not is_materialized:
         reconciliation = configure_bracket_node(
             database_path=database_path,
@@ -747,6 +738,7 @@ def _apply_external_entity(
             first_leg_starts_at_utc=first_start,
             second_leg_starts_at_utc=second_start,
             expected_version=node.version,
+            resolve_exact_provider_conflict=True,
         )
         node = reconciliation.node
         if reconciliation.action == "conflict":

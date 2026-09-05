@@ -69,12 +69,18 @@ def test_participant_stage_choices_autosave_but_results_remain_manual() -> None:
     assert "PREDICTION_FLUSH_EVENT" in selector_source
     assert "onClosed = () => {}" in selector_source
     assert "onClosed();" in selector_source
+    assert 'className: "swiss-stage-sticky-status"' in selector_source
+    assert "isChampionsLeague && isAutosave" in selector_source
     assert "autosave: true" in participant_source
     assert "contestId: contest.id" in participant_source
     assert "syncSwissStageStatus(status, prediction)" in participant_source
     assert "resultMode: true" in administration_source
     assert "autosave: true" not in administration_source
     assert "window.confirm(" in selector_source
+
+    styles = (ROOT / "tma" / "styles.css").read_text(encoding="utf-8")
+    assert ".swiss-stage-sticky-status" in styles
+    assert "position: sticky" in styles
 
 
 def test_stage_autosave_preserves_partial_and_exact_selection_modes() -> None:
@@ -87,8 +93,22 @@ def test_stage_autosave_preserves_partial_and_exact_selection_modes() -> None:
     assert "savedFingerprint !== fingerprint" in selector_source
     assert "fingerprint !== initialFingerprint" in selector_source
     assert ".sort((left, right) => left - right)" in selector_source
-    assert "Черновик сохранён." in selector_source
+    assert '"Выборов пока нет. Отметьте хотя бы одну команду «Напрямую» "' in (
+        selector_source
+    )
+    assert '"Прогноз сохранён. Можно дополнить до 8+12."' in selector_source
+    assert '"Прогноз сохранён и заполнен полностью."' in selector_source
+    assert '"Прогноз сохранён. Заполнен не полностью. Приём прогнозов завершён."' in (
+        selector_source
+    )
+    assert 'return allowPartial && !hasSelectedTeams() ? "empty" : "saved"' in (
+        selector_source
+    )
+    assert "Черновик" not in selector_source
+    assert "function showCurrentSavedStatus()" in selector_source
+    assert "lastSavedFingerprint === null && !allowPartial" in selector_source
     assert 'setSaveStatus("", "draft")' in selector_source
+    assert "showCurrentSavedStatus();" in selector_source
     assert "Заполните прогноз полностью — изменения пока не сохранены." in (
         selector_source
     )
@@ -127,6 +147,66 @@ def test_general_stage_editability_uses_server_state_and_shows_partial_progress(
     assert "playoffProgress" not in selector_source
     assert 'prediction.selection_mode === "up_to_limits"' in selector_source
     assert "!allowPartial" in selector_source
+    assert 'progress.setAttribute("role", "status")' in selector_source
+    assert 'progress.setAttribute("aria-live", "polite")' in selector_source
+    assert 'progress.setAttribute("aria-atomic", "true")' in selector_source
+    assert 'progress.setAttribute("aria-label", "Заполнение прогноза")' in (
+        selector_source
+    )
+    assert "progress.dataset.fillState = !hasSelectedTeams()" in selector_source
+    assert '? "empty"' in selector_source
+    assert ': isSelectionComplete() ? "complete" : "partial"' in selector_source
+
+
+def test_general_stage_distinguishes_saved_partial_from_empty_selection() -> None:
+    selector_source = _function_source("createSwissStageTeamSelector")
+    readonly_source = _function_source("createSwissStageReadonlySelection")
+    history_source = _function_source("createLeaderboardSwissStagePredictionHistory")
+    card_source = _function_source("createSwissStagePredictionCard")
+    selection_source = _function_source("hasSwissStageSelectedTeams")
+
+    assert "directIds.size + eliminationIds.size > 0" in selector_source
+    assert "Если напоминания включены" in selector_source
+    assert "они продолжат приходить до полного заполнения 8+12" in selector_source
+    assert "`${team.name}: ${directActionLabel}`" in selector_source
+    assert "`${team.name}: ${playoffActionLabel}`" in selector_source
+    assert "`${team.name}: ${eliminationActionLabel}`" in selector_source
+    assert "selection.direct_teams.length > 0" in selection_source
+    assert "selection.elimination_teams.length > 0" in selection_source
+    assert '"Прогноз сохранён. Заполнен не полностью."' in readonly_source
+    assert '"Команды для прямого выхода или вылета не выбирались."' in (readonly_source)
+    assert '"Команды для прямого выхода или вылета не выбирались"' in (history_source)
+    assert '"Прогноз сохранён. Заполнен не полностью"' in history_source
+    assert "hasSwissStageSelectedTeams(prediction.prediction)" in card_source
+
+
+def test_general_stage_empty_selection_is_not_presented_as_saved() -> None:
+    selector_source = _function_source("createSwissStageTeamSelector")
+    card_source = _function_source("createSwissStagePredictionCard")
+
+    assert 'initialSelection && typeof initialSelection === "object"' in (
+        selector_source
+    )
+    assert "? initialFingerprint\n    : null" in selector_source
+    assert "const emptySelectionFingerprint = getPayloadFingerprint" in selector_source
+    assert "savedSelection === null && fingerprint === emptySelectionFingerprint" in (
+        selector_source
+    )
+    assert "? emptySelectionFingerprint" in selector_source
+    assert "lastSavedFingerprint = savedFingerprint" in selector_source
+    assert "onSaved(savedPrediction)" in selector_source
+    assert "showCurrentSavedStatus();" in selector_source
+    assert 'return allowPartial && !hasSelectedTeams() ? "empty" : "saved"' in (
+        selector_source
+    )
+    assert '"Выборов пока нет. Отметьте хотя бы одну команду «Напрямую» "' in (
+        selector_source
+    )
+    assert "allowPartial && !hasSelectedTeams() && isSaved" in selector_source
+    assert 'deadlineMessage = "Приём прогнозов завершён. Прогноз не был сохранён."' in (
+        selector_source
+    )
+    assert "hasSwissStageSelectedTeams(prediction.prediction)" in card_source
 
 
 def test_tma_prediction_count_separates_calculated_and_pending() -> None:
@@ -205,14 +285,14 @@ def test_tma_formats_swiss_stage_audit_result_with_team_names() -> None:
     assert "formatAuditSwissStageResult(after.actual_result, event)" in (summary_source)
 
 
-def test_empty_swiss_stage_deadline_uses_general_local_default() -> None:
+def test_empty_swiss_stage_deadline_stays_empty() -> None:
     settings_source = _function_source("createSwissStageSettingsForm")
 
-    assert "formatDateTimeLocalValue(prediction.deadline_at)" in settings_source
-    assert "|| getDefaultDateTimeLocal()" in settings_source
-    assert settings_source.index(
-        "formatDateTimeLocalValue(prediction.deadline_at)"
-    ) < settings_source.index("|| getDefaultDateTimeLocal()")
+    assert (
+        "deadlineInput.value = formatDateTimeLocalValue(prediction.deadline_at)"
+        in settings_source
+    )
+    assert "getDefaultDateTimeLocal" not in settings_source
 
 
 def test_swiss_stage_ui_defaults_to_three_plus_five() -> None:
@@ -351,12 +431,17 @@ def test_champions_league_uses_league_phase_copy_and_fixed_limits() -> None:
     assert 'contest.template_key === "champions_league_2026_27"' in (settings_source)
     assert "Команды общего этапа:" in settings_source
     assert "варианты «Напрямую», «Стыки» и «Вылет»" in settings_source
-    assert "частичный черновик сохраняется" in settings_source
+    assert "прогноз сохраняется после первого выбора «Напрямую» или «Вылет»" in (
+        settings_source
+    )
+    assert "его можно дополнить до 8 прямых выходов и 12 вылетов" in settings_source
     assert "Начало первого матча общего этапа" in settings_source
-    assert "getChampionsLeaguePlayoffTeams" not in readonly_source
-    assert "copy.playoffResult" not in readonly_source
-    assert "copy.playoffChoice" not in history_source
-    assert "getChampionsLeaguePlayoffTeams" not in history_source
+    assert 'templateKey === "champions_league_2026_27"' in readonly_source
+    assert "selection?.playoff_teams" in readonly_source
+    assert "copy.playoffResult" in readonly_source
+    assert 'templateKey === "champions_league_2026_27"' in history_source
+    assert "prediction?.prediction?.playoff_teams" in history_source
+    assert "copy.playoffChoice" in history_source
     assert "hasFixedChampionsLeagueLimits" in shared_source
     assert "directCount.disabled = hasFixedChampionsLeagueLimits" in shared_source
     assert "eliminationCount.disabled = hasFixedChampionsLeagueLimits" in shared_source

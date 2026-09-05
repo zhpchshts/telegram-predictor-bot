@@ -286,7 +286,7 @@ def test_swiss_stage_api_configures_predicts_and_records_result(
     } == {"Альфа", "Бета", "Гамма"}
 
 
-def test_general_stage_api_saves_partial_and_empty_drafts_until_deadline(
+def test_general_stage_api_counts_partial_and_clears_selection_until_deadline(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -323,6 +323,12 @@ def test_general_stage_api_saves_partial_and_empty_drafts_until_deadline(
     assert "playoff_teams" not in details["prediction"]
     assert len(details["prediction"]["direct_teams"]) == 5
     assert len(details["prediction"]["elimination_teams"]) == 9
+    partial_contest = client.get(
+        f"/api/tma/contests/{contest_id}",
+        headers=build_tma_headers(),
+    ).json()["contest"]
+    assert partial_contest["leaderboard"][0]["swiss_stage_prediction_count"] == 1
+    assert partial_contest["leaderboard"][0]["calculated_predictions_count"] == 0
 
     empty_response = client.put(
         f"/api/tma/contests/{contest_id}/swiss-stage-prediction",
@@ -331,11 +337,13 @@ def test_general_stage_api_saves_partial_and_empty_drafts_until_deadline(
     )
     assert empty_response.status_code == 200
     empty_prediction = empty_response.json()["swiss_stage_prediction"]["prediction"]
-    assert empty_prediction == {
-        "direct_teams": [],
-        "elimination_teams": [],
-        "is_complete": False,
-    }
+    assert empty_prediction is None
+    empty_contest = client.get(
+        f"/api/tma/contests/{contest_id}",
+        headers=build_tma_headers(),
+    ).json()["contest"]
+    assert empty_contest["leaderboard"][0].get("swiss_stage_prediction_count", 0) == 0
+    assert empty_contest["leaderboard"][0]["calculated_predictions_count"] == 0
 
     unknown_identity_field = client.put(
         f"/api/tma/contests/{contest_id}/swiss-stage-prediction",
@@ -358,9 +366,16 @@ def test_general_stage_api_saves_partial_and_empty_drafts_until_deadline(
         json={"direct_team_ids": team_ids[:1], "elimination_team_ids": []},
     )
     assert at_deadline_response.status_code == 409
+    closed_contest = client.get(
+        f"/api/tma/contests/{contest_id}",
+        headers=build_tma_headers(),
+    ).json()["contest"]
+    assert (
+        closed_contest["leaderboard"][0].get("swiss_stage_prediction_history") is None
+    )
 
 
-def test_general_stage_api_keeps_user_drafts_private_and_serializes_breakdown(
+def test_general_stage_api_keeps_partial_predictions_private_and_serializes_breakdown(
     monkeypatch,
     tmp_path: Path,
 ) -> None:

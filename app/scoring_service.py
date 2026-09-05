@@ -4,6 +4,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Literal
 
+from app.tournament_catalog import THE_INTERNATIONAL_2026_TEMPLATE_KEY
+
 MatchScoreType = Literal["exact_score", "goal_difference", "outcome"]
 TieResolutionMethod = Literal["aggregate", "extra_time", "penalties"]
 
@@ -348,7 +350,7 @@ def recalculate_match_prediction_scores(
     score_rows: list[tuple[int, int, MatchScoreType, int]] = []
 
     for prediction_row in prediction_rows:
-        if match_row["template_key"] == "the_international_2026":
+        if match_row["template_key"] == THE_INTERNATIONAL_2026_TEMPLATE_KEY:
             award = calculate_series_score_award(
                 predicted_home_score=int(prediction_row["predicted_home_score"]),
                 predicted_away_score=int(prediction_row["predicted_away_score"]),

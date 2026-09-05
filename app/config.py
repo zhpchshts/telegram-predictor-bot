@@ -4,6 +4,7 @@ import os
 import logging
 from dataclasses import dataclass
 from ipaddress import ip_address
+from math import isfinite
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -140,7 +141,7 @@ def _parse_positive_float_environment(name: str, *, default: float) -> float:
         parsed_value = float(value)
     except ValueError as error:
         raise RuntimeError(f"{name} must be a positive number.") from error
-    if parsed_value <= 0:
+    if not isfinite(parsed_value) or parsed_value <= 0:
         raise RuntimeError(f"{name} must be a positive number.")
     return parsed_value
 
