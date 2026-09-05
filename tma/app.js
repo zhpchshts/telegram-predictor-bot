@@ -11,6 +11,44 @@ const PREDICTION_FLUSH_EVENT = "tma:prediction-flush";
 const PREDICTION_SAVE_WAIT_TIMEOUT_MS = 15_000;
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
 const CONTEST_NAME_MAX_LENGTH = 80;
+const CHAMPIONS_LEAGUE_2026_27_TEAM_ORDER = new Map([
+  "Бавария",
+  "Арсенал",
+  "Барселона",
+  "Интер",
+  "ПСЖ",
+  "Реал Мадрид",
+  "Манчестер Сити",
+  "Ливерпуль",
+  "Боруссия Дортмунд",
+  "Астон Вилла",
+  "Манчестер Юнайтед",
+  "Штутгарт",
+  "Порту",
+  "Атлетико Мадрид",
+  "Рома",
+  "Спортинг",
+  "Наполи",
+  "Лейпциг",
+  "Комо",
+  "Будё-Глимт",
+  "ПСВ",
+  "Ланс",
+  "Фенербахче",
+  "Брюгге",
+  "Вильярреал",
+  "Бетис",
+  "Лилль",
+  "Славия Прага",
+  "АЕК",
+  "Галатасарай",
+  "Викинг",
+  "ЛАСК",
+  "Шахтёр",
+  "Фейеноорд",
+  "Слован Братислава",
+  "Сабах",
+].map((name, index) => [normalizeTournamentTeamName(name), index]));
 const CHAMPIONS_LEAGUE_PLAYOFF_ROUNDS = Object.freeze([
   Object.freeze({
     key: "playoff",
@@ -4736,6 +4774,22 @@ function getSwissStageScoringRule(prediction, templateKey = "") {
   return copy.scoringRule;
 }
 
+function normalizeTournamentTeamName(name) {
+  return name.trim().replace(/\s+/g, " ").toLowerCase().replace(/ё/g, "е");
+}
+
+function sortTournamentTeamsForDisplay(teams, templateKey) {
+  if (templateKey !== "champions_league_2026_27") {
+    return teams;
+  }
+  const getPosition = (team) => (
+    CHAMPIONS_LEAGUE_2026_27_TEAM_ORDER.get(
+      normalizeTournamentTeamName(team.name),
+    ) ?? CHAMPIONS_LEAGUE_2026_27_TEAM_ORDER.size
+  );
+  return [...teams].sort((left, right) => getPosition(left) - getPosition(right));
+}
+
 function getSwissStagePrediction(contest) {
   const prediction = contest?.swiss_stage_prediction;
 
@@ -4798,7 +4852,7 @@ function getSwissStagePrediction(contest) {
       ? prediction.maximum_points
       : null,
     candidates: Array.isArray(prediction.candidates)
-      ? prediction.candidates
+      ? sortTournamentTeamsForDisplay(prediction.candidates, contest.template_key)
       : [],
     prediction: prediction.prediction || null,
     actual_result: prediction.actual_result || null,
@@ -5964,7 +6018,10 @@ function getChampionPrediction(contest) {
       ? championPrediction.points
       : 5,
     candidates: Array.isArray(championPrediction.candidates)
-      ? championPrediction.candidates
+      ? sortTournamentTeamsForDisplay(
+        championPrediction.candidates,
+        contest.template_key,
+      )
       : [],
     prediction: championPrediction.prediction || null,
     actual_champion: championPrediction.actual_champion || null,
