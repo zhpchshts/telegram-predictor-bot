@@ -11,6 +11,12 @@ const PREDICTION_FLUSH_EVENT = "tma:prediction-flush";
 const PREDICTION_SAVE_WAIT_TIMEOUT_MS = 15_000;
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
 const CONTEST_NAME_MAX_LENGTH = 80;
+const CHAMPIONS_LEAGUE_2026_27_TEAM_ALIASES = new Map([
+  ["рб лейпциг", "лейпциг"],
+  ["реал бетис", "бетис"],
+  ["аек афины", "аек"],
+  ["шахтер донецк", "шахтер"],
+]);
 const CHAMPIONS_LEAGUE_2026_27_TEAM_ORDER = new Map([
   "Бавария",
   "Арсенал",
@@ -4782,11 +4788,12 @@ function sortTournamentTeamsForDisplay(teams, templateKey) {
   if (templateKey !== "champions_league_2026_27") {
     return teams;
   }
-  const getPosition = (team) => (
-    CHAMPIONS_LEAGUE_2026_27_TEAM_ORDER.get(
-      normalizeTournamentTeamName(team.name),
-    ) ?? CHAMPIONS_LEAGUE_2026_27_TEAM_ORDER.size
-  );
+  const getPosition = (team) => {
+    const name = normalizeTournamentTeamName(team.name);
+    return CHAMPIONS_LEAGUE_2026_27_TEAM_ORDER.get(
+      CHAMPIONS_LEAGUE_2026_27_TEAM_ALIASES.get(name) ?? name,
+    ) ?? CHAMPIONS_LEAGUE_2026_27_TEAM_ORDER.size;
+  };
   return [...teams].sort((left, right) => getPosition(left) - getPosition(right));
 }
 
