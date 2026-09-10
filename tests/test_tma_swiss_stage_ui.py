@@ -193,7 +193,8 @@ def test_general_stage_empty_selection_is_not_presented_as_saved() -> None:
         selector_source
     )
     assert "? emptySelectionFingerprint" in selector_source
-    assert "lastSavedFingerprint = savedFingerprint" in selector_source
+    assert "savedFingerprint !== fingerprint" in selector_source
+    assert "lastSavedFingerprint = fingerprint" in selector_source
     assert "onSaved(savedPrediction)" in selector_source
     assert "showCurrentSavedStatus();" in selector_source
     assert 'return allowPartial && !hasSelectedTeams() ? "empty" : "saved"' in (

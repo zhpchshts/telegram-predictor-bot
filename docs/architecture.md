@@ -74,7 +74,7 @@ characterization tests, а не механической нарезкой фай
 | Prediction reminders | `prediction_reminder_store.py`, `prediction_reminders.py`, `prediction_reminder_worker.py` | три одноимённых test files |
 | Match lifecycle | `match_lifecycle.py` | `test_match_lifecycle.py` |
 | SQLite schema/connections | `database.py`, manual scripts | `test_database.py`, `test_*_migration.py` |
-| Mini App | `tma/app.js`, `tma/styles.css` | `test_tma_*_ui.py`, `node --check tma/app.js` |
+| Mini App | `tma/app.js`, `tma/styles.css` | `test_tma_*_ui.py`, `tests/browser/`, `node --check tma/app.js` |
 
 ## Основные пути данных
 
@@ -101,6 +101,14 @@ history без response-contract и privacy tests.
 5. Endpoint переводит предметную ошибку в стабильный HTTP status/detail.
 
 Frontend-проверка удобна для UX, но backend остаётся authoritative.
+
+Автосохранение сериализует запросы одного прогноза. Ответ проверяется внутри
+очереди до подтверждения успеха; повтор использует тот же снимок и валидатор.
+После неопределённого результата отправки прежнее подтверждённое значение уже
+не доказывает состояние сервера, поэтому его повторный выбор тоже отправляется.
+Черновик переживает сетевые ошибки при переходах внутри открытого Mini App;
+терминальный отказ API очищается после отображения ошибки. Очередь находится
+в памяти страницы и не является постоянным offline-хранилищем.
 
 ### Общий турнир
 
@@ -182,6 +190,11 @@ python -m pytest
 ```powershell
 node --check tma/app.js
 ```
+
+Для изменений автосохранения запускать `python -m pytest tests/browser` с
+зависимостями из `requirements-browser.txt`. Стенд проверяет реальные UI-события,
+API и временную SQLite в Chromium/WebKit; установка и ограничения описаны в
+[`tests/browser/README.md`](../tests/browser/README.md).
 
 Если `node` отсутствует в PATH Codex desktop, использовать bundled executable
 из `load_workspace_dependencies`. Для локального изменения сначала запускаются

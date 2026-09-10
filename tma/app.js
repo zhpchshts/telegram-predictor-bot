@@ -244,9 +244,9 @@ async function apiRequestForCurrentView(path, options = {}) {
   return result;
 }
 
-function queuePredictionSave(queueKey, path, payload) {
+function queuePredictionSave(queueKey, path, payload, validateResult) {
   predictionSaveFailures.delete(queueKey);
-  const retryEntry = { path, payload };
+  const retryEntry = { path, payload, validateResult };
   predictionSaveRetryEntries.set(queueKey, retryEntry);
   const sendSave = () => apiRequest(
     path,
@@ -256,7 +256,12 @@ function queuePredictionSave(queueKey, path, payload) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     },
-  );
+  ).then((result) => {
+    // A successful HTTP response only acknowledges the save after its payload
+    // has been checked. Navigation retries must use the same validation.
+    validateResult(result);
+    return result;
+  });
   const previousSave = predictionSaveQueues.get(queueKey);
   const request = previousSave
     ? previousSave.catch(() => undefined).then(sendSave)
@@ -306,36 +311,46 @@ function recordPredictionSaveFailure(queueKey, error) {
   predictionSaveFailures.set(queueKey, error);
 }
 
-function queueMatchPredictionSave(contestId, matchId, payload) {
+function queueMatchPredictionSave(contestId, matchId, payload, validateResult) {
   return queuePredictionSave(
     `${contestId}:match:${matchId}`,
     `/api/tma/contests/${contestId}/matches/${matchId}/prediction`,
     payload,
+    validateResult,
   );
 }
 
-function queueTwoLeggedTiePredictionSave(contestId, tieId, payload) {
+function queueTwoLeggedTiePredictionSave(contestId, tieId, payload, validateResult) {
   return queuePredictionSave(
     `${contestId}:two-legged-tie:${tieId}`,
     `/api/tma/contests/${contestId}/two-legged-ties/${tieId}/prediction`,
-    payload,
+    { predicted_advancing_team_id: payload.predicted_advancing_team_id },
+    validateResult,
   );
 }
 
-function queueSwissStagePredictionSave(contestId, payload) {
+function queueSwissStagePredictionSave(contestId, payload, validateResult) {
   return queuePredictionSave(
     `${contestId}:swiss-stage`,
     `/api/tma/contests/${contestId}/swiss-stage-prediction`,
     payload,
+    validateResult,
   );
 }
 
-function queueChampionPredictionSave(contestId, payload) {
+function queueChampionPredictionSave(contestId, payload, validateResult) {
   return queuePredictionSave(
     `${contestId}:champion`,
     `/api/tma/contests/${contestId}/champion-prediction`,
     payload,
+    validateResult,
   );
+}
+
+function isRetryablePredictionSaveError(error) {
+  const status = error?.status;
+  return !Number.isSafeInteger(status)
+    || status === 408 || status === 429 || status >= 500;
 }
 
 async function waitForPredictionSaves(contestId) {
@@ -351,19 +366,26 @@ async function waitForPredictionSaves(contestId) {
         if (failedEntry) {
           const [failedQueueKey] = failedEntry;
           const retryEntry = predictionSaveRetryEntries.get(failedQueueKey);
-          if (retryEntry && !retriedFailureKeys.has(failedQueueKey)) {
+          if (
+            retryEntry && !retriedFailureKeys.has(failedQueueKey)
+            && isRetryablePredictionSaveError(failedEntry[1])
+          ) {
             retriedFailureKeys.add(failedQueueKey);
             predictionSaveFailures.delete(failedQueueKey);
             void queuePredictionSave(
               failedQueueKey,
               retryEntry.path,
               retryEntry.payload,
+              retryEntry.validateResult,
             );
             await Promise.resolve();
             continue;
           }
-          predictionSaveFailures.delete(failedEntry[0]);
-          predictionSaveRetryEntries.delete(failedEntry[0]);
+          // Keep ambiguous saves across failed openings, but let a later GET
+          // recover from a deleted match or another definitive rejection.
+          if (!isRetryablePredictionSaveError(failedEntry[1])) {
+            clearPredictionSaveFailure(failedQueueKey);
+          }
           throw failedEntry[1];
         }
         return;
@@ -4062,6 +4084,7 @@ function createMatchPredictionSection(contest, match) {
 
   let isSaving = false;
   let predictionClosed = false;
+  let hasUnconfirmedSave = false;
   let lastSavedFingerprint = prediction
     ? getPayloadFingerprint({
         predicted_home_score: prediction.home_score,
@@ -4100,10 +4123,13 @@ function createMatchPredictionSection(contest, match) {
     const payload = readPredictionPayload();
     const isSaved = (
       payload.isReady
+      && !hasUnconfirmedSave
       && getPayloadFingerprint(payload) === lastSavedFingerprint
     );
     setSaveStatus(
-      isSaved
+      hasUnconfirmedSave
+        ? "Приём прогнозов завершён. Сохранение последних изменений не подтверждено."
+        : isSaved
         ? "Сохранено. Приём прогнозов завершён."
         : "Приём прогнозов завершён. Последние изменения не сохранены.",
       isSaved ? "saved" : "closed",
@@ -4147,7 +4173,10 @@ function createMatchPredictionSection(contest, match) {
       return;
     }
 
-    if (!isSaving && getPayloadFingerprint(payload) === lastSavedFingerprint) {
+    if (
+      !isSaving && !hasUnconfirmedSave
+      && getPayloadFingerprint(payload) === lastSavedFingerprint
+    ) {
       clearPredictionSaveFailure(saveQueueKey);
       setSaveStatus("Сохранено.", "saved");
       return;
@@ -4181,12 +4210,14 @@ function createMatchPredictionSection(contest, match) {
     }
 
     const fingerprint = getPayloadFingerprint(payload);
-    if (fingerprint === lastSavedFingerprint) {
+    if (!hasUnconfirmedSave && fingerprint === lastSavedFingerprint) {
       clearPredictionSaveFailure(saveQueueKey);
       setSaveStatus("Сохранено.", "saved");
       return;
     }
 
+    const wasSaveUnconfirmed = hasUnconfirmedSave;
+    hasUnconfirmedSave = true;
     isSaving = true;
     setSaveStatus("Сохраняем…", "saving");
 
@@ -4195,20 +4226,24 @@ function createMatchPredictionSection(contest, match) {
         contest.id,
         match.id,
         payload,
+        (response) => {
+          const savedFingerprint = getSavedPredictionFingerprint(
+            response?.prediction,
+          );
+          if (savedFingerprint === null || savedFingerprint !== fingerprint) {
+            throw new Error("Сервер вернул некорректный ответ при сохранении прогноза.");
+          }
+        },
       );
-      const savedFingerprint = getSavedPredictionFingerprint(
-        result?.prediction,
-      );
-      if (savedFingerprint === null || savedFingerprint !== fingerprint) {
-        throw new Error("Сервер вернул некорректный ответ при сохранении прогноза.");
-      }
 
       match.prediction = result.prediction;
-      lastSavedFingerprint = savedFingerprint;
+      lastSavedFingerprint = getSavedPredictionFingerprint(result.prediction);
+      hasUnconfirmedSave = false;
     } catch (error) {
       isSaving = false;
       recordPredictionSaveFailure(saveQueueKey, error);
       if (error?.status === 409) {
+        hasUnconfirmedSave = wasSaveUnconfirmed;
         predictionClosed = true;
       }
       if (syncPredictionDeadline()) {
@@ -4484,6 +4519,7 @@ function createTwoLeggedTiePredictionListItem(contest, tie) {
   }
 
   let isSaving = false;
+  let hasUnconfirmedSave = false;
   let lastSavedFingerprint = Number.isSafeInteger(prediction?.advancing_team_id)
     ? String(prediction.advancing_team_id)
     : null;
@@ -4507,10 +4543,13 @@ function createTwoLeggedTiePredictionListItem(contest, tie) {
     const payload = readPredictionPayload();
     const isSaved = (
       payload.isReady
+      && !hasUnconfirmedSave
       && String(payload.predicted_advancing_team_id) === lastSavedFingerprint
     );
     setSaveStatus(
-      isSaved
+      hasUnconfirmedSave
+        ? "Прогноз на проход закрыт. Сохранение последнего изменения не подтверждено."
+        : isSaved
         ? "Сохранено. Прогноз на проход закрыт."
         : "Прогноз на проход закрыт. Последнее изменение не сохранено.",
       isSaved ? "saved" : "closed",
@@ -4549,11 +4588,13 @@ function createTwoLeggedTiePredictionListItem(contest, tie) {
       return;
     }
     const fingerprint = String(payload.predicted_advancing_team_id);
-    if (fingerprint === lastSavedFingerprint) {
+    if (!hasUnconfirmedSave && fingerprint === lastSavedFingerprint) {
       clearPredictionSaveFailure(saveQueueKey);
       setSaveStatus("Сохранено.", "saved");
       return;
     }
+    const wasSaveUnconfirmed = hasUnconfirmedSave;
+    hasUnconfirmedSave = true;
     isSaving = true;
     setSaveStatus("Сохраняем…", "saving");
     try {
@@ -4561,26 +4602,33 @@ function createTwoLeggedTiePredictionListItem(contest, tie) {
         contest.id,
         tieId,
         payload,
+        (response) => {
+          const savedPrediction = response?.prediction
+            || response?.two_legged_tie?.prediction
+            || response?.tie?.prediction;
+          const savedTeamId = savedPrediction?.advancing_team_id;
+          if (
+            !Number.isSafeInteger(savedTeamId) ||
+            savedTeamId <= 0 ||
+            String(savedTeamId) !== fingerprint
+          ) {
+            throw new Error(
+              "Сервер вернул некорректный ответ при сохранении прогноза на проход.",
+            );
+          }
+        },
       );
       const savedPrediction = response?.prediction
         || response?.two_legged_tie?.prediction
         || response?.tie?.prediction;
-      const savedTeamId = savedPrediction?.advancing_team_id;
-      if (
-        !Number.isSafeInteger(savedTeamId) ||
-        savedTeamId <= 0 ||
-        String(savedTeamId) !== fingerprint
-      ) {
-        throw new Error(
-          "Сервер вернул некорректный ответ при сохранении прогноза на проход.",
-        );
-      }
       tie.prediction = savedPrediction;
-      lastSavedFingerprint = String(savedTeamId);
+      lastSavedFingerprint = String(savedPrediction.advancing_team_id);
+      hasUnconfirmedSave = false;
     } catch (error) {
       isSaving = false;
       recordPredictionSaveFailure(saveQueueKey, error);
       if (error?.status === 409) {
+        hasUnconfirmedSave = wasSaveUnconfirmed;
         tie.is_prediction_open = false;
       }
       if (syncPredictionDeadline()) {
@@ -5126,10 +5174,14 @@ function createSwissStageTeamSelector(
     ? initialFingerprint
     : null;
   let isSaving = false;
+  let hasUnconfirmedSave = false;
   let saveTimer = null;
   let deadlineTimer = null;
 
   function isDirty(payload = readPredictionPayload()) {
+    if (hasUnconfirmedSave) {
+      return true;
+    }
     const fingerprint = getPayloadFingerprint(payload);
     return lastSavedFingerprint === null
       ? fingerprint !== initialFingerprint
@@ -5206,11 +5258,16 @@ function createSwissStageTeamSelector(
     sync();
     const currentFingerprint = getPayloadFingerprint(readPredictionPayload());
     const isSaved = (
+      !hasUnconfirmedSave &&
       lastSavedFingerprint !== null &&
       currentFingerprint === lastSavedFingerprint
     );
     let deadlineMessage;
-    if (isSaved && (!allowPartial || hasSelectedTeams())) {
+    if (hasUnconfirmedSave) {
+      deadlineMessage = (
+        "Приём прогнозов завершён. Сохранение последних изменений не подтверждено."
+      );
+    } else if (isSaved && (!allowPartial || hasSelectedTeams())) {
       deadlineMessage = allowPartial && !isSelectionComplete()
         ? "Прогноз сохранён. Заполнен не полностью. Приём прогнозов завершён."
         : "Прогноз сохранён. Приём прогнозов завершён.";
@@ -5428,35 +5485,42 @@ function createSwissStageTeamSelector(
     }
 
     const fingerprint = getPayloadFingerprint(payload);
+    const wasSaveUnconfirmed = hasUnconfirmedSave;
+    hasUnconfirmedSave = true;
     isSaving = true;
     setSaveStatus("Сохраняем…", "saving");
     try {
       const result = await queueSwissStagePredictionSave(
         contestId,
         payload,
+        (response) => {
+          const savedPrediction = response?.swiss_stage_prediction;
+          const savedSelection = savedPrediction?.prediction;
+          const savedFingerprint = (
+            savedSelection === null && fingerprint === emptySelectionFingerprint
+          )
+            ? emptySelectionFingerprint
+            : getSavedSelectionFingerprint(savedSelection);
+          if (
+            !savedPrediction ||
+            typeof savedPrediction.is_open !== "boolean" ||
+            savedFingerprint === null ||
+            savedFingerprint !== fingerprint
+          ) {
+            throw new Error("Сервер вернул некорректный ответ.");
+          }
+        },
       );
       const savedPrediction = result?.swiss_stage_prediction;
-      const savedSelection = savedPrediction?.prediction;
-      const savedFingerprint = (
-        savedSelection === null && fingerprint === emptySelectionFingerprint
-      )
-        ? emptySelectionFingerprint
-        : getSavedSelectionFingerprint(savedSelection);
-      if (
-        !savedPrediction ||
-        typeof savedPrediction.is_open !== "boolean" ||
-        savedFingerprint === null ||
-        savedFingerprint !== fingerprint
-      ) {
-        throw new Error("Сервер вернул некорректный ответ.");
-      }
       prediction.is_open = savedPrediction.is_open;
-      lastSavedFingerprint = savedFingerprint;
+      lastSavedFingerprint = fingerprint;
+      hasUnconfirmedSave = false;
       onSaved(savedPrediction);
     } catch (error) {
       isSaving = false;
       recordPredictionSaveFailure(saveQueueKey, error);
       if (error?.status === 409) {
+        hasUnconfirmedSave = wasSaveUnconfirmed;
         prediction.is_open = false;
       }
       if (syncPredictionDeadline()) {
@@ -6464,6 +6528,7 @@ function createChampionPredictionChoiceSection(
   );
   const saveQueueKey = `${contest.id}:champion`;
   let isSaving = false;
+  let hasUnconfirmedSave = false;
   let saveTimer = null;
   let deadlineTimer = null;
   const initialFingerprint = championPrediction.prediction
@@ -6497,6 +6562,9 @@ function createChampionPredictionChoiceSection(
   }
 
   function isDirty(payload = readPredictionPayload()) {
+    if (hasUnconfirmedSave) {
+      return true;
+    }
     const fingerprint = getPayloadFingerprint(payload);
     return lastSavedFingerprint === null
       ? fingerprint !== initialFingerprint
@@ -6530,10 +6598,15 @@ function createChampionPredictionChoiceSection(
     const payload = readPredictionPayload();
     const isSaved = (
       payload.isReady &&
+      !hasUnconfirmedSave &&
       getPayloadFingerprint(payload) === lastSavedFingerprint
     );
     let deadlineMessage;
-    if (isSaved) {
+    if (hasUnconfirmedSave) {
+      deadlineMessage = (
+        "Приём прогнозов завершён. Сохранение последних изменений не подтверждено."
+      );
+    } else if (isSaved) {
       deadlineMessage = "Прогноз сохранён. Приём прогнозов завершён.";
     } else if (lastSavedFingerprint === null && !payload.isReady) {
       deadlineMessage = "Приём прогнозов завершён. Прогноз не был сохранён.";
@@ -6619,30 +6692,37 @@ function createChampionPredictionChoiceSection(
     }
 
     const fingerprint = getPayloadFingerprint(payload);
+    const wasSaveUnconfirmed = hasUnconfirmedSave;
+    hasUnconfirmedSave = true;
     isSaving = true;
     setSaveStatus("Сохраняем…", "saving");
     try {
-      const result = await queueChampionPredictionSave(contest.id, {
-        predicted_team_id: payload.predicted_team_id,
-      });
-      const savedTeamId = result?.prediction?.id;
-      if (
-        !Number.isSafeInteger(savedTeamId) ||
-        savedTeamId <= 0 ||
-        savedTeamId !== payload.predicted_team_id ||
-        typeof result.prediction.name !== "string" ||
-        !result.prediction.name
-      ) {
-        throw new Error(
-          "Сервер вернул некорректный ответ при сохранении прогноза.",
-        );
-      }
+      const result = await queueChampionPredictionSave(
+        contest.id,
+        { predicted_team_id: payload.predicted_team_id },
+        (response) => {
+          const savedTeamId = response?.prediction?.id;
+          if (
+            !Number.isSafeInteger(savedTeamId) ||
+            savedTeamId <= 0 ||
+            savedTeamId !== payload.predicted_team_id ||
+            typeof response.prediction.name !== "string" ||
+            !response.prediction.name
+          ) {
+            throw new Error(
+              "Сервер вернул некорректный ответ при сохранении прогноза.",
+            );
+          }
+        },
+      );
       championPrediction.prediction = result.prediction;
-      lastSavedFingerprint = String(savedTeamId);
+      lastSavedFingerprint = String(result.prediction.id);
+      hasUnconfirmedSave = false;
     } catch (error) {
       isSaving = false;
       recordPredictionSaveFailure(saveQueueKey, error);
       if (error?.status === 409) {
+        hasUnconfirmedSave = wasSaveUnconfirmed;
         championPrediction.is_open = false;
       }
       if (syncPredictionDeadline()) {

@@ -127,6 +127,33 @@ Telegram не принял сообщение. Если запрос мог до
 публичные тексты и визуальные принципы — в
 [`docs/branding.md`](docs/branding.md).
 
+## Браузерные проверки автосохранения
+
+Тесты в `tests/browser/` запускают исходные HTML и JavaScript Mini App в браузере
+и обращаются к настоящему FastAPI API с отдельной временной SQLite-базой.
+Тестовый транспорт позволяет задержать или потерять ответ до и после записи
+прогноза. Telegram polling и фоновые воркеры в стенде не запускаются.
+
+В активированном виртуальном окружении установите тестовые зависимости:
+
+```powershell
+python -m pip install -r requirements.txt -r requirements-browser.txt
+python -m playwright install chromium webkit
+python -m pytest tests/browser
+$env:TMA_TEST_BROWSER = "webkit"
+python -m pytest tests/browser
+Remove-Item Env:TMA_TEST_BROWSER
+```
+
+По умолчанию используется Chromium. CI отдельно запускает проверки в Chromium
+и WebKit. При установленном Playwright браузерные сценарии входят и в обычный
+`python -m pytest`; без дополнительных зависимостей они пропускаются, поэтому
+production-образ не требует установки браузеров. Снимки и трассы неуспешных
+проверок сохраняются в `tmp/browser-artifacts/`.
+
+Стенд проверяет мобильную ширину экрана и события ухода в фон/возвращения,
+но не заменяет проверку внутри Telegram на физическом устройстве.
+
 ## Локальный запуск
 
 Понадобятся Python 3.14 и Telegram-бот, созданный через BotFather.

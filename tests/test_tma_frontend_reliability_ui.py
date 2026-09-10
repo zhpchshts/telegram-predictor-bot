@@ -123,8 +123,12 @@ def test_participant_autosaves_are_flushed_and_serialized_across_renders() -> No
     assert "queuePredictionSave(" in wait_source
     assert "retryEntry.path" in wait_source
     assert "retryEntry.payload" in wait_source
-    assert "predictionSaveFailures.delete(failedEntry[0])" in wait_source
-    assert "predictionSaveRetryEntries.delete(failedEntry[0])" in wait_source
+    # Failed navigation must retain the draft for a later opening. Executable
+    # coverage lives in tests/browser/test_match_autosave.py.
+    assert "predictionSaveFailures.delete(failedEntry[0])" not in wait_source
+    assert "predictionSaveRetryEntries.delete(failedEntry[0])" not in wait_source
+    assert "retryEntry.validateResult" in wait_source
+    assert "validateResult(result)" in queue_source
     assert "throw failedEntry[1]" in wait_source
     assert "await Promise.resolve()" in wait_source
     assert "Promise.race([drainSaves(), timeout])" in wait_source

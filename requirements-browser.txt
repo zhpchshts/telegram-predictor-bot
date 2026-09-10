@@ -1,0 +1,2 @@
+# Optional executable Telegram Mini App regressions; no frontend build tooling.
+playwright==1.62.0
