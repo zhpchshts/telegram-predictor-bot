@@ -7,7 +7,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from aiogram import Bot
+from aiogram import Bot, Dispatcher
+from aiogram.dispatcher.dispatcher import DEFAULT_BACKOFF_CONFIG
+from aiogram.exceptions import TelegramNetworkError
+from aiogram.utils.backoff import Backoff
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -64,6 +67,35 @@ def _create_telegram_bot(*, token: str, fallback_ips: tuple[str, ...]) -> Bot:
     return Bot(
         token=token,
         session=TelegramApiAiohttpSession(fallback_ips=fallback_ips),
+    )
+
+
+async def _run_telegram_polling(
+    *,
+    bot: Bot,
+    dispatcher: Dispatcher,
+    ready: asyncio.Event,
+) -> None:
+    backoff = Backoff(config=DEFAULT_BACKOFF_CONFIG)
+    while True:
+        try:
+            # aiogram's initial getMe runs before its getUpdates retry loop.
+            # Cache the bot identity before entering polling so startup can retry.
+            await bot.me()
+        except TelegramNetworkError as error:
+            logger.warning(
+                "Telegram polling startup failed (%s); retrying in %.1f seconds.",
+                type(error).__name__,
+                backoff.next_delay,
+            )
+            await backoff.asleep()
+        else:
+            break
+
+    ready.set()
+    await dispatcher.start_polling(
+        bot,
+        allowed_updates=dispatcher.resolve_used_update_types(),
     )
 
 
@@ -131,6 +163,8 @@ async def _send_startup_healthcheck_notification(
 
 def _background_task_statuses(
     background_tasks: dict[str, asyncio.Task[None]] | None,
+    *,
+    telegram_polling_ready: asyncio.Event | None = None,
 ) -> dict[str, str]:
     if background_tasks is None:
         return {name: "missing" for name in EXPECTED_BACKGROUND_TASK_NAMES}
@@ -143,6 +177,12 @@ def _background_task_statuses(
             statuses[name] = "missing"
         elif task.done():
             statuses[name] = "stopped"
+        elif (
+            name == "telegram-polling"
+            and telegram_polling_ready is not None
+            and not telegram_polling_ready.is_set()
+        ):
+            statuses[name] = "starting"
         else:
             statuses[name] = "ok"
     return statuses
@@ -153,7 +193,10 @@ def _build_health_response(request: Request) -> JSONResponse:
         getattr(request.app.state, "database_path", None)
     )
     task_statuses = _background_task_statuses(
-        getattr(request.app.state, "background_tasks", None)
+        getattr(request.app.state, "background_tasks", None),
+        telegram_polling_ready=getattr(
+            request.app.state, "telegram_polling_ready", None
+        ),
     )
     healthy = database_ok and all(
         task_status == "ok" for task_status in task_statuses.values()
@@ -221,11 +264,14 @@ def create_app() -> FastAPI:
 
             app.state.telegram_username_resolver = username_resolver
             dispatcher = create_dispatcher(settings)
+            telegram_polling_ready = asyncio.Event()
+            app.state.telegram_polling_ready = telegram_polling_ready
 
             polling_task = asyncio.create_task(
-                dispatcher.start_polling(
-                    bot,
-                    allowed_updates=dispatcher.resolve_used_update_types(),
+                _run_telegram_polling(
+                    bot=bot,
+                    dispatcher=dispatcher,
+                    ready=telegram_polling_ready,
                 ),
                 name="telegram-polling",
             )
@@ -341,6 +387,7 @@ def create_app() -> FastAPI:
                     for state_name in (
                         "telegram_bot",
                         "telegram_username_resolver",
+                        "telegram_polling_ready",
                         "background_tasks",
                         "database_path",
                     ):

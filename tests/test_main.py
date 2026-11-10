@@ -3,12 +3,56 @@ from pathlib import Path
 import re
 from types import SimpleNamespace
 
+from aiogram import Bot, Dispatcher
+from aiogram.client.session.base import BaseSession
+from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+from aiogram.methods import GetMe, GetUpdates
+from aiogram.types import User
+from aiogram.utils.backoff import Backoff
 from fastapi.testclient import TestClient
 import pytest
 
 from app import main
 from app.database import initialize_database
 from app.main import create_app
+
+
+class _PollingSession(BaseSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.get_me_error: Exception | None = None
+        self.get_me_calls = 0
+        self.get_me_started = asyncio.Event()
+        self.get_me_allowed = asyncio.Event()
+        self.get_me_allowed.set()
+        self.get_updates_started = asyncio.Event()
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+    async def make_request(self, bot, method, timeout=None):
+        if isinstance(method, GetMe):
+            self.get_me_calls += 1
+            self.get_me_started.set()
+            await self.get_me_allowed.wait()
+            if self.get_me_error is not None:
+                raise self.get_me_error
+            return User(
+                id=123456789,
+                is_bot=True,
+                first_name="Test",
+                username="test_bot",
+            )
+        if isinstance(method, GetUpdates):
+            self.get_updates_started.set()
+            await asyncio.Event().wait()
+            return []
+        raise AssertionError(f"Unexpected Telegram method: {type(method).__name__}")
+
+    async def stream_content(self, *args, **kwargs):
+        if False:
+            yield b""
 
 
 def _tma_source() -> str:
@@ -123,6 +167,7 @@ def test_health_checks_database_and_background_tasks(tmp_path: Path) -> None:
 def test_health_reports_missing_database_and_stopped_task(tmp_path: Path) -> None:
     app = create_app()
     app.state.database_path = tmp_path / "uninitialized.db"
+    app.state.telegram_polling_ready = asyncio.Event()
     app.state.background_tasks = {
         name: SimpleNamespace(done=lambda name=name: name == "telegram-polling")
         for name in main.EXPECTED_BACKGROUND_TASK_NAMES
@@ -150,6 +195,188 @@ def test_health_reports_missing_database_and_stopped_task(tmp_path: Path) -> Non
     assert head_response.status_code == response.status_code
     assert head_response.content == b""
     assert head_response.headers["content-length"] == response.headers["content-length"]
+
+
+def test_polling_recovers_after_initial_network_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise_lifespan() -> None:
+        session = _PollingSession()
+        session.get_me_error = TelegramNetworkError(
+            method=GetMe(),
+            message="Synthetic no route to host",
+        )
+        bot = Bot(
+            token="123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+            session=session,
+        )
+        dispatcher = Dispatcher()
+        retry_started = asyncio.Event()
+        retry_allowed = asyncio.Event()
+
+        async def wait_before_retry(_backoff) -> None:
+            retry_started.set()
+            await retry_allowed.wait()
+
+        async def idle_worker(**_kwargs) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(Backoff, "asleep", wait_before_retry)
+        monkeypatch.setattr(
+            main,
+            "load_settings",
+            lambda: SimpleNamespace(
+                bot_token="dummy",
+                bot_username="test_bot",
+                telegram_bot_api_fallback_ips=(),
+                database_path=tmp_path / "predictor.db",
+                telegram_api_id=None,
+                telegram_api_hash=None,
+                healthcheck_chat_id=None,
+            ),
+        )
+        monkeypatch.setattr(main, "_create_telegram_bot", lambda **_kwargs: bot)
+        monkeypatch.setattr(main, "create_dispatcher", lambda _settings: dispatcher)
+        for worker_name in (
+            "run_match_prediction_publication_worker",
+            "run_contest_publication_worker",
+            "run_prediction_reminder_worker",
+            "run_match_lifecycle_worker",
+            "run_champions_league_sync_worker",
+        ):
+            monkeypatch.setattr(main, worker_name, idle_worker)
+
+        app = create_app()
+        client = TestClient(app)
+        async with app.router.lifespan_context(app):
+            await asyncio.wait_for(retry_started.wait(), timeout=1)
+            polling = app.state.background_tasks["telegram-polling"]
+            response = client.get("/health")
+            head_response = client.head("/health")
+
+            assert response.status_code == head_response.status_code == 503
+            assert response.json()["checks"]["database"] == "ok"
+            assert response.json()["checks"]["background_tasks"] == {
+                name: "starting" if name == "telegram-polling" else "ok"
+                for name in main.EXPECTED_BACKGROUND_TASK_NAMES
+            }
+            assert head_response.content == b""
+            assert client.get("/tma/").status_code == 200
+            assert not polling.done()
+            assert session.get_me_calls == 1
+
+            session.get_me_error = None
+            retry_allowed.set()
+            await asyncio.wait_for(session.get_updates_started.wait(), timeout=1)
+
+            assert session.get_me_calls == 2
+            assert not polling.done()
+            assert client.get("/health").status_code == 200
+            assert client.head("/health").status_code == 200
+
+            await dispatcher.stop_polling()
+            await asyncio.wait_for(polling, timeout=1)
+            stopped_response = client.get("/health")
+            assert stopped_response.status_code == 503
+            assert (
+                stopped_response.json()["checks"]["background_tasks"][
+                    "telegram-polling"
+                ]
+                == "stopped"
+            )
+
+        assert session.close_calls == 2
+        assert not hasattr(app.state, "telegram_polling_ready")
+
+    asyncio.run(exercise_lifespan())
+
+
+@pytest.mark.parametrize("error_kind", ("unauthorized", "programming"))
+def test_polling_does_not_retry_permanent_startup_errors(error_kind: str) -> None:
+    async def exercise_polling() -> None:
+        session = _PollingSession()
+        error = (
+            TelegramUnauthorizedError(method=GetMe(), message="Synthetic unauthorized")
+            if error_kind == "unauthorized"
+            else RuntimeError("Synthetic programming error")
+        )
+        session.get_me_error = error
+        bot = Bot(
+            token="123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+            session=session,
+        )
+        ready = asyncio.Event()
+        try:
+            with pytest.raises(type(error), match="Synthetic"):
+                await asyncio.wait_for(
+                    main._run_telegram_polling(
+                        bot=bot,
+                        dispatcher=Dispatcher(),
+                        ready=ready,
+                    ),
+                    timeout=1,
+                )
+            assert session.get_me_calls == 1
+            assert not ready.is_set()
+            assert not session.get_updates_started.is_set()
+            assert session.close_calls == 0
+        finally:
+            await session.close()
+
+    asyncio.run(exercise_polling())
+
+
+@pytest.mark.parametrize("phase", ("request", "backoff"))
+def test_polling_startup_can_be_cancelled(
+    phase: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise_polling() -> None:
+        session = _PollingSession()
+        backoff_started = asyncio.Event()
+
+        async def wait_before_retry(_backoff) -> None:
+            backoff_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(Backoff, "asleep", wait_before_retry)
+        if phase == "request":
+            session.get_me_allowed.clear()
+        else:
+            session.get_me_error = TelegramNetworkError(
+                method=GetMe(),
+                message="Synthetic no route to host",
+            )
+        bot = Bot(
+            token="123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+            session=session,
+        )
+        ready = asyncio.Event()
+        polling = asyncio.create_task(
+            main._run_telegram_polling(
+                bot=bot,
+                dispatcher=Dispatcher(),
+                ready=ready,
+            )
+        )
+        try:
+            waiting = session.get_me_started if phase == "request" else backoff_started
+            await asyncio.wait_for(waiting.wait(), timeout=1)
+            polling.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(polling, timeout=1)
+
+            assert session.get_me_calls == 1
+            assert not ready.is_set()
+            assert not session.get_updates_started.is_set()
+            assert session.close_calls == 0
+        finally:
+            polling.cancel()
+            await asyncio.gather(polling, return_exceptions=True)
+            await session.close()
+
+    asyncio.run(exercise_polling())
 
 
 def test_create_telegram_bot_uses_configured_fallback_ips(monkeypatch) -> None:
@@ -314,6 +541,9 @@ def test_lifespan_cleans_up_after_a_background_task_failure(
     class FakeBot:
         def __init__(self, **_kwargs) -> None:
             self.session = FakeSession()
+
+        async def me(self) -> None:
+            return None
 
     class FakeUsernameResolver:
         def __init__(self, **_kwargs) -> None:
