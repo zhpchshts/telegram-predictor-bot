@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import json
+
 import pytest
 
 from app.tma_launch import (
@@ -71,6 +74,31 @@ def test_launch_token_omits_title_when_it_would_exceed_limit() -> None:
     assert context.chat_id == -1001234567890
     assert context.chat_type == "supergroup"
     assert context.chat_title is None
+
+
+@pytest.mark.parametrize(
+    "invalid_signature", ["invalid", "я"], ids=["ascii", "non-ascii"]
+)
+def test_launch_token_rejects_malformed_signature_as_domain_error(
+    invalid_signature: str,
+) -> None:
+    envelope = {
+        "payload": {
+            "chat_id": -1001234567890,
+            "chat_type": "supergroup",
+            "expires_at": NOW + 60,
+        },
+        "signature": invalid_signature,
+    }
+    token = (
+        base64.b32encode(json.dumps(envelope, separators=(",", ":")).encode())
+        .decode()
+        .rstrip("=")
+    )
+
+    # An invalid signature is an authentication error, not an uncaught TypeError.
+    with pytest.raises(TmaLaunchTokenError, match="invalid"):
+        validate_tma_launch_token(token, secret=SECRET, now=NOW)
 
 
 def test_launch_token_rejects_wrong_secret() -> None:

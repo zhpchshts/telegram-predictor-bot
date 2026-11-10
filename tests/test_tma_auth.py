@@ -104,12 +104,13 @@ def test_validate_telegram_init_data_rejects_missing_hash() -> None:
         )
 
 
-def test_validate_telegram_init_data_rejects_invalid_hash() -> None:
+@pytest.mark.parametrize("invalid_hash", ["invalid", "я"], ids=["ascii", "non-ascii"])
+def test_validate_telegram_init_data_rejects_invalid_hash(invalid_hash: str) -> None:
     init_data = urlencode(
         {
             "auth_date": "1700000000",
             "user": '{"id":123}',
-            "hash": "invalid",
+            "hash": invalid_hash,
         }
     )
 
@@ -120,6 +121,7 @@ def test_validate_telegram_init_data_rejects_invalid_hash() -> None:
         validate_telegram_init_data(
             init_data,
             bot_token=BOT_TOKEN,
+            now=1_700_000_060,
         )
 
 

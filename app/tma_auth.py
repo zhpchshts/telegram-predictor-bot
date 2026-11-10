@@ -141,7 +141,9 @@ def validate_telegram_init_data(
         bot_token=bot_token,
     )
 
-    if not hmac.compare_digest(expected_hash, received_hash):
+    if not received_hash.isascii() or not hmac.compare_digest(
+        expected_hash, received_hash
+    ):
         raise TelegramInitDataError("init_data hash is invalid.")
 
     auth_date = parse_auth_date(fields)

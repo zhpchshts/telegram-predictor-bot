@@ -107,7 +107,9 @@ def validate_tma_launch_token(
 
     expected_signature = _sign_payload(payload, secret=secret)
 
-    if not hmac.compare_digest(signature, expected_signature):
+    if not signature.isascii() or not hmac.compare_digest(
+        signature, expected_signature
+    ):
         raise TmaLaunchTokenError("TMA launch token is invalid.")
 
     expires_at = payload.get("expires_at")

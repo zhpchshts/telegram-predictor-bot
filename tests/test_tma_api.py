@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode
 
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import GetChatAdministrators
@@ -767,6 +769,55 @@ def test_bootstrap_rejects_missing_init_data(
     assert response.json() == {
         "detail": "Telegram init data is required.",
     }
+
+
+@pytest.mark.parametrize(
+    "invalid_signature", ["invalid", "я"], ids=["ascii", "non-ascii"]
+)
+@pytest.mark.parametrize("signature_source", ["init-data", "launch-token"])
+def test_bootstrap_rejects_malformed_signatures_without_side_effects(
+    monkeypatch,
+    tmp_path: Path,
+    signature_source: str,
+    invalid_signature: str,
+) -> None:
+    database_path = tmp_path / "malformed-signature.db"
+    initialize_database(database_path)
+    configure_test_environment(monkeypatch=monkeypatch, database_path=database_path)
+    fields = dict(parse_qsl(build_context_init_data()))
+    if signature_source == "init-data":
+        fields["hash"] = invalid_signature
+        init_data = urlencode(fields)
+        expected_detail = "init_data hash is invalid."
+    else:
+        token = fields["start_param"]
+        envelope = json.loads(base64.b32decode(token + "=" * (-len(token) % 8)))
+        envelope["signature"] = invalid_signature
+        fields["start_param"] = (
+            base64.b32encode(json.dumps(envelope, separators=(",", ":")).encode())
+            .decode()
+            .rstrip("=")
+        )
+        # Keep the outer Telegram signature valid so the inner launch-token
+        # validator is actually reached rather than rejected by the first gate.
+        init_data = build_signed_init_data(fields)
+        expected_detail = "TMA launch token is invalid."
+
+    telegram_client = MutableTelegramAdministratorsClient([123])
+    # No lifespan: exercise the HTTP error response without starting workers.
+    client = TestClient(
+        create_app_with_telegram_client(telegram_client), raise_server_exceptions=False
+    )
+    response = client.get(
+        "/api/tma/bootstrap", headers={"X-Telegram-Init-Data": init_data}
+    )
+
+    assert telegram_client.calls == 0
+    with database_connection(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM chats").fetchone()[0] == 0
+    assert response.status_code == 401
+    assert response.json() == {"detail": expected_detail}
 
 
 def test_bootstrap_returns_verified_context_and_empty_active_contests(
